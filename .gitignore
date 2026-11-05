@@ -1,0 +1,30 @@
+node_modules/
+dist/
+dist-ssr/
+build/
+.data/
+data/
+*.local
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+.env
+.env.*
+!.env.example
+coverage/
+apps/web/public/soundfonts/*.sf2
+apps/web/public/soundfonts/*.sf3
+apps/web/public/soundfonts/*.dls
+apps/web/public/soundfonts/*.sfogg
+tmp/
+.verify/
+screenshots/*.tmp.png
+.pnpm-store/
+
+# UI 验收截图产物
+.verify-ui/
+
+# 布局审计 / 代码审查产物（本地生成，不入库）
+.audit/
+.review/

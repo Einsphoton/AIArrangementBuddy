@@ -1,0 +1,52 @@
+{
+  "_readme": [
+    "种子文件：告诉爬虫从哪里开始、翻页范围多大。",
+    "只有 type = midi-links 的来源会被通用适配器处理（页面直接列出 .mid 链接）。",
+    "其他来源需要专用适配器，先别写进来，见 scripts/crawl/SOURCES.md。",
+    "只做本地研究；文件落在 data/（gitignore），不要分发。"
+  ],
+  "_blocked": [
+    "midishrine.com   —— robots.txt: Disallow: / （明确禁止全站，不要爬）",
+    "songsterr.com    —— robots.txt 返回 403 + 无文件下载（不要爬）",
+    "ultimate-guitar  —— ToS 禁止抓取、下载需登录、内容是 Guitar Pro 而非 MIDI（走 convert-gp.mjs）",
+    "bitmidi.com      —— 文件在 /uploads/，被 robots 明确禁止（仅可抓元数据，或联系站方授权）"
+  ],
+  "_pending_adapters": [
+    "freemidi.org     —— robots Allow /，但歌曲页无直链 .mid，需专用适配器",
+    "kunstderfuge.com —— 古典 MIDI，需按作曲家分页写适配器",
+    "ichigos.com      —— 以乐谱 PDF 为主，MIDI 零散"
+  ],
+  "style": "jrpg",
+  "sources": [
+    {
+      "name": "vgmusic-snes",
+      "type": "midi-links",
+      "startUrls": ["https://www.vgmusic.com/music/console/nintendo/snes/"],
+      "follow": {
+        "pattern": "^https://www\\.vgmusic\\.com/music/console/nintendo/snes/",
+        "maxDepth": 2,
+        "maxPages": 40
+      }
+    },
+    {
+      "name": "vgmusic-nes",
+      "type": "midi-links",
+      "startUrls": ["https://www.vgmusic.com/music/console/nintendo/nes/"],
+      "follow": {
+        "pattern": "^https://www\\.vgmusic\\.com/music/console/nintendo/nes/",
+        "maxDepth": 2,
+        "maxPages": 40
+      }
+    },
+    {
+      "name": "vgmusic-ps2",
+      "type": "midi-links",
+      "startUrls": ["https://www.vgmusic.com/music/console/sony/ps2/"],
+      "follow": {
+        "pattern": "^https://www\\.vgmusic\\.com/music/console/sony/ps2/",
+        "maxDepth": 2,
+        "maxPages": 40
+      }
+    }
+  ]
+}

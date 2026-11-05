@@ -1,0 +1,41 @@
+# AI 编曲伴侣 —— 单容器部署
+#
+#   docker compose up -d        启动（首次会自动构建）
+#   docker compose logs -f      看日志
+#   docker compose down         停止（数据保留在卷里）
+#
+# 数据（工程 / 设置 / 音色库）保存在命名卷 aiab-data 中，容器重建不丢。
+
+services:
+  aiab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-arrangement-buddy:latest
+    container_name: aiab
+    restart: unless-stopped
+    ports:
+      - "${AIAB_PORT:-8787}:8787"
+    volumes:
+      - aiab-data:/data
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 如需让容器内的 Agent 调用宿主机服务（如 Ollama），可打开：
+      #   AIAB_OLLAMA_BASE: http://host.docker.internal:11434/v1
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # 容器内跑 Codex CLI 需要更多权限；默认关闭，按需开启
+    # security_opt:
+    #   - seccomp:unconfined
+
+volumes:
+  aiab-data:
+    name: aiab-data

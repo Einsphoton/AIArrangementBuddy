@@ -1,0 +1,16 @@
+node_modules
+dist
+build
+data
+.data
+.runtime
+*.log
+.git
+.gitignore
+.verify
+docs
+screenshots
+apps/web/public/soundfonts
+.env
+.env.*
+.DS_Store

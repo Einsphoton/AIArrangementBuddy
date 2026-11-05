@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "paths": {
+      "@aiab/core": ["../../packages/core/src/index.ts"],
+      "@aiab/core/*": ["../../packages/core/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

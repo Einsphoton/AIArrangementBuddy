@@ -1,0 +1,38 @@
+{
+  "name": "ai-arrangement-buddy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI 编曲伴侣 —— 浏览器里的多轨 DAW + AI 编曲 Agent",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/start.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
+    "lint": "node scripts/typecheck.mjs",
+    "test": "node scripts/test.mjs",
+    "test:ai": "node scripts/test-ai.mjs",
+    "ai:logs": "node scripts/ai-logs.mjs",
+    "soundfonts": "node scripts/fetch-soundfonts.mjs",
+    "postinstall": "node scripts/postinstall.mjs",
+    "e2e": "node scripts/e2e.mjs",
+    "verify": "node scripts/build.mjs && node scripts/test.mjs && node scripts/test-ai.mjs && node scripts/e2e.mjs",
+    "verify:ui": "node scripts/verify-ui.mjs",
+    "audit:ui": "node scripts/audit-layout.mjs",
+    "corpus:selftest": "node scripts/corpus/selftest.mjs",
+    "corpus:inspect": "node scripts/corpus/profile.mjs inspect",
+    "corpus:profile": "node scripts/corpus/profile.mjs build",
+    "crawl:run": "node scripts/crawl/run.mjs",
+    "crawl:gp": "node scripts/crawl/convert-gp.mjs",
+    "test:style": "node scripts/test-style.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3"
+  }
+}

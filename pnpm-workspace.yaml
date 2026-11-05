@@ -1,0 +1,8 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+minimumReleaseAgeExclude:
+  - '@fastify/static@10.1.9'
+  - lucide-react@1.68.0
+  - spessasynth_core@4.4.5
+  - spessasynth_lib@4.4.3
