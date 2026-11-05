@@ -5,12 +5,12 @@
  * - 直接使用各包 node_modules/.bin 下的可执行文件，不依赖全局 pnpm
  * - 端口被占用时自动顺延（8787 → 8788 …，5183 → 5184 …），并把实际地址打印出来
  */
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { pickFreePort } from './lib/ports.mjs'
+import { spawnBin } from './lib/spawn-bin.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isWin = process.platform === 'win32'
@@ -37,11 +37,10 @@ const children = []
 let shuttingDown = false
 
 function run(name, command, args, cwd, env = {}) {
-  const child = spawn(command, args, {
+  const child = spawnBin(command, args, {
     cwd,
     env: { ...process.env, FORCE_COLOR: '1', NODE_ENV: 'development', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
-    shell: isWin,
   })
   const prefix = `${COLORS[name]}[${name}]${COLORS.reset} `
   const pipe = (stream, target) => {

@@ -25,7 +25,6 @@
  * 只测试服务端链路，与 T1（tools 修复）、T2（agent/providers 修复）、
  * T4（AI 运行日志 / max_tokens 截断自愈 / 质量自检自动修复）联动。
  */
-import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -33,6 +32,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { IS_WINDOWS, spawnBin } from './lib/spawn-bin.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DATA_DIR = mkdtempSync(path.join(tmpdir(), 'aiab-ai-test-'))
@@ -344,8 +344,8 @@ function writeMockSettings() {
 
 function startServer(port) {
   const entry = path.join(ROOT, 'apps', 'server', 'src', 'index.ts')
-  const tsxBin = path.join(ROOT, 'node_modules', '.bin', 'tsx')
-  const child = spawn(tsxBin, [entry], {
+  const tsxBin = path.join(ROOT, 'node_modules', '.bin', IS_WINDOWS ? 'tsx.cmd' : 'tsx')
+  const child = spawnBin(tsxBin, [entry], {
     cwd: ROOT,
     env: {
       ...process.env,

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /** 全量类型检查：依次检查三个包，不依赖 pnpm。 */
-import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { spawnBinSync } from './lib/spawn-bin.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isWin = process.platform === 'win32'
@@ -24,7 +24,7 @@ const targets = [
 let failed = 0
 for (const [name, config] of targets) {
   process.stdout.write(`\x1b[2m检查 ${name} …\x1b[0m `)
-  const result = spawnSync(tsc, ['-p', config, '--noEmit'], { cwd: root, encoding: 'utf8' })
+  const result = spawnBinSync(tsc, ['-p', config, '--noEmit'], { cwd: root, encoding: 'utf8' })
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
     .split('\n')
     .filter((line) => line.includes('error TS'))

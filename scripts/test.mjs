@@ -7,12 +7,12 @@
  *
  * 不依赖任何测试框架，输出彩色 ✓ / ✗。
  */
-import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { IS_WINDOWS, spawnBin } from './lib/spawn-bin.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = Number(process.env.AIAB_TEST_PORT || 8899)
@@ -137,7 +137,8 @@ async function main() {
   console.log(`${c.dim}数据目录 ${dataDir}${c.reset}\n`)
 
   const serverEntry = path.join(root, 'apps/server/src/index.ts')
-  const child = spawn(path.join(root, 'node_modules/.bin/tsx'), [serverEntry], {
+  const tsxBin = path.join(root, 'node_modules', '.bin', IS_WINDOWS ? 'tsx.cmd' : 'tsx')
+  const child = spawnBin(tsxBin, [serverEntry], {
     cwd: root,
     env: {
       ...process.env,

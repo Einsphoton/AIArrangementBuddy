@@ -28,3 +28,6 @@ screenshots/*.tmp.png
 # 布局审计 / 代码审查产物（本地生成，不入库）
 .audit/
 .review/
+
+# 启动器自动下载的 Node 运行时 / npm 缓存（本地生成，不入库）
+.runtime/

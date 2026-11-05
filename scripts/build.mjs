@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /** 生产构建：前端（Vite） + 后端（esbuild 单文件打包）。不依赖全局 pnpm。 */
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { spawnBin } from './lib/spawn-bin.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isWin = process.platform === 'win32'
@@ -22,7 +22,7 @@ function resolveBin(pkgDir, name) {
 function step(name, command, args, cwd) {
   return new Promise((resolve, reject) => {
     console.log(`\x1b[33m▶\x1b[0m ${name}`)
-    const child = spawn(command, args, { cwd, stdio: 'inherit', shell: isWin })
+    const child = spawnBin(command, args, { cwd, stdio: 'inherit' })
     child.on('error', reject)
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${name} 失败（code=${code}）`))))
   })

@@ -20,6 +20,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { pickFreePort } from './lib/ports.mjs'
+import { spawnBinSync } from './lib/spawn-bin.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -89,10 +90,9 @@ function resolvePnpm() {
 
 function runPnpm(arguments_, options = {}) {
   const { command, base } = resolvePnpm()
-  return spawnSync(command, [...base, ...arguments_], {
+  return spawnBinSync(command, [...base, ...arguments_], {
     cwd: root,
     stdio: 'inherit',
-    shell: isWin,
     env: { ...process.env, npm_config_cache: process.env.npm_config_cache || path.join(root, '.runtime/npm-cache') },
     ...options,
   })
