@@ -27,7 +27,14 @@ import {
 import { createInstrumentVoice, noteDurationFor } from './synth'
 import type { SoundfontEngine } from './soundfont'
 import type { RenderOptions } from './types'
-import { clamp, softClip } from './util'
+import { clamp } from './util'
+import {
+  applyMasterChainOffline,
+  autoMakeupFor,
+  buildDuckAutomation,
+  preloadOfflineCalibration,
+  renderTracksWithChainsOffline,
+} from './offlineChain'
 
 /* ------------------------------------------------------------------ */
 /* WAV 编码                                                            */
@@ -151,10 +158,9 @@ async function renderSynthGroup(
   Tone.setContext(new Tone.Context(offline))
   const disposables: { dispose(): void }[] = []
   try {
-    const master = new Tone.Gain(clamp(project.masterVolume, 0, 1.5)).toDestination()
-    const limiter = new Tone.Limiter(-1).connect(master)
-    const mix = new Tone.Gain(1).connect(limiter)
-    disposables.push(master, limiter, mix)
+    /* 母线/母带链在最后对混好的 PCM 统一应用（见 renderProjectToWav），这里只做轨道混音与发送 */
+    const mix = new Tone.Gain(1).toDestination()
+    disposables.push(mix)
 
     // ---- 共享效果总线（wet=1，逐轨用 send 增益控制发送量）----
     const reverb = new Tone.Reverb({ decay: 2.6, preDelay: 0.02, wet: 1 }).connect(mix)
@@ -183,7 +189,48 @@ async function renderSynthGroup(
       const sendReverb = new Tone.Gain(reverbAmount(track))
       const sendDelay = new Tone.Gain(delayAmount(track))
       const sendChorus = new Tone.Gain(chorusAmount(track))
-      voice.output.connect(channel)
+      disposables.push(channel, widener, sendReverb, sendDelay, sendChorus)
+
+      /* P6-A：每轨 mixChain（EQ → 压缩 → makeup 自动补偿 → duckGain）重建；sends 仍按实时取自 voice 输出 */
+      const chain = track.mixChain
+      const chainEnabled = Boolean(chain && chain.enabled !== false)
+      let chainOut: Tone.ToneAudioNode = voice.output
+      if (chain && chainEnabled) {
+        const eqLow = new Tone.Filter({ type: 'lowshelf', frequency: chain.eq.lowShelf.hz, gain: chain.eq.lowShelf.gainDb })
+        const eqMid = new Tone.Filter({ type: 'peaking', frequency: chain.eq.mid.hz, gain: chain.eq.mid.gainDb, Q: chain.eq.mid.q ?? 0.9 })
+        const eqHigh = new Tone.Filter({ type: 'highshelf', frequency: chain.eq.highShelf.hz, gain: chain.eq.highShelf.gainDb })
+        const comp = new Tone.Compressor({
+          threshold: chain.compressor.thresholdDb,
+          ratio: chain.compressor.ratio,
+          attack: chain.compressor.attackSec,
+          release: chain.compressor.releaseSec,
+          knee: chain.compressor.kneeDb,
+        })
+        const makeup = new Tone.Gain(
+          Math.pow(10, (chain.makeupDb - autoMakeupFor(chain.compressor.thresholdDb, chain.compressor.ratio, chain.compressor.kneeDb)) / 20),
+        )
+        const duckGain = new Tone.Gain(1)
+        const automation = buildDuckAutomation(project, track, duration, secPerBeat)
+        if (automation) {
+          try {
+            duckGain.gain.setValueAtTime(automation.gains[0] ?? 1, 0)
+            for (let i = 1; i < automation.times.length; i += 1) {
+              duckGain.gain.linearRampToValueAtTime(automation.gains[i], automation.times[i])
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        voice.output.connect(eqLow)
+        eqLow.connect(eqMid)
+        eqMid.connect(eqHigh)
+        eqHigh.connect(comp)
+        comp.connect(makeup)
+        makeup.connect(duckGain)
+        chainOut = duckGain
+        disposables.push(eqLow, eqMid, eqHigh, comp, makeup, duckGain)
+      }
+      chainOut.connect(channel)
       channel.connect(widener)
       widener.connect(mix)
       voice.output.connect(sendReverb)
@@ -192,7 +239,6 @@ async function renderSynthGroup(
       sendDelay.connect(delay)
       voice.output.connect(sendChorus)
       sendChorus.connect(chorus)
-      disposables.push(channel, widener, sendReverb, sendDelay, sendChorus)
 
       const isDrum = track.kind === 'drum' || instrument.isDrumKit
       for (const clip of track.clips) {
@@ -290,48 +336,84 @@ export async function renderProjectToWav(
   }
 
   report(0.01)
-  const pcm = emptyPcm(Math.ceil(duration * sampleRate), sampleRate)
+  /* P6-A：先标定所有压缩器的浏览器自动补偿（导出链与实时一致） */
+  await preloadOfflineCalibration(project)
 
-  // 1) 采样轨
-  if (routing.soundfont.length > 0 && soundfont?.usable) {
-    try {
-      const subProject: Project = { ...project, tracks: routing.soundfont }
-      const midiBytes = projectToMidiBytes(subProject)
-      const midiBuffer = midiBytes.buffer.slice(
-        midiBytes.byteOffset,
-        midiBytes.byteOffset + midiBytes.byteLength,
-      ) as ArrayBuffer
-      const sfBuffer = await soundfont.renderOffline(midiBuffer, duration, sampleRate, (ratio) => {
-        report(0.02 + ratio * 0.55)
-      })
-      addBuffer(pcm, sfBuffer)
-    } catch (error) {
-      // 采样渲染失败不影响导出：退回归合成器渲染同一批轨道
-      console.warn('[render] SoundFont 离线渲染失败，回退合成器', error)
-      routing.synth.push(...routing.soundfont)
-      routing.soundfont = []
+  const pcm = emptyPcm(Math.ceil(duration * sampleRate), sampleRate)
+  const soundfontTracks = [...routing.soundfont]
+  const synthTracks = [...routing.synth]
+
+  // 1) 采样轨：逐轨渲染原始 buffer（每轨单独 MIDI），再统一重建每轨处理链（EQ/压缩/duck）+ 音量声像
+  if (soundfontTracks.length > 0 && soundfont?.usable) {
+    const rawBuffers = new Map<string, AudioBuffer>()
+    const fallbackTracks: Track[] = []
+    for (let index = 0; index < soundfontTracks.length; index += 1) {
+      const track = soundfontTracks[index]
+      report(0.02 + (0.48 * index) / Math.max(1, soundfontTracks.length))
+      try {
+        const subProject: Project = { ...project, tracks: [track] }
+        const midiBytes = projectToMidiBytes(subProject)
+        const midiBuffer = midiBytes.buffer.slice(
+          midiBytes.byteOffset,
+          midiBytes.byteOffset + midiBytes.byteLength,
+        ) as ArrayBuffer
+        rawBuffers.set(track.id, await soundfont.renderOffline(midiBuffer, duration, sampleRate))
+      } catch (error) {
+        console.warn('[render] SoundFont 单轨渲染失败，回退合成器', track.name, error)
+        fallbackTracks.push(track)
+      }
     }
+    if (rawBuffers.size > 0) {
+      try {
+        const chained = await renderTracksWithChainsOffline(project, rawBuffers, duration, sampleRate)
+        if (chained) addBuffer(pcm, chained)
+        report(0.56)
+      } catch (error) {
+        // 处理链重建失败不影响导出：按原始采样电平回退，避免整段静音
+        console.warn('[render] 采样轨处理链离线重建失败，按未处理电平导出', error)
+        for (const buffer of rawBuffers.values()) addBuffer(pcm, buffer)
+      }
+    }
+    synthTracks.push(...fallbackTracks)
   }
 
-  // 2) 合成器轨（含回退后的采样轨）
-  if (routing.synth.length > 0) {
+  // 2) 合成器轨（含回退后的采样轨；内部已重建每轨链与 duck）
+  if (synthTracks.length > 0) {
     const synthBuffer = await renderSynthGroup(
       project,
-      routing.synth,
+      synthTracks,
       duration,
       sampleRate,
       Boolean(options.metronome),
-      (ratio) => report(0.58 + ratio * 0.34),
+      (ratio) => report(0.58 + ratio * 0.22),
     )
     addBuffer(pcm, synthBuffer)
   }
 
-  // 3) 主音量 + 软限幅
-  const masterVolume = clamp(project.masterVolume, 0, 1.5)
-  for (let i = 0; i < pcm.left.length; i++) {
-    pcm.left[i] = softClip(pcm.left[i] * masterVolume)
-    pcm.right[i] = softClip(pcm.right[i] * masterVolume)
+  // 3) 母线 / 母带链：bus EQ + 三段压缩(multiband) + 整体压缩 + makeup + masterVolume + limiter
+  report(0.86)
+  const OfflineCtor = window.OfflineAudioContext
+  let mixBuffer: AudioBuffer
+  try {
+    mixBuffer = new AudioBuffer({ length: pcm.left.length, numberOfChannels: 2, sampleRate })
+  } catch {
+    mixBuffer = new OfflineCtor(2, Math.max(1, pcm.left.length), sampleRate).createBuffer(
+      2,
+      Math.max(1, pcm.left.length),
+      sampleRate,
+    )
+  }
+  mixBuffer.copyToChannel(pcm.left as Float32Array<ArrayBuffer>, 0)
+  mixBuffer.copyToChannel(pcm.right as Float32Array<ArrayBuffer>, 1)
+  let finalBuffer: AudioBuffer = mixBuffer
+  try {
+    finalBuffer = await applyMasterChainOffline(project, mixBuffer, sampleRate)
+  } catch (error) {
+    // 母线链重建失败：按未处理电平导出（仍保证有 WAV）
+    console.warn('[render] 母线/母带链离线重建失败，按未处理电平导出', error)
   }
   report(1)
-  return encodeWav(pcm.left, pcm.right, sampleRate)
+  const left = finalBuffer.getChannelData(0)
+  const right = finalBuffer.numberOfChannels > 1 ? finalBuffer.getChannelData(1) : left
+  return encodeWav(new Float32Array(left), new Float32Array(right), sampleRate)
 }

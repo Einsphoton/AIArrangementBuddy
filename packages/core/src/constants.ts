@@ -107,7 +107,16 @@ export const CHORDS: Record<ChordQualityId, ChordDefinition> = {
 }
 
 /** 音乐风格 */
-export type StyleId = 'classical' | 'rock' | 'electronic' | 'jazz' | 'cinematic' | 'pop' | 'folk'
+export type StyleId =
+  | 'classical'
+  | 'rock'
+  | 'electronic'
+  | 'jazz'
+  | 'cinematic'
+  | 'pop'
+  | 'folk'
+  | 'jrock'
+  | 'jrpg'
 
 export interface StyleDefinition {
   id: StyleId
@@ -201,6 +210,41 @@ export const STYLES: Record<StyleId, StyleDefinition> = {
     defaultScale: 'major',
     accent: '#a3b86c',
     recommendedInstruments: ['guitar.acoustic', 'piano.grand', 'strings.cello', 'woodwinds.flute'],
+  },
+  jrock: {
+    id: 'jrock',
+    name: '日式摇滚',
+    nameEn: 'J-Rock',
+    description: '双吉他 riff 与和声、16 分贝斯驱动与军鼓 backbeat，明快而带青春感的日系摇滚',
+    tempoRange: [140, 200],
+    defaultTempo: 172,
+    defaultScale: 'minor',
+    accent: '#ff2e63',
+    recommendedInstruments: ['guitar.electric.dist', 'guitar.electric', 'guitar.bass', 'drums.acoustic', 'piano.electric', 'organ.rock'],
+  },
+  jrpg: {
+    id: 'jrpg',
+    name: 'JRPG 配乐',
+    nameEn: 'JRPG Score',
+    description: '管弦与摇滚混合的游戏配乐：低音弦乐 ostinato、铜管切分、打击乐重音与失真吉他铺底，适合战斗与冒险场景',
+    tempoRange: [70, 190],
+    defaultTempo: 144,
+    defaultScale: 'minor',
+    accent: '#c9a227',
+    recommendedInstruments: [
+      'strings.ensemble',
+      'brass.horn',
+      'brass.trumpet',
+      'timpani',
+      'choir',
+      'piano.grand',
+      'guitar.electric.dist',
+      'guitar.bass',
+      'drums.acoustic',
+      'woodwinds.flute',
+      'harp',
+      'organ.pipe',
+    ],
   },
 }
 

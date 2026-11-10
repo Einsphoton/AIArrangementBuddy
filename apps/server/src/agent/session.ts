@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 外部 Agent（Codex / DSH）会话目录。
  *
  * 外部 Agent 本身没有我们的工程快照，所以每次运行创建一个会话目录：
@@ -8,7 +8,7 @@
  */
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { projectSchema, type Project } from '@aiab/core'
+import { migrateProject, type Project } from '@aiab/core'
 import { agentSessionsDir } from '../config.js'
 
 export interface ExternalAgentSession {
@@ -36,9 +36,7 @@ export function createExternalSession(runId: string, initialProject: Project): E
   const readProject = (): Project | null => {
     try {
       const raw = JSON.parse(readFileSync(projectFile, 'utf8')) as unknown
-      const parsed = projectSchema.safeParse(raw)
-      if (!parsed.success) return null
-      return parsed.data as unknown as Project
+      return migrateProject(raw)
     } catch {
       return null
     }

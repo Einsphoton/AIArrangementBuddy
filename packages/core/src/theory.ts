@@ -405,14 +405,14 @@ export function romanNumerals(key: string, scale: ScaleId, seventh = false): str
 export const PROGRESSION_PRESETS: { id: string; name: string; styles: string[]; romans: string[] }[] = [
   { id: 'axis', name: '流行万能进行', styles: ['pop', 'rock'], romans: ['I', 'V', 'vi', 'IV'] },
   { id: 'canon', name: '卡农进行', styles: ['classical', 'pop'], romans: ['I', 'V', 'vi', 'iii', 'IV', 'I', 'IV', 'V'] },
-  { id: 'minorEpic', name: '史诗小调', styles: ['cinematic', 'electronic'], romans: ['i', 'VI', 'III', 'VII'] },
+  { id: 'minorEpic', name: '史诗小调', styles: ['cinematic', 'electronic', 'jrpg'], romans: ['i', 'VI', 'III', 'VII'] },
   { id: 'jazz251', name: '爵士 II-V-I', styles: ['jazz'], romans: ['ii7', 'V7', 'Imaj7', 'Imaj7'] },
   { id: 'blues', name: '12 小节布鲁斯', styles: ['jazz', 'rock'], romans: ['I7', 'I7', 'I7', 'I7', 'IV7', 'IV7', 'I7', 'I7', 'V7', 'IV7', 'I7', 'V7'] },
   { id: 'phrygian', name: '弗里吉亚进行', styles: ['cinematic', 'rock'], romans: ['i', 'bII', 'bVII', 'i'] },
   { id: 'edm', name: 'EDM 循环', styles: ['electronic'], romans: ['vi', 'IV', 'I', 'V'] },
   { id: 'ballad', name: '抒情进行', styles: ['pop', 'folk'], romans: ['I', 'iii', 'IV', 'V'] },
   { id: 'andalusian', name: '安达卢西亚终止', styles: ['classical', 'folk', 'rock'], romans: ['i', 'bVII', 'bVI', 'V'] },
-  { id: 'royalRoad', name: '王道进行', styles: ['pop', 'jazz', 'folk'], romans: ['IV', 'V', 'iii', 'vi'] },
+  { id: 'royalRoad', name: '王道进行', styles: ['pop', 'jazz', 'folk', 'jrock'], romans: ['IV', 'V', 'iii', 'vi'] },
 ]
 
 /** 把和弦序列按时值平铺成时间轴（拍） */

@@ -7,9 +7,26 @@
  * - 时间单位统一为「拍（beat）」，1 拍 = 四分音符；1 小节 = beatsPerBar 拍。
  */
 import { z } from 'zod'
+import { mixChainSchema } from './mixChain.js'
+import { masterChainSchema } from './masterChain.js'
 import type { ChordQualityId, ScaleId, StyleId, TimeSignatureId } from './constants.js'
+import {
+  analysisRecordSchema,
+  assetRefSchema,
+  audioClipSchema,
+  type AnalysisRecord,
+  type AssetRef,
+  type AudioClip,
+  type Provenance,
+  type Take,
+} from './audio.js'
 
-export const PROJECT_VERSION = 1
+/**
+ * 工程版本。
+ * - v1：纯 MIDI
+ * - v2：加入音频域（audioClips / assets / analyses），纯增量，v1 工程可直接加载
+ */
+export const PROJECT_VERSION = 2
 
 /* ------------------------------------------------------------------ */
 /* 基础 ID                                                             */
@@ -154,7 +171,7 @@ export const trackSchema = z.object({
   name: z.string(),
   /** UI 颜色（hex） */
   color: z.string(),
-  kind: z.enum(['instrument', 'drum']).default('instrument'),
+  kind: z.enum(['instrument', 'drum', 'audio']).default('instrument'),
   /** 乐器 id，指向内置乐器目录 */
   instrumentId: z.string(),
   /** 情绪预设 id（乐器内的子预设） */
@@ -173,9 +190,16 @@ export const trackSchema = z.object({
   delaySend: z.number().min(0).max(1).default(0.06),
   /** 八度偏移 */
   octaveShift: z.number().min(-3).max(3).default(0),
+  /** 音频处理链（P3：EQ + 压缩），空 = 不处理 */
+  mixChain: mixChainSchema.optional(),
   clips: z.array(clipSchema).default([]),
+  /** 音频片段（Studio 形态）：与 MIDI clips 平行，只存资产引用 */
+  audioClips: z.array(audioClipSchema).default([]),
 })
-export type Track = Omit<z.infer<typeof trackSchema>, 'clips'> & { clips: Clip[] }
+export type Track = Omit<z.infer<typeof trackSchema>, 'clips' | 'audioClips'> & {
+  clips: Clip[]
+  audioClips: AudioClip[]
+}
 
 /* ------------------------------------------------------------------ */
 /* 段落 / 工程                                                         */
@@ -201,6 +225,10 @@ export const projectSchema = z.object({
   id: z.string(),
   name: z.string(),
   version: z.number().default(PROJECT_VERSION),
+  /** 主要风格（Studio 新建时选择；留空 = 未知/混合，老工程没有这个字段） */
+  style: z.string().optional(),
+  /** 用途场景 id（battle/town/ending…），用于展示创作意图与二次生成 */
+  scene: z.string().optional(),
   tempo: z.number().min(20).max(320).default(110),
   timeSignature: timeSignatureSchema,
   key: z.string().default('C'),
@@ -211,6 +239,12 @@ export const projectSchema = z.object({
   sections: z.array(sectionSchema).default([]),
   /** 全曲和弦进行（每小节/每几拍一个） */
   chords: z.array(chordSpecSchema).default([]),
+  /** 资产登记表：音频/波形/MIDI/分析产物的引用集中在此，工程本身不内联二进制 */
+  assets: z.array(assetRefSchema).default([]),
+  /** 音频分析结果（bpm / 和弦 / 节拍锚点） */
+  analyses: z.array(analysisRecordSchema).default([]),
+  /** 总线 / 母带处理链（P3.2：总线 EQ + 母线压缩 + 限幅上限），空 = 不处理 */
+  masterChain: masterChainSchema.optional(),
   loop: z.object({ enabled: z.boolean(), startBeat: z.number(), endBeat: z.number() }).default({
     enabled: false,
     startBeat: 0,
@@ -219,10 +253,15 @@ export const projectSchema = z.object({
   createdAt: z.number(),
   updatedAt: z.number(),
 })
-export type Project = Omit<z.infer<typeof projectSchema>, 'scale' | 'tracks' | 'chords'> & {
+export type Project = Omit<
+  z.infer<typeof projectSchema>,
+  'scale' | 'tracks' | 'chords' | 'assets' | 'analyses'
+> & {
   scale: ScaleId
   tracks: Track[]
   chords: ChordSpec[]
+  assets: AssetRef[]
+  analyses: AnalysisRecord[]
   timeSignature: TimeSignature
   loop: { enabled: boolean; startBeat: number; endBeat: number }
 }
@@ -274,6 +313,7 @@ export function createTrack(partial: Partial<Track> & { instrumentId: string; em
     delaySend: partial.delaySend ?? 0.06,
     octaveShift: partial.octaveShift ?? 0,
     clips: partial.clips ?? [],
+    audioClips: partial.audioClips ?? [],
   }
 }
 
@@ -309,6 +349,7 @@ export function createEmptyProject(opts: CreateProjectOptions = {}): Project {
     id: newId('p'),
     name: opts.name ?? '未命名工程',
     version: PROJECT_VERSION,
+    ...(opts.style ? { style: opts.style } : {}),
     tempo: opts.tempo ?? 110,
     timeSignature: { numerator: num || 4, denominator: den || 4 },
     key: opts.key ?? 'C',
@@ -318,6 +359,8 @@ export function createEmptyProject(opts: CreateProjectOptions = {}): Project {
     tracks: [],
     sections: [],
     chords: [],
+    assets: [],
+    analyses: [],
     loop: { enabled: false, startBeat: 0, endBeat: 16 },
     createdAt: now,
     updatedAt: now,
@@ -352,6 +395,9 @@ export function projectEndBeat(project: Project): number {
     for (const clip of track.clips) {
       end = Math.max(end, clip.startBeat + clip.lengthBeats)
     }
+    for (const clip of track.audioClips ?? []) {
+      end = Math.max(end, clip.startBeat + clip.lengthBeats)
+    }
   }
   if (project.sections.length) {
     const last = project.sections[project.sections.length - 1]
@@ -378,3 +424,93 @@ export function trackPitchRange(track: Track): { min: number; max: number } {
   if (min > max) return { min: 48, max: 72 }
   return { min: Math.max(0, min - 6), max: Math.min(127, max + 6) }
 }
+
+/* ------------------------------------------------------------------ */
+/* Studio 扩展：资产 / 音频片段工厂与版本迁移                            */
+/* ------------------------------------------------------------------ */
+
+export function createAssetRef(
+  partial: Partial<AssetRef> & { sha256: string; kind: AssetRef['kind'] },
+): AssetRef {
+  return {
+    id: partial.id ?? newId('as'),
+    sha256: partial.sha256,
+    kind: partial.kind,
+    bytes: partial.bytes ?? 0,
+    durationMs: partial.durationMs,
+    sampleRate: partial.sampleRate,
+    channels: partial.channels,
+    residency: partial.residency ?? 'local',
+    deviceId: partial.deviceId,
+    localPath: partial.localPath,
+    previewUrl: partial.previewUrl,
+    name: partial.name,
+    createdAt: partial.createdAt ?? Date.now(),
+  }
+}
+
+export function createAudioClip(
+  partial: Partial<AudioClip> & { trackId: string; assetId: string; durationSec: number },
+): AudioClip {
+  return {
+    id: partial.id ?? newId('ac'),
+    trackId: partial.trackId,
+    name: partial.name ?? '音频片段',
+    color: partial.color,
+    startBeat: partial.startBeat ?? 0,
+    lengthBeats: partial.lengthBeats ?? Math.max(0.25, (partial.durationSec * 120) / 60),
+    assetId: partial.assetId,
+    offsetSec: partial.offsetSec ?? 0,
+    durationSec: partial.durationSec,
+    gainDb: partial.gainDb ?? 0,
+    fadeInBeats: partial.fadeInBeats ?? 0,
+    fadeOutBeats: partial.fadeOutBeats ?? 0,
+    stretchRatio: partial.stretchRatio ?? 1,
+    muted: partial.muted ?? false,
+    provenance: partial.provenance,
+    takes: partial.takes ?? [],
+    activeTakeId: partial.activeTakeId,
+  }
+}
+
+export function createTake(partial: Partial<Take> & { assetId: string; provenance: Provenance }): Take {
+  return {
+    id: partial.id ?? newId('tk'),
+    assetId: partial.assetId,
+    label: partial.label ?? '',
+    provenance: partial.provenance,
+    favorite: partial.favorite ?? false,
+    createdAt: partial.createdAt ?? Date.now(),
+  }
+}
+
+/**
+ * 工程版本迁移：把任意版本的原始工程对象升级到当前版本。
+ * 只补齐新增字段，**不修改已有语义**；解析失败会抛出 zod 错误由调用方处理。
+ */
+export function migrateProject(raw: unknown): Project {
+  const obj = (raw ?? {}) as Record<string, unknown>
+  const rawTracks = Array.isArray(obj.tracks) ? obj.tracks : []
+  const upgraded = {
+    ...obj,
+    version: PROJECT_VERSION,
+    assets: Array.isArray(obj.assets) ? obj.assets : [],
+    analyses: Array.isArray(obj.analyses) ? obj.analyses : [],
+    tracks: rawTracks.map((track) => {
+      const t = (track ?? {}) as Record<string, unknown>
+      const kind = t.kind === 'audio' || t.kind === 'drum' ? t.kind : 'instrument'
+      return {
+        ...t,
+        kind,
+        clips: Array.isArray(t.clips) ? t.clips : [],
+        audioClips: Array.isArray(t.audioClips) ? t.audioClips : [],
+      }
+    }),
+  }
+  return projectSchema.parse(upgraded) as Project
+}
+
+export function isAudioTrack(track: Track): boolean {
+  return track.kind === 'audio'
+}
+

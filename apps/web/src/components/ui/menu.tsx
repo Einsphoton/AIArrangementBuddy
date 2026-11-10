@@ -44,6 +44,8 @@ export interface MenuItemProps {
   /** 是否显示右侧展开箭头（用于后续升级为子菜单） */
   submenu?: boolean
   className?: string
+  /** 额外的 data-* 属性（自动化验收用，例如 data-repaint-trigger / data-take-id） */
+  dataAttr?: Record<string, string | undefined>
 }
 
 export function MenuItem({
@@ -58,9 +60,11 @@ export function MenuItem({
   onClick,
   submenu,
   className,
+  dataAttr,
 }: MenuItemProps) {
   return (
     <button
+      {...(dataAttr as React.ButtonHTMLAttributes<HTMLButtonElement>)}
       type="button"
       role="menuitem"
       disabled={disabled}

@@ -490,6 +490,22 @@ const STYLE_ALIASES: Record<string, string> = {
   acoustic: 'folk',
   singer: 'folk',
   民谣: 'folk',
+  jrock: 'jrock',
+  'j-rock': 'jrock',
+  japanese: 'jrock',
+  japaneserock: 'jrock',
+  日摇: 'jrock',
+  日式摇滚: 'jrock',
+  日本摇滚: 'jrock',
+  jrpg: 'jrpg',
+  'j-rpg': 'jrpg',
+  vgm: 'jrpg',
+  gamemusic: 'jrpg',
+  videogame: 'jrpg',
+  videogamemusic: 'jrpg',
+  游戏配乐: 'jrpg',
+  游戏音乐: 'jrpg',
+  jrpg配乐: 'jrpg',
 }
 
 const WRITE_MODE_ALIASES: Record<string, string> = {

@@ -115,6 +115,24 @@ export const STYLE_ROLES: Record<StyleId, RoleSpec[]> = {
     { instrumentId: 'woodwinds.flute', emotionId: 'airy', kind: 'counter', octave: 5, name: '长笛对白', densityDelta: -0.18 },
     { instrumentId: 'strings.cello', emotionId: 'deep', kind: 'pad', octave: 2, name: '大提琴铺底', densityDelta: -0.3 },
   ],
+  jrock: [
+    { instrumentId: 'drums.acoustic', emotionId: 'power', kind: 'drums', octave: 2, name: '鼓组（军鼓 backbeat）' },
+    { instrumentId: 'guitar.bass', emotionId: 'pick', kind: 'bass', octave: 2, name: '贝斯（16 分驱动）', densityDelta: 0.06 },
+    { instrumentId: 'guitar.electric.dist', emotionId: 'highGain', kind: 'riff', octave: 3, name: '节奏吉他 riff' },
+    { instrumentId: 'guitar.electric', emotionId: 'crunch', kind: 'counter', octave: 4, name: '和声吉他', densityDelta: -0.16 },
+    { instrumentId: 'piano.electric', emotionId: 'tine', kind: 'chords', octave: 3, name: '电钢铺底', densityDelta: -0.28 },
+    { instrumentId: 'organ.rock', emotionId: 'drawbar', kind: 'pad', octave: 4, name: '风琴铺底', densityDelta: -0.32 },
+  ],
+  jrpg: [
+    { instrumentId: 'drums.acoustic', emotionId: 'power', kind: 'drums', octave: 2, name: '鼓组' },
+    { instrumentId: 'strings.cello', emotionId: 'marcato', kind: 'bass', octave: 2, name: '低音弦乐 ostinato' },
+    { instrumentId: 'guitar.electric.dist', emotionId: 'highGain', kind: 'riff', octave: 3, name: '失真吉他铺底', densityDelta: -0.18 },
+    { instrumentId: 'brass.trumpet', emotionId: 'fanfare', kind: 'chords', octave: 4, name: '铜管切分', patternId: 'stab' },
+    { instrumentId: 'strings.ensemble', emotionId: 'epic', kind: 'pad', octave: 4, name: '弦乐群铺底' },
+    { instrumentId: 'timpani', emotionId: 'marcato', kind: 'bass', octave: 2, name: '定音鼓重音', densityDelta: -0.55, gate: 0.16 },
+    { instrumentId: 'piano.grand', emotionId: 'dramatic', kind: 'chords', octave: 3, name: '钢琴和声', densityDelta: -0.3 },
+    { instrumentId: 'harp', emotionId: 'celestial', kind: 'arp', octave: 5, name: '竖琴琶音', densityDelta: -0.35 },
+  ],
 }
 
 export function defaultSmartParams(overrides: Partial<SmartParams> = {}): SmartParams {
@@ -242,6 +260,8 @@ const SECTION_NAMES: Record<StyleId, string[]> = {
   cinematic: ['铺陈', '推进', '高潮', '收束'],
   pop: ['前奏', '主歌', '副歌', '尾声'],
   folk: ['前奏', '主歌', '副歌', '尾奏'],
+  jrock: ['前奏', 'A 段', '副歌', '尾奏'],
+  jrpg: ['前奏', '主题', '高潮', '尾声'],
 }
 
 /** 前奏类段落名（用于把主旋律推迟到第 2 段进入） */
@@ -563,6 +583,8 @@ const MELODY_INSTRUMENTS: Record<StyleId, MelodyInstrumentSpec> = {
   cinematic: { instrumentId: 'strings.violin', emotionId: 'expressive', octave: 5 },
   pop: { instrumentId: 'piano.grand', emotionId: 'clear', octave: 4 },
   folk: { instrumentId: 'woodwinds.flute', emotionId: 'airy', octave: 5 },
+  jrock: { instrumentId: 'guitar.electric', emotionId: 'gain', octave: 5 },
+  jrpg: { instrumentId: 'strings.violin', emotionId: 'expressive', octave: 5 },
 }
 
 /** 某风格的「主旋律」推荐音色 */
@@ -611,14 +633,14 @@ export function arrangeFromMelody(opts: ArrangeOptions & { melody: NoteEvent[] }
   const key = opts.key || detected?.key || 'C'
   const scale = opts.scale ?? detected?.scale ?? STYLES[style].defaultScale
 
-  // 1) 和声：优先用户给的和弦，否则按旋律配（爵士/电子用七和弦并允许副属）
-  const seventh = style === 'jazz' || style === 'electronic' || style === 'cinematic'
+  // 1) 和声：优先用户给的和弦，否则按旋律配（爵士/电子/影视/JRPG 用七和弦并允许副属）
+  const seventh = style === 'jazz' || style === 'electronic' || style === 'cinematic' || style === 'jrpg'
   const harmonized = opts.chords.length
     ? opts.chords
     : harmonizeMelody(melody, key, scale, barBeats, bars * barBeats, {
         seventh,
         cadence: true,
-        secondaryDominants: style === 'jazz',
+        secondaryDominants: style === 'jazz' || style === 'jrpg',
       })
   const chords = fitChords(harmonized, bars, barBeats, key, scale)
 
@@ -826,6 +848,8 @@ const STYLE_DEFAULT_KEY: Record<StyleId, string> = {
   cinematic: 'D',
   pop: 'C',
   folk: 'G',
+  jrock: 'B',
+  jrpg: 'D',
 }
 
 /** 从零生成一首完整的编曲（工程） */
@@ -853,7 +877,7 @@ export function composeProject(opts: ComposeOptions): Project {
   // 段落与和声
   const sections = buildSections(bars, style)
   project.sections = sections
-  const seventhStyle = style === 'jazz' || style === 'electronic' || style === 'cinematic'
+  const seventhStyle = style === 'jazz' || style === 'electronic' || style === 'cinematic' || style === 'jrpg'
   const chords = buildProgressionChords(
     opts.progression?.length ? opts.progression : STYLE_PROGRESSIONS[style],
     key,

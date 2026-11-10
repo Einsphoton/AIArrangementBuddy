@@ -9,11 +9,16 @@
  *   来自 fetch 的 ReadableStream 读取进度；状态里同时给出 loading / error。
  * - **失败回退**：worklet 注册失败、音色库解析失败、网络失败都会把 `loaded` 置 false，
  *   引擎据此自动回退到合成器，绝不阻塞播放。
- * - **按轨分通道**：一个 WorkletSynthesizer 用 16 个 MIDI 通道承载多轨，
- *   每轨音量/声像/混响/合唱通过 CC7 / CC10 / CC91 / CC93 控制。
- *   限制：回复音源内部的混响/合唱是全局效果器，无法像合成器那样逐轨发送到
- *   我们自己的 Tone.Reverb / FeedbackDelay 总线；延迟发送（delaySend）在采样模式下
- *   不生效（用 CC93 的合唱做近似色彩），轨道数超过 16 时按哈希共用通道。
+ * - **按轨分通道**：一个 WorkletSynthesizer 用 16 个 MIDI 通道承载多轨。
+ *   P3.1 起支持**逐通道输出**（`connectChannel` / `disconnectChannel`）：
+ *   引擎把每个通道接到该轨的 `sfIn`，让它和合成器/音频片段一样经过每轨
+ *   EQ / 压缩 / 推子处理链；此时主输出会被关掉（避免双声），
+ *   音量/声像/混响/合唱改由 Tone.Channel 与节点链的 send 负责，
+ *   CC7/CC10/CC91/CC93 固定为中性值，仅保留 CC74 brightness / CC1 modulation。
+ *   若通道不够（>16 条采样轨，出现通道共用）或运行时缺少 connectChannel，
+ *   引擎会回退到旧的全局输出模式（主输出直连 destination，不经过每轨处理链）。
+ *   限制：采样音源内部的混响/合唱是全局效果器；per-channel 模式下混响/合唱/延迟
+ *   发送由该轨**处理链之后**的 send 抽头负责（postSend 门控），global 模式下 delaySend 仍不生效。
  * - **离线渲染**：`renderOffline()` 用 OfflineAudioContext + WorkletSynthesizer.startOfflineRender
  *   渲染 MIDI（由工程 MIDI 导出得到），比实时更接近原厂音色。
  *
@@ -104,6 +109,9 @@ export class SoundfontEngine implements SoundfontManager {
   private readonly statusHandlers = new Set<(status: SoundfontStatus) => void>()
   private readonly channels = new Map<string, number>()
   private readonly channelOwners = new Map<number, string>()
+  /** 主输出（synth → 引擎总线）是否启用；逐通道路由时关掉，避免与抽头双声 */
+  private mainOutputEnabled = true
+  private mainOutputConnected = false
 
   /** 引擎初始化后注入音频上下文与总线（SoundFont 的主输出会接到这个节点） */
   configure(context: BaseAudioContext, destination: AudioNode): void {
@@ -189,16 +197,86 @@ export class SoundfontEngine implements SoundfontManager {
       this.synthPromise = (async () => {
         await this.ensureWorklet(context)
         const synth = new WorkletSynthesizer(context)
-        synth.connect(destination)
-        await synth.isReady
+        // 先登记并建立主输出，保证「加载完成前」也走旧行为；引擎随后会按路由模式调整
         this.synth = synth
+        this.mainOutputConnected = false
+        this.syncMainOutput(destination)
+        await synth.isReady
         return synth
       })().catch((error: unknown) => {
+        // 初始化失败：不要留下半成品 synth，否则下次 ensureSynth 会拿到坏实例
+        this.synth = null
+        this.mainOutputConnected = false
         this.synthPromise = null
         throw error
       })
     }
     return this.synthPromise
+  }
+
+  /** 按 `mainOutputEnabled` 连接/断开 synth → destination（幂等） */
+  private syncMainOutput(destination: AudioNode | null = this.destination): void {
+    const synth = this.synth
+    if (!synth || !destination) return
+    const want = this.mainOutputEnabled
+    if (want === this.mainOutputConnected) return
+    try {
+      if (want) synth.connect(destination)
+      else synth.disconnect(destination)
+      this.mainOutputConnected = want
+    } catch (error) {
+      console.warn('[soundfont] 切换主输出失败', error)
+    }
+  }
+
+  /**
+   * 开关主输出（P3.1）。
+   * 逐通道路由模式下必须关闭，否则同一路声音会同时从主输出和 `sfIn` 抽头出来（双声）。
+   */
+  setMainOutput(enabled: boolean): void {
+    this.mainOutputEnabled = enabled
+    this.syncMainOutput()
+  }
+
+  /** 主输出当前是否真的连着（调试 / 自检用） */
+  get mainOutputActive(): boolean {
+    return this.mainOutputConnected
+  }
+
+  /** 当前 spessasynth 是否支持逐通道输出抽头 */
+  supportsPerChannelRouting(): boolean {
+    const synth = this.synth as unknown as
+      | { connectChannel?: unknown; disconnectChannel?: unknown }
+      | null
+    return Boolean(
+      synth &&
+        typeof synth.connectChannel === 'function' &&
+        typeof synth.disconnectChannel === 'function',
+    )
+  }
+
+  /** 把某个 MIDI 通道的输出接到目标节点（逐通道路由用）；失败返回 false */
+  routeChannelTo(target: AudioNode, channel: number): boolean {
+    const synth = this.synth
+    if (!synth || !this.supportsPerChannelRouting()) return false
+    try {
+      synth.connectChannel(target, channel)
+      return true
+    } catch (error) {
+      console.warn('[soundfont] 逐通道路由失败', channel, error)
+      return false
+    }
+  }
+
+  /** 断开某个 MIDI 通道到目标节点的连接（不影响该通道的其它抽头，例如电平表） */
+  unrouteChannelFrom(target: AudioNode, channel: number): void {
+    const synth = this.synth
+    if (!synth || !this.supportsPerChannelRouting()) return
+    try {
+      synth.disconnectChannel(target, channel)
+    } catch (error) {
+      console.warn('[soundfont] 逐通道断开失败', channel, error)
+    }
   }
 
   async load(url: string): Promise<void> {
@@ -408,16 +486,35 @@ export class SoundfontEngine implements SoundfontManager {
     }
   }
 
-  /** 用 MIDI CC 实现逐轨混音（音量/声像/混响/合唱/亮度/调制） */
-  applyChannelMix(trackId: string, mix: SoundfontChannelMix): void {
+  /**
+   * 用 MIDI CC 实现逐轨混音。
+   *
+   * `perChannelRouting=true`（P3.1 逐通道路由）时，声音已经走每轨 Tone.Channel +
+   * EQ/压缩链，因此音量/声像/混响/合唱的 CC 全部设成中性值（CC7=127、CC10=64、
+   * CC91=0、CC93=0），避免「引擎推子 + 采样器 CC 音量」压两次；
+   * 只保留 CC74 brightness / CC1 modulation 这类音色型 CC。
+   */
+  applyChannelMix(
+    trackId: string,
+    mix: SoundfontChannelMix,
+    options: { perChannelRouting?: boolean } = {},
+  ): void {
     const channel = this.channels.get(trackId)
     const synth = this.synth
     if (channel === undefined || !synth) return
+    const perChannel = options.perChannelRouting === true
     try {
-      synth.controllerChange(channel, 7, mix.muted ? 0 : clamp(Math.round(mix.volume * 100), 0, 127))
-      synth.controllerChange(channel, 10, clamp(Math.round((mix.pan + 1) * 63.5), 0, 127))
-      synth.controllerChange(channel, 91, clamp(Math.round(mix.reverb * 127), 0, 127))
-      synth.controllerChange(channel, 93, clamp(Math.round(mix.chorus * 127), 0, 127))
+      if (perChannel) {
+        synth.controllerChange(channel, 7, 127)
+        synth.controllerChange(channel, 10, 64)
+        synth.controllerChange(channel, 91, 0)
+        synth.controllerChange(channel, 93, 0)
+      } else {
+        synth.controllerChange(channel, 7, mix.muted ? 0 : clamp(Math.round(mix.volume * 100), 0, 127))
+        synth.controllerChange(channel, 10, clamp(Math.round((mix.pan + 1) * 63.5), 0, 127))
+        synth.controllerChange(channel, 91, clamp(Math.round(mix.reverb * 127), 0, 127))
+        synth.controllerChange(channel, 93, clamp(Math.round(mix.chorus * 127), 0, 127))
+      }
       synth.controllerChange(channel, 74, clamp(Math.round(mix.brightness * 127), 0, 127))
       synth.controllerChange(channel, 1, clamp(Math.round(mix.modulation * 127), 0, 127))
     } catch {
@@ -532,6 +629,8 @@ export class SoundfontEngine implements SoundfontManager {
     }
     this.synth = null
     this.synthPromise = null
+    // 合成器已销毁：主输出/逐通道路由都随之失效，交由引擎重新建立
+    this.mainOutputConnected = false
   }
 
   destroy(): void {

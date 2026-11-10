@@ -24,6 +24,15 @@ screenshots/*.tmp.png
 
 # UI 验收截图产物
 .verify-ui/
+.verify-ui-studio/
+.verify-ui-p1/
+.verify-ui-p2/
+.verify-ui-p3/
+.verify-ui-p31/
+.verify-ui-p32/
+.verify-ui-p4/
+.verify-ui-p5/
+.verify-ui-p6/
 
 # 布局审计 / 代码审查产物（本地生成，不入库）
 .audit/
@@ -31,3 +40,11 @@ screenshots/*.tmp.png
 
 # 启动器自动下载的 Node 运行时 / npm 缓存（本地生成，不入库）
 .runtime/
+
+# 本地音乐生成模型实验区：venv / 权重 / 缓存 / 生成的音频（数十 GB，绝不入库）
+# 仅在本地做模型验证时使用，产品代码不依赖此目录
+music-gen/
+
+# 模型运行期缓存（ACE-Step / HuggingFace 等落盘到仓库根时会出现在这里）
+.cache/
+.verify-ui-p7/

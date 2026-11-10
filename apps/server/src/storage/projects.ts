@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { projectSchema, type Project } from '@aiab/core'
+import { migrateProject, projectSchema, type Project } from '@aiab/core'
 import { projectsDir } from '../config.js'
 import { safeFileId } from '../util.js'
 
@@ -23,15 +23,13 @@ function projectPath(id: string): string | null {
   return path.join(projectsDir, `${safe}.json`)
 }
 
-/** 读取工程；不存在或损坏返回 null */
+/** 读取工程；不存在或损坏返回 null。旧版本（v1）会被自动迁移到当前版本 */
 export function loadProject(id: string): Project | null {
   const file = projectPath(id)
   if (!file || !existsSync(file)) return null
   try {
     const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown
-    const parsed = projectSchema.safeParse(raw)
-    if (!parsed.success) return null
-    return parsed.data as unknown as Project
+    return migrateProject(raw)
   } catch {
     return null
   }
@@ -47,7 +45,14 @@ export function saveProject(project: Project): { ok: true; savedAt: number } | {
     return { ok: false, error: `工程数据校验失败：${issue ? `${issue.path.join('.')} ${issue.message}` : '未知字段'}` }
   }
   const savedAt = Date.now()
-  const payload = { ...(parsed.data as unknown as Project), updatedAt: project.updatedAt ?? savedAt }
+  // 统一升级到当前工程版本再落盘：老客户端/老数据写回来也不会把 v1 重新写成 v1
+  let normalized: Project
+  try {
+    normalized = migrateProject(parsed.data)
+  } catch (error) {
+    return { ok: false, error: `工程版本迁移失败：${(error as Error).message}` }
+  }
+  const payload = { ...normalized, updatedAt: project.updatedAt ?? savedAt }
   try {
     if (!existsSync(projectsDir)) mkdirSync(projectsDir, { recursive: true })
     writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8')

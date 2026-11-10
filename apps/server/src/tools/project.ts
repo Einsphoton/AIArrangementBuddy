@@ -60,7 +60,7 @@ import {
   unknownInstrumentMessage,
 } from './validate.js'
 
-const STYLES: StyleId[] = ['classical', 'rock', 'electronic', 'jazz', 'cinematic', 'pop', 'folk']
+const STYLES: StyleId[] = ['classical', 'rock', 'electronic', 'jazz', 'cinematic', 'pop', 'folk', 'jrock', 'jrpg']
 
 /* ---------------------------- 内部工具函数 ---------------------------- */
 
@@ -174,16 +174,17 @@ function trackColorFor(instrumentId: string): string {
 }
 
 function defaultInstrumentForKind(kind: SmartKind, style: StyleId): string {
+  const isOrchestral = style === 'classical' || style === 'cinematic' || style === 'jrpg'
   const map: Record<SmartKind, string> = {
     drums: style === 'electronic' ? 'drums.electronic' : style === 'jazz' ? 'drums.jazz' : 'drums.acoustic',
-    bass: style === 'electronic' ? 'synth.bass' : 'guitar.bass',
-    chords: style === 'jazz' ? 'piano.electric' : 'piano.grand',
-    arp: 'synth.pluck',
-    melody: style === 'classical' || style === 'cinematic' ? 'woodwinds.flute' : 'synth.lead',
-    riff: 'guitar.electric',
+    bass: style === 'electronic' ? 'synth.bass' : style === 'jrpg' ? 'strings.cello' : 'guitar.bass',
+    chords: style === 'jazz' || style === 'jrock' ? 'piano.electric' : 'piano.grand',
+    arp: style === 'jrpg' ? 'harp' : 'synth.pluck',
+    melody: style === 'jrpg' ? 'strings.violin' : isOrchestral ? 'woodwinds.flute' : style === 'jrock' ? 'guitar.electric' : 'synth.lead',
+    riff: style === 'jrock' || style === 'jrpg' ? 'guitar.electric.dist' : 'guitar.electric',
     strum: 'guitar.acoustic',
-    counter: 'strings.cello',
-    pad: style === 'classical' || style === 'cinematic' ? 'strings.ensemble' : 'synth.pad',
+    counter: style === 'jrock' ? 'guitar.electric' : 'strings.cello',
+    pad: isOrchestral ? 'strings.ensemble' : style === 'jrock' ? 'organ.rock' : 'synth.pad',
   }
   const candidate = map[kind] ?? 'piano.grand'
   return hasInstrument(candidate) ? candidate : 'piano.grand'

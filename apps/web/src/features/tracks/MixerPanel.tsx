@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { Copy, Headphones, Trash2, X } from 'lucide-react'
+import { Copy, Headphones, LoaderCircle, Sparkles, Trash2, X } from 'lucide-react'
 import { getInstrument } from '@aiab/core'
 import { getAudioEngine } from '../../audio'
 import { ContextMenu, MenuDivider, MenuItem } from '../../components/ui/menu'
+import { ApiError, suggestMix, type MixSuggestResult } from '../../lib/api'
 import { cn } from '../../lib/format'
 import { MIXER_HEIGHT_LIMITS, useUiStore } from '../../lib/uiStore'
 import { useStore } from '../../store/store'
 import { clamp, trackColor, withAlpha } from '../arrangement/timeline'
+import { AiMixDialog } from './AiMixDialog'
 import { DbRuler, MiniKnob, VerticalFader, gainToDbText, levelToDbText } from './controls'
 
 /* ------------------------------------------------------------------ */
@@ -290,6 +292,31 @@ export function MixerPanel() {
   const setShowMixer = useStore((s) => s.setShowMixer)
   const pushHistory = useStore((s) => s.pushHistory)
   const setSaveStatus = useStore((s) => s.setSaveStatus)
+  const pushToast = useStore((s) => s.pushToast)
+
+  /* AI 混音：请求中按钮禁用+转圈，成功后才弹出只读预览面板 */
+  const [aiMixLoading, setAiMixLoading] = useState(false)
+  const [aiMixResult, setAiMixResult] = useState<MixSuggestResult | null>(null)
+
+  const requestAiMix = async () => {
+    if (aiMixLoading) return
+    setAiMixLoading(true)
+    try {
+      // 用当前时刻的工程发起请求（面板打开后即固定为这次请求的结果）
+      const result = await suggestMix(useStore.getState().project)
+      setAiMixResult(result)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        pushToast('error', '混音接口未就绪（404），请确认后端已更新并重启')
+      } else if (error instanceof ApiError) {
+        pushToast('error', error.detail || error.message || `混音方案生成失败（${error.status}）`)
+      } else {
+        pushToast('error', error instanceof Error ? error.message : '混音方案生成失败，请稍后重试')
+      }
+    } finally {
+      setAiMixLoading(false)
+    }
+  }
 
   const mixerHeight = useUiStore((s) => s.mixerHeight)
   const setMixerHeight = useUiStore((s) => s.setMixerHeight)
@@ -538,6 +565,23 @@ export function MixerPanel() {
           右键通道条：复制/删除/静音/独奏 · 点击电平表重置峰值 · 拖动顶部边缘调整高度
         </span>
         <button
+          type="button"
+          data-ai-mix-trigger=""
+          className="btn btn-ghost h-6 shrink-0 gap-1 whitespace-nowrap px-2 text-[11px]"
+          onClick={() => void requestAiMix()}
+          disabled={aiMixLoading}
+          aria-label="AI 混音：生成混音方案预览"
+          aria-busy={aiMixLoading}
+          title="AI 混音：按声部角色/风格/能量生成方案，可预览、一步撤销"
+        >
+          {aiMixLoading ? (
+            <LoaderCircle size={12} className="shrink-0 animate-spin text-accent" />
+          ) : (
+            <Sparkles size={12} className="shrink-0 text-accent" />
+          )}
+          {aiMixLoading ? '生成中…' : 'AI 混音…'}
+        </button>
+        <button
           className="btn btn-ghost h-6 shrink-0 whitespace-nowrap px-2 text-[11px]"
           onClick={() => setShowMixer(false)}
           title="收起混音器（⌘⇧M）"
@@ -746,6 +790,9 @@ export function MixerPanel() {
           />
         </ContextMenu>
       )}
+
+      {/* AI 混音只读预览（portal + z-[200]；应用走 store 一条撤销记录） */}
+      {aiMixResult && <AiMixDialog result={aiMixResult} onClose={() => setAiMixResult(null)} />}
     </div>
   )
 }

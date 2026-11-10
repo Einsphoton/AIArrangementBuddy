@@ -12,6 +12,8 @@ import {
   CircleDot,
   Copy,
   FlipHorizontal2,
+  Lightbulb,
+  LoaderCircle,
   Music4,
   Play,
   Plus,
@@ -21,11 +23,14 @@ import {
   Wand2,
 } from 'lucide-react'
 import {
+  CHORDS,
   chordLabel,
   getInstrument,
   patternOptions,
   SMART_KIND_META,
   SMART_KINDS,
+  type ChordQualityId,
+  type ChordSpec,
   type Clip,
   type Project,
   type SmartKind,
@@ -34,7 +39,9 @@ import {
 } from '@aiab/core'
 import { getAudioEngine } from '../../audio'
 import { EmptyState, Select, Slider, Switch } from '../../components/ui'
+import { ApiError, completeProgression, suggestProgressions, type CompleteProgressionResult, type ProgressionSuggestion } from '../../lib/api'
 import { cn } from '../../lib/format'
+import { keyScaleLabel, resolveProjectStyle, styleLabel } from '../../lib/studioMeta'
 import { useStore } from '../../store/store'
 import { clamp, drawNotesThumbnail, tidy, trackColor } from '../arrangement/timeline'
 
@@ -52,6 +59,22 @@ function findClipById(project: Project, clipId: string): { track: Track; clip: C
 
 function hexSeed(seed: number): string {
   return (seed >>> 0).toString(16).toUpperCase().padStart(8, '0')
+}
+
+/** 后端返回的 quality 是字符串：非法/未知时退回大三和弦，避免 chordLabel 崩溃 */
+function normalizeChordQuality(quality: string): ChordQualityId {
+  return (quality in CHORDS ? quality : 'maj') as ChordQualityId
+}
+
+/** 把接口返回的 {root,quality,beats} 规整成可直接写进 project.chords 的 ChordSpec */
+function toChordSpecs(chords: { root: number; quality: string; beats: number }[]): ChordSpec[] {
+  return chords
+    .filter((chord) => Number.isFinite(chord.root))
+    .map((chord) => ({
+      root: ((Math.round(chord.root) % 12) + 12) % 12,
+      quality: normalizeChordQuality(chord.quality),
+      beats: Number.isFinite(chord.beats) && chord.beats >= 0.25 ? chord.beats : 4,
+    }))
 }
 
 /* ------------------------------------------------------------------ */
@@ -304,6 +327,20 @@ export function SmartClipPanel() {
   const setSmartClipTarget = useStore((s) => s.setSmartClipTarget)
   const pushToast = useStore((s) => s.pushToast)
 
+  /* 和弦进行灵感：点击「换一组进行」才请求，失败只提示、不影响现有工程 */
+  const [progressionIdeas, setProgressionIdeas] = useState<ProgressionSuggestion[]>([])
+  const [suggestingProgressions, setSuggestingProgressions] = useState(false)
+  const [progressionError, setProgressionError] = useState<string | null>(null)
+  /* P7-C：补全不完整进行 */
+  const [partialRoman, setPartialRoman] = useState('I V vi')
+  const [completeLength, setCompleteLength] = useState(8)
+  const [completing, setCompleting] = useState(false)
+  const [completion, setCompletion] = useState<CompleteProgressionResult | null>(null)
+  const [completionError, setCompletionError] = useState<string | null>(null)
+
+  const suggestedStyle = resolveProjectStyle(project)
+  const suggestedStyleName = styleLabel(suggestedStyle) ?? '流行'
+
   const barBeats = (project.timeSignature.numerator * 4) / project.timeSignature.denominator
   const [newBars, setNewBars] = useState(4)
   const [convertKind, setConvertKind] = useState<SmartKind>('melody')
@@ -508,6 +545,127 @@ export function SmartClipPanel() {
     pushToast('success', `已在播放头生成${SMART_KIND_META[kind].name}片段`)
   }
 
+  /* ---------------- 和弦进行灵感 ---------------- */
+  const fetchProgressionIdeas = async () => {
+    if (suggestingProgressions) return
+    setSuggestingProgressions(true)
+    setProgressionError(null)
+    try {
+      const result = await suggestProgressions({
+        style: resolveProjectStyle(project) ?? 'pop',
+        key: project.key,
+        scale: project.scale,
+        count: 5,
+        seed: Math.floor(Math.random() * 1_000_000),
+      })
+      const ideas = (result?.suggestions ?? []).filter(
+        (idea) => Array.isArray(idea.roman) && Array.isArray(idea.chords) && idea.chords.length > 0,
+      )
+      setProgressionIdeas(ideas)
+      if (ideas.length === 0) setProgressionError('没有可用的进行建议，稍后再试')
+      else pushToast('success', `已换一组和弦进行灵感（${ideas.length} 条）`)
+    } catch (error) {
+      setProgressionIdeas([])
+      const unavailable = error instanceof ApiError ? error.status === 404 || error.status === 405 : true
+      setProgressionError(
+        unavailable
+          ? '和弦建议接口未就绪（404），后端更新后可换一组进行'
+          : error instanceof Error
+            ? error.message
+            : '获取和弦进行失败',
+      )
+    } finally {
+      setSuggestingProgressions(false)
+    }
+  }
+
+  /** P7-C：把用户给的半截进行补全成完整进行（服务端可解释算法） */
+  const fetchCompletion = async () => {
+    if (completing) return
+    const partial = partialRoman
+      .split(/[\s,，·]+/)
+      .map((token) => token.trim())
+      .filter(Boolean)
+    if (partial.length === 0) {
+      setCompletionError('先写至少一个和弦（罗马数字，例如 I V vi IV）')
+      return
+    }
+    setCompleting(true)
+    setCompletionError(null)
+    try {
+      const result = await completeProgression({
+        partial,
+        key: project.key,
+        scale: project.scale,
+        style: resolveProjectStyle(project) ?? 'pop',
+        targetLength: completeLength,
+      })
+      setCompletion(result)
+      if (result.completion.length === 0) setCompletionError(result.reasons[0] ?? '已经达到目标长度，无需补全')
+    } catch (error) {
+      setCompletion(null)
+      setCompletionError(
+        error instanceof ApiError
+          ? error.detail || error.message
+          : error instanceof Error
+            ? error.message
+            : '补全进行失败',
+      )
+    } finally {
+      setCompleting(false)
+    }
+  }
+
+  /** 把补全结果写进工程和弦（一次撤销；跟随和弦的智能片段自动重算） */
+  const applyCompletion = (result: CompleteProgressionResult) => {
+    const chords = toChordSpecs(result.chords)
+    if (chords.length === 0) {
+      pushToast('error', '补全结果没有可用和弦')
+      return
+    }
+    const store = useStore.getState()
+    const followers: { trackId: string; clipId: string }[] = []
+    for (const track of store.project.tracks) {
+      for (const clip of track.clips) {
+        if (clip.smart?.params.followChords) followers.push({ trackId: track.id, clipId: clip.id })
+      }
+    }
+    store.setChords(chords)
+    for (const target of followers) {
+      store.updateSmartParams(target.trackId, target.clipId, {}, { history: false })
+    }
+    store.setSaveStatus('dirty')
+    pushToast(
+      'success',
+      `已写入补全后的 ${result.full.length} 个和弦（${result.cadence}）${followers.length > 0 ? ` · ${followers.length} 个智能片段已跟随` : ''}（可撤销）`,
+    )
+  }
+
+  /** 应用一条建议：一次点击 = 一条撤销记录；「跟随工程和弦」的智能片段会按新和声静默重算 */
+  const applyProgressionIdea = (idea: ProgressionSuggestion) => {
+    const chords = toChordSpecs(idea.chords)
+    if (chords.length === 0) {
+      pushToast('error', '这条进行没有可用的和弦')
+      return
+    }
+    const store = useStore.getState()
+    const followers: { trackId: string; clipId: string }[] = []
+    for (const track of store.project.tracks) {
+      for (const clip of track.clips) {
+        if (clip.smart?.params.followChords) followers.push({ trackId: track.id, clipId: clip.id })
+      }
+    }
+    store.setChords(chords)
+    for (const target of followers) {
+      store.updateSmartParams(target.trackId, target.clipId, {}, { history: false })
+    }
+    store.setSaveStatus('dirty')
+    pushToast(
+      'success',
+      `已应用「${idea.label}」到工程和弦${followers.length > 0 ? ` · ${followers.length} 个智能片段已跟随` : ''}（可撤销）`,
+    )
+  }
+
   const previewClipAudio = () => {
     if (!activeTrack || !activeClip) return
     try {
@@ -668,13 +826,29 @@ export function SmartClipPanel() {
       </section>
 
       <section className="panel-flat rounded-xl p-2.5">
-        <div className="mb-1.5 flex items-center justify-between">
-          <span className="label">和弦进行</span>
-          <span className="mono text-[9.5px] text-ink-4">{project.chords.length} 个</span>
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-1">
+          <span className="label shrink-0">和弦进行</span>
+          <button
+            type="button"
+            className="btn h-5 shrink-0 gap-1 px-1.5 text-[9.5px]"
+            onClick={() => void fetchProgressionIdeas()}
+            disabled={suggestingProgressions}
+            data-suggest-progressions
+            title={`按工程风格「${suggestedStyleName}」给出 5 条和弦进行建议（当前调性 ${project.key} ${project.scale}）`}
+          >
+            {suggestingProgressions ? <LoaderCircle size={9} className="animate-spin" /> : <RefreshCw size={9} />}
+            换一组进行
+          </button>
+        </div>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <span className="mono shrink-0 text-[9.5px] text-ink-4">{project.chords.length} 个和弦</span>
+          <span className="min-w-0 truncate text-[9px] text-ink-4">
+            {suggestedStyleName} · {keyScaleLabel(project.key, project.scale)}
+          </span>
         </div>
         {project.chords.length === 0 ? (
           <p className="text-[10px] leading-relaxed text-ink-4">
-            工程还没有和弦进行。智能片段会按调性生成；在 AI 助手里说「配一套和弦」可以自动补全。
+            工程还没有和弦进行。点上方「换一组进行」拿几条灵感，或在 AI 助手里说「配一套和弦」。
           </p>
         ) : (
           <div className="flex flex-wrap gap-1">
@@ -689,6 +863,103 @@ export function SmartClipPanel() {
             ))}
           </div>
         )}
+        {progressionError && (
+          <p className="mt-1.5 rounded border border-danger/30 bg-danger/8 px-1.5 py-1 text-[9px] leading-relaxed text-danger">
+            {progressionError}
+          </p>
+        )}
+        {progressionIdeas.length > 0 && (
+          <div className="mt-1.5 border-t border-line pt-1.5">
+            <div className="mb-1 flex items-center gap-1 text-[9px] text-ink-4">
+              <Lightbulb size={9} className="shrink-0 text-accent/70" />
+              灵感建议 · 点击应用到工程和弦
+            </div>
+            <div className="space-y-1">
+              {progressionIdeas.map((idea) => (
+                <button
+                  key={idea.id}
+                  type="button"
+                  onClick={() => applyProgressionIdea(idea)}
+                  data-progression-id={idea.id}
+                  title={`${idea.description}${idea.patternHint ? `\n配器提示：${idea.patternHint}` : ''}`}
+                  className="block w-full rounded-lg border border-line bg-surface-2/50 px-1.5 py-1 text-left transition-colors hover:border-accent/45 hover:bg-surface-3"
+                >
+                  <span className="flex min-w-0 items-center gap-1">
+                    <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-ink-2">{idea.label}</span>
+                    <span className="mono shrink-0 text-[9px] text-accent-soft">{idea.roman.join(' · ')}</span>
+                  </span>
+                  <span className="mono mt-0.5 block truncate text-[9px] text-cyan/80">
+                    {toChordSpecs(idea.chords)
+                      .map((chord) => chordLabel(chord))
+                      .join(' · ')}
+                  </span>
+                  <span className="mt-0.5 line-clamp-2 block text-[9px] leading-snug text-ink-4">{idea.description}</span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-[9px] leading-relaxed text-ink-4">应用后会自动重算「跟随工程和弦」的智能片段，⌘Z 可撤销。</p>
+          </div>
+        )}
+
+        {/* P7-C：补全不完整进行 */}
+        <div className="mt-1.5 border-t border-line pt-1.5" data-complete-progression-block>
+          <div className="mb-1 flex items-center gap-1 text-[9px] text-ink-4">
+            <Wand2 size={9} className="shrink-0 text-accent/70" />
+            补全进行 · 给半截和声，AI 接后半段
+          </div>
+          <div className="flex items-center gap-1">
+            <input
+              value={partialRoman}
+              onChange={(event) => setPartialRoman(event.target.value)}
+              placeholder="I V vi"
+              aria-label="部分和弦进行（罗马数字）"
+              data-complete-partial
+              className="field h-6 min-w-0 flex-1 text-[10px]"
+            />
+            <select
+              value={String(completeLength)}
+              onChange={(event) => setCompleteLength(Number(event.target.value))}
+              aria-label="补全目标长度"
+              data-complete-length
+              className="field h-6 w-14 shrink-0 text-[10px]"
+              title="补全后的总和弦数"
+            >
+              <option value="4">4 个</option>
+              <option value="8">8 个</option>
+              <option value="16">16 个</option>
+            </select>
+            <button
+              type="button"
+              data-complete-progression
+              onClick={() => void fetchCompletion()}
+              disabled={completing}
+              className="btn h-6 shrink-0 px-2 text-[9.5px]"
+              title={`按当前调性 ${project.key} ${project.scale} 与风格补全`}
+            >
+              {completing ? <LoaderCircle size={9} className="animate-spin" /> : '补全'}
+            </button>
+          </div>
+          {completionError && <p className="mt-1 text-[9px] leading-relaxed text-danger">{completionError}</p>}
+          {completion && (
+            <div data-complete-result className="mt-1 rounded border border-line bg-surface-2/50 px-1.5 py-1">
+              <div className="mono break-all text-[9.5px] text-cyan/85">{completion.full.join(' · ')}</div>
+              <div className="mt-0.5 text-[9px] leading-relaxed text-ink-4">
+                {completion.cadence} · {completion.reasons.slice(0, 2).join('；')}
+              </div>
+              <div className="mt-1 flex items-center gap-1">
+                <button
+                  type="button"
+                  data-complete-apply
+                  onClick={() => applyCompletion(completion)}
+                  className="btn btn-secondary h-5 px-1.5 text-[9px]"
+                >
+                  写入工程和弦
+                </button>
+                <span className="text-[9px] text-ink-4">补全 {completion.completion.length} 个 · 总 {completion.full.length} 个</span>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="panel-flat rounded-xl p-2.5">

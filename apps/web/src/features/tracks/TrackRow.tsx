@@ -11,7 +11,7 @@
  * 行高由父级传入（与编曲车道用同一 uiStore 值），保证严格对齐。
  */
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, GripVertical, Play } from 'lucide-react'
+import { ChevronDown, ChevronRight, GripVertical, Info, Play, Waves } from 'lucide-react'
 import { getInstrument, type Track } from '@aiab/core'
 import { getAudioEngine } from '../../audio'
 import { cn } from '../../lib/format'
@@ -21,6 +21,7 @@ import { clamp, trackColor, withAlpha } from '../arrangement/timeline'
 import { usePointerDrag } from '../arrangement/usePointerDrag'
 import { MiniHSlider, MiniKnob } from './controls'
 import { TrackColorPopover, TrackContextMenu } from './trackMenu'
+import { TrackCreativeInfoPopover, buildTrackCreativeInfo } from './trackCreativeInfo'
 
 export interface DropTarget {
   index: number
@@ -61,6 +62,7 @@ export function TrackRow({
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void
 }) {
   const updateTrack = useStore((s) => s.updateTrack)
+  const project = useStore((s) => s.project)
   const pushHistory = useStore((s) => s.pushHistory)
   const setSaveStatus = useStore((s) => s.setSaveStatus)
   const toggleMute = useStore((s) => s.toggleMute)
@@ -79,6 +81,7 @@ export function TrackRow({
   const [previewing, setPreviewing] = useState(false)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [colorAnchor, setColorAnchor] = useState<{ left: number; right: number; top: number; bottom: number } | null>(null)
+  const [infoAnchor, setInfoAnchor] = useState<DOMRect | null>(null)
 
   /** 手势开始：记一次撤销点，并标记工程已修改（后续连续更新用 history:false） */
   const beginEdit = () => {
@@ -108,6 +111,9 @@ export function TrackRow({
   const color = trackColor(track.color)
   const collapsed = height <= TRACK_HEIGHT_LIMITS.collapsed + 2
   const showSecondRow = height >= 48 && !collapsed
+  /** 第三行「创作信息」：默认行高 56px 起显示，紧凑/折叠行不强行塞入 */
+  const showCreativeLine = showSecondRow && height >= 56
+  const creative = buildTrackCreativeInfo(project, track)
   const armed = armedTrackId === track.id
   const activityColor = track.mute ? '#4a5466' : color
 
@@ -361,6 +367,18 @@ export function TrackRow({
             >
               <Play size={9} />
             </button>
+            <button
+              onClick={(event) => {
+                event.stopPropagation()
+                setInfoAnchor(event.currentTarget.getBoundingClientRect())
+              }}
+              title="创作信息：风格 / 调式 / BPM / 段落 / 乐器 / 智能片段参数"
+              aria-label={`查看 ${track.name} 的创作信息`}
+              data-creative-info-trigger
+              className="flex h-[16px] w-[16px] items-center justify-center rounded-[4px] border border-transparent text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-accent"
+            >
+              <Info size={9} />
+            </button>
           </div>
           <button
             onClick={toggleCollapse}
@@ -376,29 +394,42 @@ export function TrackRow({
         {/* 第二行：乐器 / 情绪 / 音量 / 声像（行高不足时自动隐藏） */}
         {showSecondRow && (
           <div className="flex min-w-0 items-center gap-1">
-            <button
-              onClick={(event) => {
-                event.stopPropagation()
-                onOpenInstrument(event.currentTarget.getBoundingClientRect())
-              }}
-              title={`更换乐器（当前：${instrument.name}）`}
-              className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden rounded px-0.5 text-[10.5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink-2"
-            >
-              <span className="shrink-0 text-[10px]">{instrument.icon}</span>
-              <span className="truncate text-[10.5px]">{instrument.name}</span>
-            </button>
+            {track.kind === 'audio' ? (
+              /* 音频轨没有乐器/情绪：显示片段数与来源提示，避免误显示「三角钢琴」 */
+              <span
+                className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden rounded px-0.5 text-[10.5px] text-ink-3"
+                title="音频轨道：片段来自「文件 → 导入音频…」或「AI 生成音频」（音量 / 声像 / 静音照常生效）"
+              >
+                <Waves size={10} className="shrink-0 text-cyan/80" />
+                <span className="truncate text-[10.5px]">音频 · {track.audioClips?.length ?? 0} 个片段</span>
+              </span>
+            ) : (
+              <button
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onOpenInstrument(event.currentTarget.getBoundingClientRect())
+                }}
+                title={`更换乐器（当前：${instrument.name}）`}
+                className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden rounded px-0.5 text-[10.5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink-2"
+              >
+                <span className="shrink-0 text-[10px]">{instrument.icon}</span>
+                <span className="truncate text-[10.5px]">{instrument.name}</span>
+              </button>
+            )}
 
-            <button
-              onClick={(event) => {
-                event.stopPropagation()
-                onOpenEmotion(event.currentTarget.getBoundingClientRect())
-              }}
-              title={`情绪 / 演奏法（当前：${emotion.name} · ${emotion.hint}）`}
-              className="flex shrink-0 items-center gap-1 rounded-full border border-line-strong/80 bg-surface-2 px-1 py-[1px] text-[9.5px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink"
-            >
-              <span className="h-[5px] w-[5px] shrink-0 rounded-full" style={{ background: emotion.color }} />
-              <span className="max-w-[52px] shrink-0 whitespace-nowrap text-[9.5px]">{emotion.name}</span>
-            </button>
+            {track.kind !== 'audio' && (
+              <button
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onOpenEmotion(event.currentTarget.getBoundingClientRect())
+                }}
+                title={`情绪 / 演奏法（当前：${emotion.name} · ${emotion.hint}）`}
+                className="flex shrink-0 items-center gap-1 rounded-full border border-line-strong/80 bg-surface-2 px-1 py-[1px] text-[9.5px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink"
+              >
+                <span className="h-[5px] w-[5px] shrink-0 rounded-full" style={{ background: emotion.color }} />
+                <span className="max-w-[52px] shrink-0 whitespace-nowrap text-[9.5px]">{emotion.name}</span>
+              </button>
+            )}
 
             <div className="ml-auto flex shrink-0 items-center gap-1">
               <MiniHSlider
@@ -424,6 +455,18 @@ export function TrackRow({
                 }
               />
             </div>
+          </div>
+        )}
+
+        {/* 第三行：创作信息（只读摘要；完整信息点第一行的 i 按钮） */}
+        {showCreativeLine && (
+          <div
+            className="flex min-w-0 items-center gap-1 overflow-hidden text-[9px] leading-none text-ink-4"
+            title={creative.detailTitle}
+            data-creative-line
+          >
+            <span className="h-[3px] w-[3px] shrink-0 rounded-full" style={{ background: withAlpha(color, 0.5) }} />
+            <span className="min-w-0 truncate">{creative.inlineSummary}</span>
           </div>
         )}
       </div>
@@ -490,6 +533,14 @@ export function TrackRow({
             setColorAnchor(null)
             useStore.getState().setSaveStatus('dirty')
           }}
+        />
+      )}
+      {infoAnchor && (
+        <TrackCreativeInfoPopover
+          anchor={infoAnchor}
+          project={project}
+          track={track}
+          onClose={() => setInfoAnchor(null)}
         />
       )}
     </div>

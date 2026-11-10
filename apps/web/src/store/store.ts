@@ -442,6 +442,8 @@ export const useStore = create<Store>((set, get) => ({
     copy.id = newId('t')
     copy.name = `${source.name} 2`
     copy.clips = copy.clips.map((c) => ({ ...c, id: newId('c'), trackId: copy.id, notes: c.notes.map((n) => ({ ...n, id: newId('n') })) }))
+    /* 音频片段同样要换 id + 指向新轨道（否则会和原轨道共用 Player，播放时互相打断） */
+    copy.audioClips = (copy.audioClips ?? []).map((clip) => ({ ...clip, id: newId('ac'), trackId: copy.id }))
     get().mutate((draft) => {
       const index = draft.tracks.findIndex((t) => t.id === trackId)
       draft.tracks.splice(index + 1, 0, copy)

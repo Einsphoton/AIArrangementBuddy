@@ -93,6 +93,10 @@ export const STYLE_PROGRESSIONS: Record<StyleId, string[]> = {
   cinematic: ['i', 'VI', 'III', 'VII'],
   pop: ['I', 'V', 'vi', 'IV'],
   folk: ['I', 'IV', 'vi', 'V'],
+  // 日摇：小调王道进行（i-VI-III-VII），副歌向 VI/III 借力
+  jrock: ['i', 'VI', 'III', 'VII'],
+  // JRPG：小调 + 自然小调 iv 与 VII-III 的调式交替，游戏配乐常用
+  jrpg: ['i', 'iv', 'VII', 'III'],
 }
 
 /* ------------------------------------------------------------------ */
@@ -414,6 +418,36 @@ const GROOVES: Record<string, Groove> = {
     shaker: [],
     timpani: [0, 2],
   },
+  /** 日摇：军鼓 backbeat + 切分底鼓 + 16 分踩镲 */
+  jrock: {
+    id: 'jrock',
+    kick: [0, 1.5, 2.5],
+    snare: [1, 3],
+    ghost: [],
+    hatStep: 0.25,
+    openHats: [1.5, 3.5],
+    ride: [],
+    hatPedal: [],
+    clap: [],
+    rim: [],
+    shaker: [],
+    timpani: [],
+  },
+  /** JRPG：管弦摇滚混合，八分踩镲 + 定音鼓重音 + 切分底鼓 */
+  jrpg: {
+    id: 'jrpg',
+    kick: [0, 1.5, 2, 3.5],
+    snare: [1, 3],
+    ghost: [],
+    hatStep: 0.5,
+    openHats: [3.5],
+    ride: [],
+    hatPedal: [],
+    clap: [],
+    rim: [],
+    shaker: [],
+    timpani: [0, 2],
+  },
 }
 
 const STYLE_GROOVE: Record<StyleId, string> = {
@@ -424,6 +458,8 @@ const STYLE_GROOVE: Record<StyleId, string> = {
   cinematic: 'cinematic',
   classical: 'classical',
   folk: 'folk',
+  jrock: 'jrock',
+  jrpg: 'jrpg',
 }
 
 function resolveGroove(ctx: GenerateContext): Groove {
@@ -749,6 +785,18 @@ const bass: GeneratorFn = (ctx) => {
     } else if (style === 'folk') {
       offsets = [0, 1, 2, 3]
       useShort = false
+    } else if (style === 'jrock') {
+      // 日摇：16 分音符驱动（高密度时全 16 分，常规为 8 分根音推进）
+      offsets = []
+      const step = density > 0.58 ? 0.25 : 0.5
+      for (let o = 0; o < beats - EPS; o += step) offsets.push(o)
+      useShort = true
+    } else if (style === 'jrpg') {
+      // JRPG：低音弦乐 ostinato（八分音符持续推动，弱密度回到四分）
+      offsets = []
+      const step = density > 0.5 ? 0.5 : 1
+      for (let o = 0; o < beats - EPS; o += step) offsets.push(o)
+      useShort = true
     } else if (pattern === 'syncopated') {
       offsets = density > 0.6 ? [0, 0.75, 1.5, 2.5, 3.25] : [0, 1.5, 2.5]
       useShort = density > 0.5
@@ -863,7 +911,7 @@ const chordsGen: GeneratorFn = (ctx) => {
 }
 
 function styleNeedsStabs(style: StyleId): boolean {
-  return style === 'jazz' || style === 'electronic' || style === 'rock' || style === 'pop'
+  return style === 'jazz' || style === 'electronic' || style === 'rock' || style === 'pop' || style === 'jrock' || style === 'jrpg'
 }
 
 const pad: GeneratorFn = (ctx) => {
@@ -1376,7 +1424,7 @@ const strum: GeneratorFn = (ctx) => {
   const swing = effectiveSwing(ctx)
   const octave = Math.max(1, Math.min(6, Math.round(ctx.params.octave)))
   const meterScale = bpb / 4
-  const defaultStrum = ctx.style === 'rock' ? 'downUp' : ctx.style === 'pop' ? 'folk' : 'folk'
+  const defaultStrum = ctx.style === 'rock' || ctx.style === 'jrock' ? 'downUp' : ctx.style === 'pop' ? 'folk' : 'folk'
   const patternId = ctx.params.patternId && STRUM_PATTERNS[ctx.params.patternId] ? ctx.params.patternId : defaultStrum
   const arpeggioMode = ctx.params.patternId === 'arpeggio'
 
@@ -1571,6 +1619,8 @@ export function patternOptions(kind: SmartKind, style: StyleId): { id: string; n
       ]
       if (style === 'jazz') base.push({ id: 'swing', name: '摇摆' })
       if (style === 'rock') base.push({ id: 'rock', name: '摇滚' })
+      if (style === 'jrock') base.push({ id: 'jrock', name: '日摇 16 分' })
+      if (style === 'jrpg') base.push({ id: 'jrpg', name: 'JRPG 定音鼓' })
       if (style === 'folk') base.push({ id: 'folk', name: '民谣' })
       if (style === 'cinematic' || style === 'classical') base.push({ id: 'cinematic', name: '定音鼓 / 冲击' })
       return base

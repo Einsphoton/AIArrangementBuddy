@@ -20,6 +20,12 @@ export const dataDir = process.env.DATA_DIR || process.env.AIAB_DATA_DIR || path
 export const projectsDir = path.join(dataDir, 'projects')
 export const soundfontsDir = path.join(dataDir, 'soundfonts')
 export const agentSessionsDir = path.join(dataDir, 'agent-sessions')
+/** 模型适配器（LoRA）目录：每个子目录一个适配器，见 apps/server/src/adapters/registry.ts */
+export const adaptersDir = process.env.AIAB_ADAPTERS_DIR || path.join(dataDir, 'adapters')
+/** 音频资产库（AudioClip 的 AssetRef 指向这里，见 storage/assets.ts） */
+export const assetsDir = path.join(dataDir, 'assets')
+/** Companion 工作节点与任务队列的持久化目录 */
+export const companionDir = path.join(dataDir, 'companion')
 /** AI 运行日志（JSONL，每次 /api/ai/chat 一条），便于事后抓取失败原因 */
 export const aiLogsDir = path.join(dataDir, 'logs')
 export const settingsFile = path.join(dataDir, 'settings.json')
@@ -35,7 +41,7 @@ export const serveStatic = process.env.SERVE_STATIC === '1'
 export const logLevel = process.env.LOG_LEVEL || 'info'
 
 export function ensureDataDirs(): void {
-  for (const dir of [dataDir, projectsDir, soundfontsDir, agentSessionsDir, aiLogsDir]) {
+  for (const dir of [dataDir, projectsDir, soundfontsDir, agentSessionsDir, aiLogsDir, adaptersDir, assetsDir, companionDir]) {
     mkdirSync(dir, { recursive: true })
   }
 }

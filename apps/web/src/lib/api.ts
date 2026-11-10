@@ -1,4 +1,4 @@
-import type { AppSettings, Project } from '@aiab/core'
+import type { AppSettings, AssetRef, MasterChain, MixPlan, Project, TrackChainSuggestion } from '@aiab/core'
 
 /* ------------------------------------------------------------------ */
 /* 通用请求                                                            */
@@ -274,6 +274,197 @@ export function generate(payload: GenerateRequest): Promise<{ project: Project; 
 }
 
 /* ------------------------------------------------------------------ */
+/* Studio 创作入口（风格/用途向导、和弦进行灵感、MIDI 导入）             */
+/* ------------------------------------------------------------------ */
+
+/** GET /api/studio/presets 的风格卡片 */
+export interface StudioStylePreset {
+  id: string
+  name: string
+  nameEn: string
+  description: string
+  bpm: number
+  tempoRange?: [number, number]
+  scale?: string
+  accent: string
+  recommendedInstruments?: string[]
+}
+
+/** GET /api/studio/presets 的用途场景卡片 */
+export interface StudioScenePreset {
+  id: string
+  name: string
+  nameEn: string
+  description: string
+  styleId: string
+  bpm: number
+  key: string
+  scale: string
+  bars: number
+  energy: number
+  sectionNames?: string[]
+}
+
+export interface StudioPresets {
+  styles: StudioStylePreset[]
+  scenes: StudioScenePreset[]
+}
+
+export function getStudioPresets(): Promise<StudioPresets> {
+  return request<StudioPresets>('/api/studio/presets')
+}
+
+export interface CreateStudioProjectPayload {
+  style: string
+  scene?: string
+  bars?: number
+  seed?: number
+  name?: string
+}
+
+/** POST /api/studio/new：按风格 + 用途直接生成工程（服务端复用 core 生成器） */
+export function createStudioProject(
+  payload: CreateStudioProjectPayload,
+): Promise<{ project: Project; scene?: string | null; summary?: string }> {
+  return request<{ project: Project; scene?: string | null; summary?: string }>('/api/studio/new', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/** 和弦进行建议里的一个和弦（未解析成 ChordSpec 的原始形态） */
+export interface ProgressionSuggestionChord {
+  root: number
+  quality: string
+  beats: number
+}
+
+export interface ProgressionSuggestion {
+  id: string
+  roman: string[]
+  chords: ProgressionSuggestionChord[]
+  label: string
+  description: string
+  patternHint?: string
+}
+
+export interface ProgressionSuggestionsResult {
+  suggestions: ProgressionSuggestion[]
+  /** 服务端额外拼好的 8 小节版本（可选） */
+  chained?: ProgressionSuggestionChord[]
+  summary?: string
+}
+
+/** POST /api/suggest/progressions：按风格/调性给出可解释的和弦进行灵感 */
+export function suggestProgressions(payload: {
+  style: string
+  key?: string
+  scale?: string
+  count?: number
+  seed?: number
+}): Promise<ProgressionSuggestionsResult> {
+  return request<ProgressionSuggestionsResult>('/api/suggest/progressions', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/** 和弦进行补全结果（P7-C） */
+export interface CompleteProgressionResult {
+  id: string
+  key: string
+  scale: string
+  style: string
+  partial: string[]
+  completion: string[]
+  full: string[]
+  chords: ProgressionSuggestionChord[]
+  beatsPerChord: number
+  cadence: string
+  reasons: string[]
+  targetLength: number
+  summary?: string
+}
+
+/** POST /api/suggest/complete-progression：给不完整进行补全后半段（可解释） */
+export function completeProgression(payload: {
+  partial: string[]
+  key?: string
+  scale?: string
+  style?: string
+  targetLength?: number
+  beatsPerChord?: number
+}): Promise<CompleteProgressionResult> {
+  return request<CompleteProgressionResult>('/api/suggest/complete-progression', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/**
+ * POST /api/import/midi：上传 .mid 二进制并解析成工程。
+ * 走 octet-stream（不包 FormData），与后端契约一致。
+ */
+export async function importMidiFile(bytes: ArrayBuffer): Promise<{ project: Project; summary?: string }> {
+  const response = await fetch('/api/import/midi', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: bytes,
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const body = (await response.json()) as { error?: string; message?: string }
+      detail = body.error ?? body.message ?? ''
+    } catch {
+      detail = await response.text().catch(() => '')
+    }
+    throw new ApiError(response.status, detail || `MIDI 导入失败（${response.status}）`, detail || undefined)
+  }
+  const contentType = response.headers.get('content-type') ?? ''
+  if (contentType.includes('application/json')) {
+    return (await response.json()) as { project: Project; summary?: string }
+  }
+  throw new ApiError(response.status, 'MIDI 导入失败：服务端返回了非 JSON 内容')
+}
+
+/* ------------------------------------------------------------------ */
+/* AI 混音（MIDI 域：只改轨道参数，可预览、可整批撤销）                  */
+/* ------------------------------------------------------------------ */
+
+/** POST /api/mix/suggest 的返回：方案 + 逐轨差异文本 + 一句话总结 */
+export interface MixSuggestResult {
+  plan: MixPlan
+  /** 每轨一行的可读差异（音量/声像/混响），可直接展示 */
+  preview: string[]
+  summary: string
+  /**
+   * P3：逐轨音频处理链建议（EQ / 压缩 / 补偿增益）。
+   * 服务端扩展后才有；旧服务端不返回时 UI 自动隐藏处理链相关区块。
+   */
+  chains?: TrackChainSuggestion[]
+  /** P3：处理链整体说明（可选） */
+  chainNotes?: string[]
+  /** P3.2：总线 / 母带处理链建议（服务端扩展后才有） */
+  masterChain?: MasterChain
+  /** P3.2：总线链逐行摘要（可直接展示） */
+  masterPreview?: string[]
+  /** P3.2：总线链整体说明（可选） */
+  masterNotes?: string[]
+}
+
+/**
+ * POST /api/mix/suggest：按声部角色 × 风格 × 能量给出混音方案。
+ * 只返回方案，不落库；应用由前端走 store（一条撤销记录）。
+ */
+export function suggestMix(project: Project): Promise<MixSuggestResult> {
+  return request<MixSuggestResult>('/api/mix/suggest', {
+    method: 'POST',
+    body: JSON.stringify({ project }),
+  })
+}
+
+/* ------------------------------------------------------------------ */
 /* 导出                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -326,6 +517,318 @@ export function downloadSoundfont(id: string): Promise<{ ok: boolean; message: s
   return request<{ ok: boolean; message: string; url?: string }>(`/api/soundfonts/${encodeURIComponent(id)}/download`, {
     method: 'POST',
   })
+}
+
+/* ------------------------------------------------------------------ */
+/* 音频资产（导入 / 波形 / 播放）                                       */
+/* ------------------------------------------------------------------ */
+
+/** 从 fetch 响应里读出服务端错误文案（JSON 的 error/message，否则退回纯文本） */
+async function readErrorDetail(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: string; message?: string }
+    return body.error ?? body.message ?? ''
+  } catch {
+    return await response.text().catch(() => '')
+  }
+}
+
+/** POST /api/assets/upload（multipart，字段 file，WAV）的返回 */
+export interface AudioUploadResult {
+  asset: AssetRef
+  durationSec: number
+  sampleRate: number
+  channels: number
+  /** 波形峰值：[min,max] 交错，-1..1，默认 512 桶 */
+  peaks: number[]
+  summary: string
+}
+
+/** 上传 WAV：入库 + 服务端算好峰值。一次调用即可落轨（不用再拉 peaks）。 */
+export async function uploadAudioAsset(file: File | Blob): Promise<AudioUploadResult> {
+  const form = new FormData()
+  const name = typeof File !== 'undefined' && file instanceof File ? file.name : 'audio.wav'
+  form.append('file', file, name)
+  const response = await fetch('/api/assets/upload', { method: 'POST', body: form })
+  if (!response.ok) {
+    const detail = await readErrorDetail(response)
+    throw new ApiError(response.status, detail || `音频上传失败（${response.status}）`, detail || undefined)
+  }
+  return (await response.json()) as AudioUploadResult
+}
+
+/** GET /api/assets/:id/peaks 的返回 */
+export interface AssetPeaksResult {
+  id: string
+  durationSec: number
+  sampleRate: number
+  channels: number
+  peaks: number[]
+}
+
+export function getAssetPeaks(assetId: string): Promise<AssetPeaksResult> {
+  return request<AssetPeaksResult>(`/api/assets/${encodeURIComponent(assetId)}/peaks`)
+}
+
+/** 资产的原始 WAV 地址：可直接给 <audio> / Tone.Player 播放 */
+export function assetFileUrl(assetId: string): string {
+  return `/api/assets/${encodeURIComponent(assetId)}/file`
+}
+
+/** GET /api/assets 的资产摘要（不含 peaks；sha256 在该接口里不返回） */
+export interface AssetSummary {
+  id: string
+  kind: string
+  bytes: number
+  durationMs?: number
+  sampleRate?: number
+  channels?: number
+  name?: string
+  createdAt: number
+  sha256?: string
+}
+
+export function listAssets(): Promise<{ count: number; assets: AssetSummary[] }> {
+  return request<{ count: number; assets: AssetSummary[] }>('/api/assets')
+}
+
+/* ------------------------------------------------------------------ */
+/* Companion（本地生成工作节点）                                        */
+/* ------------------------------------------------------------------ */
+
+export type CompanionTaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'canceled'
+
+/** 任务优先级：0 普通 / 1 高 / 2 紧急 */
+export type CompanionPriority = 0 | 1 | 2
+
+export const COMPANION_PRIORITY_LABEL: Record<CompanionPriority, string> = {
+  0: '普通',
+  1: '高',
+  2: '紧急',
+}
+
+export interface CompanionTaskState {
+  id: string
+  /** 任务类型（服务端返回，旧版可能没有） */
+  type?: string
+  status: CompanionTaskStatus
+  /** 0..1 */
+  progress: number
+  /** 0 普通 / 1 高 / 2 紧急（旧服务端可能没有） */
+  priority?: CompanionPriority | number
+  /** 排队位置（1-based，有值时） */
+  queuePosition?: number
+  /** 预计等待秒数（有值时） */
+  estimatedWaitSec?: number
+  /** 该任务需要的工作节点能力（例如音频引擎变体） */
+  requiredVariant?: string
+  message?: string
+  error?: string
+  /** 完成后的音频资产 id */
+  assetId?: string
+  createdAt?: number
+  startedAt?: number
+  finishedAt?: number
+}
+
+export interface CompanionSummary {
+  workers: number
+  queued: number
+  running: number
+  done: number
+  failed: number
+}
+
+/** 按优先级分组的排队数（旧服务端可能没有，做兜底） */
+export interface CompanionQueueSummary {
+  normal: number
+  high: number
+  urgent: number
+}
+
+/** 因缺少某类工作节点能力而无法执行的任务 */
+export interface CompanionBlockedCapability {
+  variant: string
+  count: number
+}
+
+/** GET /api/companion/status：**没有 Companion 时也是 200 + online:false**（不是 404） */
+export interface CompanionStatus {
+  summary: CompanionSummary
+  online: boolean
+  /** 按优先级分组的排队数 */
+  queue?: CompanionQueueSummary
+  /** 缺能力被阻塞的任务 */
+  blockedByCapability?: CompanionBlockedCapability[]
+  workers: { id?: string; name?: string; busy?: boolean; lastSeenAt?: number; engine?: unknown }[]
+  tasks: CompanionTaskState[]
+  /** 离线时的启动提示（服务端给出） */
+  hint?: string
+}
+
+export function getCompanionStatus(): Promise<CompanionStatus> {
+  return request<CompanionStatus>('/api/companion/status')
+}
+
+/** POST /api/companion/tasks 的 generate_audio 参数 */
+export interface GenerateAudioParams {
+  /** 英文提示词：风格 / 乐器 / 情绪 / 速度 */
+  caption: string
+  bpm?: number
+  keyscale?: string
+  durationSec?: number
+  seed?: number
+  style?: string
+  /** 来自 GET /api/adapters 的 nativeReady 列表 */
+  adapterId?: string
+  /** P7-A 质量模式：LM → sft 50 步（更慢；与 LoRA 适配器互斥） */
+  quality?: boolean
+}
+
+/** 提交生成任务；无在线 Companion 时服务端返回 503（error 里带启动命令） */
+export function createCompanionGenerateTask(
+  params: GenerateAudioParams,
+  projectId?: string,
+  priority: CompanionPriority = 0,
+): Promise<{ taskId: string; status: CompanionTaskStatus; summary: string }> {
+  return request<{ taskId: string; status: CompanionTaskStatus; summary: string }>('/api/companion/tasks', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'generate_audio', params, projectId, priority }),
+  })
+}
+
+/** POST /api/companion/tasks 的 repaint_audio 参数（区间相对 clip 内部，单位秒） */
+export interface RepaintAudioParams {
+  /** 重绘描述（英文提示词） */
+  caption: string
+  /** 要重绘的片段的当前资产 id */
+  sourceAssetId: string
+  startSec: number
+  endSec: number
+  seed?: number
+  style?: string
+  /** 来自 GET /api/adapters 的 nativeReady 列表 */
+  adapterId?: string
+}
+
+/** 局部重绘任务；产物是整段音频（区间外由模型重建保持连续） */
+export function createCompanionRepaintTask(
+  params: RepaintAudioParams,
+  projectId?: string,
+  priority: CompanionPriority = 0,
+): Promise<{ taskId: string; status: CompanionTaskStatus; summary: string }> {
+  return request<{ taskId: string; status: CompanionTaskStatus; summary: string }>('/api/companion/tasks', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'repaint_audio', params, projectId, priority }),
+  })
+}
+
+/* ---------------- P7-B：AI 重编（cover）---------------- */
+
+/** POST /api/companion/tasks 的 cover_audio 参数（把渲染好的工程整体"保结构换编制"） */
+export interface CoverAudioParams {
+  /** 要重编的音频资产（通常是浏览器离线渲染当前工程得到的 WAV） */
+  sourceAssetId: string
+  /** 希望变成什么编制/风格（英文提示词） */
+  caption: string
+  /** 0–1：越大越贴近原结构（默认 0.7）；越小越自由 */
+  audioCoverStrength?: number
+  seed?: number
+}
+
+/** AI 重编（cover）任务；产物是整段新音频 */
+export function createCompanionCoverTask(
+  params: CoverAudioParams,
+  projectId?: string,
+  priority: CompanionPriority = 0,
+): Promise<{ taskId: string; status: CompanionTaskStatus; summary: string }> {
+  return request<{ taskId: string; status: CompanionTaskStatus; summary: string }>('/api/companion/tasks', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'cover_audio', params, projectId, priority }),
+  })
+}
+
+/* ---------------- P5-B：分轨 Stem ---------------- */
+
+/** 分轨 stem 允许的乐器 arm */
+export const STEM_ARMS = ['guitar', 'bass', 'drums', 'strings', 'keys', 'synth', 'vocals'] as const
+export type StemArm = (typeof STEM_ARMS)[number]
+
+/** arm → 中文名（UI/轨道命名用） */
+export const STEM_ARM_LABEL: Record<StemArm, string> = {
+  guitar: '吉他',
+  bass: '贝斯',
+  drums: '鼓组',
+  strings: '弦乐',
+  keys: '键盘',
+  synth: '合成器',
+  vocals: '人声',
+}
+
+/** POST /api/companion/tasks 的 generate_stem 参数 */
+export interface GenerateStemParams {
+  /** 源音频资产 id（从要分轨的音频片段来） */
+  sourceAssetId: string
+  arm: StemArm
+  /** 可选：该 arm 的额外描述（留空用 Companion 内置映射） */
+  caption?: string
+  seed?: number
+}
+
+/** 提交分轨任务（服务端会派给带 base 能力的 Companion，冷启动可能较慢） */
+export function createCompanionStemTask(
+  params: GenerateStemParams,
+  projectId?: string,
+  priority: CompanionPriority = 0,
+): Promise<{ taskId: string; status: CompanionTaskStatus; summary: string }> {
+  return request<{ taskId: string; status: CompanionTaskStatus; summary: string }>('/api/companion/tasks', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'generate_stem', params, projectId, priority }),
+  })
+}
+
+export function getCompanionTask(taskId: string): Promise<{ task: CompanionTaskState }> {
+  return request<{ task: CompanionTaskState }>(`/api/companion/tasks/${encodeURIComponent(taskId)}`)
+}
+
+export function cancelCompanionTask(
+  taskId: string,
+): Promise<{ ok: boolean; task?: CompanionTaskState }> {
+  return request<{ ok: boolean; task?: CompanionTaskState }>(
+    `/api/companion/tasks/${encodeURIComponent(taskId)}/cancel`,
+    { method: 'POST', body: '{}' },
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* LoRA 适配器                                                          */
+/* ------------------------------------------------------------------ */
+
+export interface AdapterInfo {
+  id: string
+  name: string
+  styleId?: string
+  format: string
+  baseModel: string
+  tasks: string[]
+  rank?: number
+  alpha?: number
+  bytes: number
+  license?: string
+  audit: { ok: boolean; errors: string[]; warnings: string[] }
+}
+
+export interface AdaptersResult {
+  root: string
+  count: number
+  adapters: AdapterInfo[]
+  broken: { dir: string; error: string }[]
+  /** 真正能被 C++ 运行时加载的适配器 id（下拉只列这些） */
+  nativeReady: string[]
+}
+
+export function listAdapters(): Promise<AdaptersResult> {
+  return request<AdaptersResult>('/api/adapters')
 }
 
 /* ------------------------------------------------------------------ */

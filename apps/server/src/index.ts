@@ -21,6 +21,14 @@ import { registerAiRoutes, cancelActiveAiRun } from './routes/ai.js'
 import { registerGenerateRoutes } from './routes/generate.js'
 import { registerExportRoutes } from './routes/export.js'
 import { registerSoundfontRoutes } from './routes/soundfonts.js'
+import { registerAdapterRoutes } from './routes/adapters.js'
+import { registerStudioRoutes } from './routes/studio.js'
+import { registerImportRoutes } from './routes/import.js'
+import { registerMixRoutes } from './routes/mix.js'
+import { registerAssetRoutes } from './routes/assets.js'
+import { registerCompanionRoutes } from './routes/companion.js'
+import { registerSyncRoutes } from './routes/sync.js'
+import { registerVst3Routes } from './routes/vst3.js'
 
 export async function buildServer(): Promise<FastifyInstance> {
   ensureDataDirs()
@@ -61,6 +69,14 @@ export async function buildServer(): Promise<FastifyInstance> {
   registerGenerateRoutes(app)
   registerExportRoutes(app)
   registerSoundfontRoutes(app)
+  registerAdapterRoutes(app)
+  registerStudioRoutes(app)
+  registerImportRoutes(app)
+  registerMixRoutes(app)
+  registerAssetRoutes(app)
+  registerCompanionRoutes(app)
+  registerSyncRoutes(app)
+  registerVst3Routes(app)
 
   // 生产模式：托管前端构建产物，并为 SPA 兜底
   if (serveStatic) {

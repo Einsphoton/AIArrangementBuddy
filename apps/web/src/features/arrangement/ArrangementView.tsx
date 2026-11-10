@@ -17,12 +17,15 @@ import {
   ClipboardPaste,
   Copy,
   Grid3x3,
+  Layers,
   Piano,
   Play,
   Plus,
   Scissors,
   Sparkles,
   Trash2,
+  Wand2,
+  Waves,
 } from 'lucide-react'
 import {
   chordTimeline,
@@ -32,12 +35,18 @@ import {
 } from '@aiab/core'
 import { getAudioEngine } from '../../audio'
 import { ContextMenu, MenuDivider, MenuItem, MenuLabel } from '../../components/ui/menu'
-import { cn } from '../../lib/format'
+import { getAssetPeaks } from '../../lib/api'
+import { cn, formatRelativeTime } from '../../lib/format'
 import { useStore } from '../../store/store'
 import { modSymbol } from '../../lib/shortcuts'
 import { resolveTrackHeight, useUiStore, type EditorTool } from '../../lib/uiStore'
 import { subscribeEditorCommand } from '../../lib/editorBus'
 import { InstrumentPicker, popoverPosition } from '../tracks/InstrumentPicker'
+import { RepaintAudioDialog } from '../audio/RepaintAudioDialog'
+import { StemGenerateDialog } from '../audio/StemGenerateDialog'
+import { primeAssetPeaks } from '../audio/peaks'
+import { switchActiveTake } from '../audio/audioTrack'
+import { AudioClipView } from './AudioClipView'
 import { ClipView, type ClipDragMode } from './ClipView'
 import { TimelineToolbar } from './TimelineToolbar'
 import {
@@ -102,6 +111,31 @@ interface EmptyMenuState {
   y: number
   beat: number
 }
+
+/** 音频片段右键菜单（音频片段与 MIDI 片段的选择/删除是两套，见下方 selectedAudioIds） */
+interface AudioClipMenuState {
+  x: number
+  y: number
+  trackId: string
+  clipId: string
+}
+
+/** 音频片段「切换版本（takes）」弹层 */
+interface TakeMenuState {
+  x: number
+  y: number
+  trackId: string
+  clipId: string
+}
+
+/** 局部重绘对话框目标 */
+interface RepaintTargetState {
+  trackId: string
+  clipId: string
+}
+
+/** P5-B：生成分轨 Stem 对话框目标 */
+type StemTargetState = RepaintTargetState
 
 /* ------------------------------------------------------------------ */
 /* 标尺（循环条 / 段落条 / 小节号）                                     */
@@ -512,6 +546,14 @@ export function ArrangementView() {
   const [marquee, setMarquee] = useState<Marquee | null>(null)
   const [clipMenu, setClipMenu] = useState<ClipMenuState | null>(null)
   const [emptyMenu, setEmptyMenu] = useState<EmptyMenuState | null>(null)
+  const [audioMenu, setAudioMenu] = useState<AudioClipMenuState | null>(null)
+  const [takeMenu, setTakeMenu] = useState<TakeMenuState | null>(null)
+  const [repaintTarget, setRepaintTarget] = useState<RepaintTargetState | null>(null)
+  const [stemTarget, setStemTarget] = useState<StemTargetState | null>(null)
+  /* 音频片段单独一套选择集：不复用 store.selection（那是 MIDI 片段的语义，钢琴卷帘会用） */
+  const [selectedAudioIds, setSelectedAudioIds] = useState<string[]>([])
+  const selectedAudioIdsRef = useRef(selectedAudioIds)
+  selectedAudioIdsRef.current = selectedAudioIds
   const [addTrackAnchor, setAddTrackAnchor] = useState<DOMRect | null>(null)
   /** 滚动容器可视宽度：用于保证横向滚动条常驻，使左右两个滚动容器的可滚范围一致 */
   const [viewportWidth, setViewportWidth] = useState(0)
@@ -587,6 +629,15 @@ export function ArrangementView() {
     const valid = new Set<string>()
     for (const track of project.tracks) for (const clip of track.clips) valid.add(clip.id)
     setSelectedIds((previous) => (previous.some((id) => !valid.has(id)) ? previous.filter((id) => valid.has(id)) : previous))
+  }, [project.tracks])
+
+  /* 音频片段：撤销 / 删除后同步剪掉失效 id */
+  useEffect(() => {
+    const valid = new Set<string>()
+    for (const track of project.tracks) for (const clip of track.audioClips ?? []) valid.add(clip.id)
+    setSelectedAudioIds((previous) =>
+      previous.some((id) => !valid.has(id)) ? previous.filter((id) => valid.has(id)) : previous,
+    )
   }, [project.tracks])
 
   const selectOnly = useCallback((ids: string[]) => {
@@ -740,6 +791,32 @@ export function ArrangementView() {
     lastStoreClipRef.current = null
     if (count > 0) pushToast('info', count > 1 ? `已删除 ${count} 个片段` : '已删除片段')
   }, [pushToast])
+
+  /* ---------- 音频片段动作（选择 / 删除，与 MIDI 片段互不影响） ---------- */
+
+  const selectAudioClip = useCallback((trackId: string, clipId: string, additive = false) => {
+    setSelectedIds([])
+    setSelectedAudioIds((previous) => {
+      if (!additive) return [clipId]
+      return previous.includes(clipId) ? previous.filter((id) => id !== clipId) : [...previous, clipId]
+    })
+    useStore.getState().selectTrack(trackId)
+  }, [])
+
+  const deleteAudioClips = useCallback((ids: string[]) => {
+    if (ids.length === 0) return 0
+    const target = new Set(ids)
+    let removed = 0
+    useStore.getState().mutate((draft) => {
+      for (const track of draft.tracks) {
+        const before = track.audioClips?.length ?? 0
+        track.audioClips = (track.audioClips ?? []).filter((clip) => !target.has(clip.id))
+        removed += before - track.audioClips.length
+      }
+    })
+    setSelectedAudioIds([])
+    return removed
+  }, [])
 
   const handleSelectAll = useCallback(() => {
     const state = useStore.getState()
@@ -914,8 +991,10 @@ export function ArrangementView() {
       const key = event.key.toLowerCase()
       if (event.key === 'Escape') {
         setSelectedIds([])
+        setSelectedAudioIds([])
         setClipMenu(null)
         setEmptyMenu(null)
+        setAudioMenu(null)
         return
       }
       if (meta && key === 'a') {
@@ -942,6 +1021,12 @@ export function ArrangementView() {
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault()
+        /* 音频片段优先：它用的是独立的选中集 */
+        if (selectedAudioIdsRef.current.length > 0) {
+          const count = deleteAudioClips(selectedAudioIdsRef.current)
+          if (count > 0) useStore.getState().pushToast('info', count > 1 ? `已删除 ${count} 个音频片段` : '已删除音频片段')
+          return
+        }
         runAction('delete', actions.remove)
         return
       }
@@ -958,7 +1043,7 @@ export function ArrangementView() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [runAction])
+  }, [runAction, deleteAudioClips])
 
   /* ---------- 片段手势（整体移动 / Alt 复制 / 缩放 / 切片） ---------- */
 
@@ -1084,7 +1169,7 @@ export function ArrangementView() {
   const onRowsPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
     const target = event.target as HTMLElement
-    if (target.closest('[data-clip]')) return
+    if (target.closest('[data-clip]') || target.closest('[data-audio-clip]')) return
     if (target.closest('button, select, input, textarea, a')) return
     const content = contentRef.current
     if (!content) return
@@ -1126,6 +1211,7 @@ export function ArrangementView() {
             lastStoreClipRef.current = track.clips[0]?.id ?? null
           }
           setSelectedIds([])
+          setSelectedAudioIds([])
           return
         }
 
@@ -1135,6 +1221,7 @@ export function ArrangementView() {
         const top = Math.min(startY, y2)
         const bottom = Math.max(startY, y2)
         const hits: string[] = []
+        const audioHits: string[] = []
         let rowTop = RULER_HEIGHT
         state.project.tracks.forEach((track, index) => {
           const rowBottom = rowTop + (heights[index] ?? 0)
@@ -1144,6 +1231,12 @@ export function ArrangementView() {
               const clipRight = clipLeft + clip.lengthBeats * currentPx
               if (clipRight >= left && clipLeft <= right) hits.push(clip.id)
             }
+            /* 音频片段也参与框选（复用同一套坐标换算） */
+            for (const clip of track.audioClips ?? []) {
+              const clipLeft = clip.startBeat * currentPx
+              const clipRight = clipLeft + clip.lengthBeats * currentPx
+              if (clipRight >= left && clipLeft <= right) audioHits.push(clip.id)
+            }
           }
           rowTop = rowBottom
         })
@@ -1152,6 +1245,7 @@ export function ArrangementView() {
         const base = additive ? selectedIdsRef.current : []
         const merged = additive ? [...base.filter((id) => !hits.includes(id)), ...hits] : hits
         setSelectedIds(merged)
+        setSelectedAudioIds(additive ? [...selectedAudioIdsRef.current, ...audioHits] : audioHits)
         const first = locateClips(hits, state.project)[0]
         if (first) {
           lastStoreClipRef.current = first.clipId
@@ -1165,13 +1259,18 @@ export function ArrangementView() {
   /* 空白处双击新建片段 */
   const onRowsDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement
-    if (target.closest('[data-clip]')) return
+    if (target.closest('[data-clip]') || target.closest('[data-audio-clip]')) return
     if (target.closest('button, select, input, textarea, a')) return
     const rowElement = target.closest('[data-track-row]') as HTMLElement | null
     if (!rowElement) return
     const index = Number(rowElement.dataset.trackIndex)
     const track = project.tracks[index]
     if (!track) return
+    /* 音频轨只放音频片段：不在这里新建 MIDI 片段，避免出现「空片段 + 无音色」 */
+    if (track.kind === 'audio') {
+      pushToast('info', '音频轨道：用「文件 → 导入音频…」或「AI 生成音频」添加音频片段')
+      return
+    }
     const rect = rowElement.getBoundingClientRect()
     const rawBeat = Math.max(0, (event.clientX - rect.left) / pxPerBeat)
     const startBeat = tidy(Math.floor(rawBeat / barBeats) * barBeats)
@@ -1190,7 +1289,7 @@ export function ArrangementView() {
   /* 空白处右键菜单 */
   const onRowsContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement
-    if (target.closest('[data-clip]')) return
+    if (target.closest('[data-clip]') || target.closest('[data-audio-clip]')) return
     if (target.closest('button, select, input, textarea, a')) return
     event.preventDefault()
     const content = contentRef.current
@@ -1246,6 +1345,51 @@ export function ArrangementView() {
     : null
   const menuTrack = clipMenu ? project.tracks.find((track) => track.id === clipMenu.trackId) : null
   const menuSelectedCount = menuClip && selectedIdsRef.current.includes(menuClip.id) ? selectedIdsRef.current.length : 1
+  const menuAudioClip = audioMenu
+    ? project.tracks
+        .find((track) => track.id === audioMenu.trackId)
+        ?.audioClips.find((clip) => clip.id === audioMenu.clipId)
+    : null
+  const menuAudioTrack = audioMenu ? project.tracks.find((track) => track.id === audioMenu.trackId) : null
+  const takeMenuClip = takeMenu
+    ? project.tracks
+        .find((track) => track.id === takeMenu.trackId)
+        ?.audioClips.find((clip) => clip.id === takeMenu.clipId)
+    : null
+
+  /**
+   * 切换音频版本（take）：先按**目标 assetId** 取 peaks（缓存按 assetId，不复用旧波形），
+   * 再在一次 mutate 里切 activeTakeId / assetId / durationSec；⌘Z 可整批回退。
+   */
+  const switchAudioTake = useCallback(
+    async (trackId: string, clipId: string, takeId: string) => {
+      const store = useStore.getState()
+      const clip = store.project.tracks.find((track) => track.id === trackId)?.audioClips.find((item) => item.id === clipId)
+      const take = clip?.takes.find((item) => item.id === takeId)
+      if (!clip || !take) {
+        store.pushToast('error', '版本不存在（片段或 take 已被删除）')
+        return
+      }
+      let durationSec = 0
+      try {
+        const peaks = await getAssetPeaks(take.assetId)
+        primeAssetPeaks(take.assetId, peaks)
+        durationSec = peaks.durationSec
+      } catch (error) {
+        console.warn('[arrangement] 切换版本时取波形失败（仍会切换，波形稍后重试）', error)
+      }
+      let switched = false
+      store.mutate((draft) => {
+        switched = switchActiveTake(draft, trackId, clipId, takeId, durationSec || undefined)
+      })
+      if (switched) {
+        store.pushToast('success', `已切换到版本「${take.label || take.id}」（⌘Z 可撤销）`)
+      } else {
+        store.pushToast('error', '切换版本失败：片段或版本已不存在')
+      }
+    },
+    [],
+  )
 
   const openClipInPianoRoll = (trackId: string, clipId: string) => {
     const store = useStore.getState()
@@ -1329,10 +1473,12 @@ export function ArrangementView() {
                     )}
                     style={{ height: rowHeight }}
                   >
-                    {track.clips.length === 0 && (
+                    {track.clips.length === 0 && (track.audioClips?.length ?? 0) === 0 && (
                       <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center gap-1.5 text-[10px] text-ink-4/70">
                         <span className="h-[3px] w-[3px] rounded-full" style={{ background: withAlpha(color, 0.5) }} />
-                        双击空白处新建片段
+                        {track.kind === 'audio'
+                          ? '音频轨道：用「文件 → 导入音频…」放置音频'
+                          : '双击空白处新建片段'}
                       </div>
                     )}
                     {track.clips.map((clip) => (
@@ -1348,6 +1494,34 @@ export function ArrangementView() {
                         onPointerDown={(event, mode) => beginClipGesture(event, track.id, clip.id, mode)}
                         onDoubleClick={() => openClipInPianoRoll(track.id, clip.id)}
                         onContextMenu={(event) => openClipMenu(event, track.id, clip.id)}
+                      />
+                    ))}
+                    {/* 音频片段：与 MIDI 片段平行，画波形（peaks 缓存 + SVG，不占主线程） */}
+                    {(track.audioClips ?? []).map((clip) => (
+                      <AudioClipView
+                        key={clip.id}
+                        clip={clip}
+                        track={track}
+                        pxPerBeat={pxPerBeat}
+                        rowHeight={rowHeight}
+                        selected={selectedAudioIds.includes(clip.id)}
+                        onSelect={(event) => selectAudioClip(track.id, clip.id, event.shiftKey)}
+                        onContextMenu={(event) => {
+                          selectAudioClip(track.id, clip.id, event.shiftKey)
+                          setAudioMenu({ x: event.clientX, y: event.clientY, trackId: track.id, clipId: clip.id })
+                        }}
+                        onDoubleClick={() => {
+                          /* 双击音频片段 = 把播放头定位到片段起点（不进入钢琴卷帘） */
+                          const store = useStore.getState()
+                          store.setPlayhead(clip.startBeat)
+                          if (store.isPlaying) {
+                            try {
+                              getAudioEngine().seek(clip.startBeat)
+                            } catch {
+                              /* ignore */
+                            }
+                          }
+                        }}
                       />
                     ))}
                   </div>
@@ -1440,6 +1614,143 @@ export function ArrangementView() {
           <MenuDivider />
           <MenuItem icon={<Trash2 size={12} />} label="删除片段" shortcut="Del" danger onClick={() => { runAction('delete', handleDelete); setClipMenu(null) }} />
         </ContextMenu>
+      )}
+
+      {/* 音频片段右键菜单（一期：定位 / 选中 / 删除；变速与裁切未启用） */}
+      {audioMenu && menuAudioClip && (
+        <ContextMenu
+          x={audioMenu.x}
+          y={audioMenu.y}
+          onClose={() => setAudioMenu(null)}
+          label={`${menuAudioClip.name} · ${menuAudioTrack?.name ?? ''} · ${menuAudioClip.durationSec.toFixed(1)}s`}
+        >
+          <MenuItem
+            icon={<Play size={12} />}
+            label="从片段开头播放定位"
+            onClick={() => {
+              const store = useStore.getState()
+              store.setPlayhead(menuAudioClip.startBeat)
+              if (store.isPlaying) {
+                try {
+                  getAudioEngine().seek(menuAudioClip.startBeat)
+                } catch {
+                  /* ignore */
+                }
+              }
+              setAudioMenu(null)
+            }}
+          />
+          <MenuItem
+            icon={<Waves size={12} />}
+            label="选中此片段"
+            onClick={() => {
+              selectAudioClip(audioMenu.trackId, audioMenu.clipId)
+              setAudioMenu(null)
+            }}
+          />
+          <MenuDivider />
+          {/* P2-B：局部重绘（整段替换当前版本，原版本自动保留为 take） */}
+          <MenuItem
+            icon={<Wand2 size={12} />}
+            label="局部重绘…"
+            dataAttr={{ 'data-repaint-trigger': '' }}
+            onClick={() => {
+              setRepaintTarget({ trackId: audioMenu.trackId, clipId: audioMenu.clipId })
+              setAudioMenu(null)
+            }}
+          />
+          {/* P5-B：按原曲上下文生成分轨 stem（独立轨道，非分离音轨） */}
+          <MenuItem
+            icon={<Waves size={12} />}
+            label="生成分轨 Stem…"
+            dataAttr={{ 'data-stem-trigger': '' }}
+            onClick={() => {
+              setStemTarget({ trackId: audioMenu.trackId, clipId: audioMenu.clipId })
+              setAudioMenu(null)
+            }}
+          />
+          {(menuAudioClip.takes?.length ?? 0) > 0 && (
+            <MenuItem
+              icon={<Layers size={12} />}
+              label={`切换版本（${menuAudioClip.takes.length}）`}
+              hint={
+                menuAudioClip.takes.find((take) => take.id === menuAudioClip.activeTakeId)?.label ||
+                (menuAudioClip.activeTakeId ? '当前版本' : '')
+              }
+              submenu
+              onClick={() => {
+                setTakeMenu({
+                  x: audioMenu.x,
+                  y: audioMenu.y,
+                  trackId: audioMenu.trackId,
+                  clipId: audioMenu.clipId,
+                })
+                setAudioMenu(null)
+              }}
+            />
+          )}
+          <MenuDivider />
+          <MenuItem
+            icon={<Trash2 size={12} />}
+            label="删除音频片段"
+            shortcut="Del"
+            danger
+            onClick={() => {
+              const count = deleteAudioClips([audioMenu.clipId])
+              if (count > 0) pushToast('info', '已删除音频片段')
+              setAudioMenu(null)
+            }}
+          />
+        </ContextMenu>
+      )}
+
+      {/* 音频片段「切换版本（takes）」弹层：每个版本带 data-take-switch / data-take-id */}
+      {takeMenu && takeMenuClip && takeMenuClip.takes.length > 0 && (
+        <ContextMenu
+          x={takeMenu.x}
+          y={takeMenu.y}
+          onClose={() => setTakeMenu(null)}
+          width={248}
+          label={`切换版本 · ${takeMenuClip.name}（当前：${
+            takeMenuClip.takes.find((take) => take.id === takeMenuClip.activeTakeId)?.label ?? '原版本'
+          }）`}
+        >
+          {takeMenuClip.takes.map((take) => {
+            const active = take.id === takeMenuClip.activeTakeId
+            return (
+              <MenuItem
+                key={take.id}
+                checked={active}
+                icon={<Layers size={12} />}
+                label={`${take.label || '版本'} · ${formatRelativeTime(take.createdAt)}`}
+                hint={active ? '当前' : undefined}
+                dataAttr={{ 'data-take-switch': '', 'data-take-id': take.id }}
+                onClick={() => {
+                  setTakeMenu(null)
+                  void switchAudioTake(takeMenu.trackId, takeMenu.clipId, take.id)
+                }}
+              />
+            )
+          })}
+        </ContextMenu>
+      )}
+
+      {/* 局部重绘对话框（portal 模态；轮询只活在对话框生命周期内） */}
+      {repaintTarget && (
+        <RepaintAudioDialog
+          trackId={repaintTarget.trackId}
+          clipId={repaintTarget.clipId}
+          onClose={() => setRepaintTarget(null)}
+        />
+      )}
+
+      {/* P5-B：生成分轨 Stem 对话框（多 arm 任务 + 自动新建独立音频轨） */}
+      {stemTarget && (
+        <StemGenerateDialog
+          trackId={stemTarget.trackId}
+          clipId={stemTarget.clipId}
+          onClose={() => setStemTarget(null)}
+        />
       )}
 
       {/* 空白处右键菜单 */}

@@ -18,7 +18,7 @@ import { z } from 'zod'
 import {
   beatsPerBar,
   createEmptyProject,
-  projectSchema,
+  migrateProject,
   type AppSettings,
   type Project,
 } from '@aiab/core'
@@ -47,8 +47,7 @@ function readProjectFile(): Project | null {
   if (!existsSync(projectFile)) return null
   try {
     const raw = JSON.parse(readFileSync(projectFile, 'utf8')) as unknown
-    const parsed = projectSchema.safeParse(raw)
-    return parsed.success ? (parsed.data as unknown as Project) : null
+    return migrateProject(raw)
   } catch {
     return null
   }

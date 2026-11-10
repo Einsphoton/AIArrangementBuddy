@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   ChevronDown,
+  ClipboardList,
   FilePlus2,
   FolderOpen,
   Music4,
@@ -16,6 +17,9 @@ import {
 import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
 import { getHealth } from '../../lib/api'
+import { CompanionBadge } from '../audio/CompanionBadge'
+import { GenerateAudioPanel } from '../audio/GenerateAudioPanel'
+import { TaskCenterPanel } from '../audio/TaskCenterPanel'
 import { ProjectMenu } from './ProjectMenu'
 import { Kbd } from '../../components/ui/menu'
 import { modSymbol } from '../../lib/shortcuts'
@@ -33,6 +37,8 @@ export function TopBar() {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen)
   const aiBusy = useStore((s) => s.aiBusy)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [generateOpen, setGenerateOpen] = useState(false)
+  const [taskCenterOpen, setTaskCenterOpen] = useState(false)
   const [aiOnline, setAiOnline] = useState<boolean | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(project.name)
@@ -147,7 +153,7 @@ export function TopBar() {
 
       {/* 命令面板入口：把「能做什么」变成可搜索的一等入口 */}
       <button
-        className="ml-2 hidden h-7 w-[230px] shrink-0 items-center gap-2 rounded-lg border border-line bg-bg-soft px-2 text-[11.5px] text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-2 hover:text-ink-2 lg:flex"
+        className="ml-2 hidden h-7 w-[230px] shrink-0 items-center gap-2 rounded-lg border border-line bg-bg-soft px-2 text-[11.5px] text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-2 hover:text-ink-2 min-[1180px]:flex"
         onClick={() => window.dispatchEvent(new CustomEvent('aiab:command-palette'))}
         title="搜索并执行所有命令"
       >
@@ -160,6 +166,38 @@ export function TopBar() {
       </button>
 
       <div className="flex-1" />
+
+      {/* AI 生成音频（Companion 任务）+ 生成节点在线状态 */}
+      <button
+        data-generate-audio-trigger
+        className={cn(
+          'btn btn-ghost h-7 shrink-0 gap-1.5 px-2 text-[11.5px]',
+          generateOpen && 'border-accent/40 bg-accent/10 text-accent-soft',
+        )}
+        onClick={() => setGenerateOpen(true)}
+        title="AI 生成音频：用本地 Companion 的音乐生成模型产出音频并加入工程"
+        aria-haspopup="dialog"
+      >
+        <Sparkles size={13} />
+        <span className="hidden min-[1360px]:inline">生成音频</span>
+      </button>
+      <CompanionBadge onOpenPanel={() => setGenerateOpen(true)} />
+      {/* P4-B：Companion 任务中心（队列 / 优先级 / 取消） */}
+      <button
+        data-task-center-trigger
+        className={cn(
+          'btn btn-ghost h-7 shrink-0 gap-1.5 px-2 text-[11.5px]',
+          taskCenterOpen && 'border-accent/40 bg-accent/10 text-accent-soft',
+        )}
+        onClick={() => setTaskCenterOpen(true)}
+        title="任务中心：Companion 队列 / 优先级 / 取消"
+        aria-haspopup="dialog"
+      >
+        <ClipboardList size={13} />
+        <span className="hidden min-[1360px]:inline">任务中心</span>
+      </button>
+
+      <span className="h-5 w-px shrink-0 bg-line" />
 
       {/* 新建 / 保存 */}
       <button
@@ -225,6 +263,11 @@ export function TopBar() {
           style={{ animation: 'pulse-dot 2.4s ease-in-out infinite' }}
         />
       </button>
+
+      {/* AI 生成音频面板（portal 到 body，避免被顶栏 / 时间轴层叠上下文裁剪） */}
+      {generateOpen && <GenerateAudioPanel onClose={() => setGenerateOpen(false)} />}
+      {/* P4-B：任务中心（打开时 2s 轮询，关闭即停） */}
+      {taskCenterOpen && <TaskCenterPanel onClose={() => setTaskCenterOpen(false)} />}
     </header>
   )
 }

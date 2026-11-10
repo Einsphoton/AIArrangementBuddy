@@ -61,7 +61,7 @@ export function getProfile(styleName: string): StyleProfile | undefined {
 
 /**
  * 工程风格 → 语料画像的候选顺序。
- * 工程用的是 7 个内置 StyleId，而语料画像用的是用户自己的风格名（j-rock / jrpg …），
+ * 工程用的是 9 个内置 StyleId，而语料画像用的是用户自己的风格名（j-rock / jrpg …），
  * 这里做一层「最接近的内置风格」映射；找不到就返回 undefined（回落到内置常量）。
  */
 const STYLE_CANDIDATES: Record<StyleId, string[]> = {
@@ -72,6 +72,8 @@ const STYLE_CANDIDATES: Record<StyleId, string[]> = {
   jazz: ['jazz'],
   electronic: ['electronic', 'edm'],
   folk: ['folk', 'acoustic'],
+  jrock: ['j-rock', 'jrock', 'post-hardcore', 'alt-rock', 'britpop', 'rock'],
+  jrpg: ['jrpg', 'vgm', 'game-music', 'orchestral', 'cinematic'],
 }
 
 /** 按内置风格取画像（精确同名 > 候选列表） */
