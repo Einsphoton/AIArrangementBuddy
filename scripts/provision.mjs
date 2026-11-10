@@ -56,6 +56,12 @@ function printStatus(status) {
     console.log(`  [${profile.ready ? '✓' : ' '}] ${profile.id.padEnd(9)} ${profile.label} · 需下载 ${humanBytes(profile.downloadBytes)}`)
   }
   const missing = (status.models ?? []).filter((model) => !model.installed)
+  const adapters = status.adapters ?? []
+  if (adapters.length > 0) {
+    const ready = adapters.filter((adapter) => adapter.installed).length
+    console.log(`LoRA 适配器：${ready}/${adapters.length} 就绪（自生成数据，共 ${humanBytes(adapters.reduce((sum, adapter) => sum + adapter.expectedBytes, 0))}）`)
+    for (const adapter of adapters) console.log(`  [${adapter.installed ? '✓' : ' '}] ${adapter.id} · ${adapter.name}`)
+  }
   if (missing.length > 0) {
     console.log(`缺失模型 ${missing.length} 个，约 ${humanBytes(status.missingBytes)}`)
     for (const model of missing) console.log(`  - ${model.name}（${humanBytes(model.expectedBytes)}）`)
@@ -105,7 +111,7 @@ async function main() {
     const { status, body } = await api('/api/provision/install', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profiles }),
+      body: JSON.stringify({ profiles, adapters: !args.includes('--no-adapters') }),
     })
     if (status !== 200) {
       console.error(`启动安装失败（HTTP ${status}）：${body?.error ?? JSON.stringify(body)}`)

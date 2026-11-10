@@ -690,6 +690,16 @@ export interface ProvisionModelStatus {
   profiles: ProvisionProfileId[]
 }
 
+export interface ProvisionAdapterStatus {
+  id: string
+  name: string
+  installed: boolean
+  bytes: number
+  expectedBytes: number
+  style?: string
+  license: string
+}
+
 export interface ProvisionStatus {
   platform: string
   supported: boolean
@@ -698,6 +708,7 @@ export interface ProvisionStatus {
   dataDir?: string
   runtime: { installed: boolean; path: string | null; sizeBytes: number; version?: string }
   models: ProvisionModelStatus[]
+  adapters: ProvisionAdapterStatus[]
   profiles: ProvisionProfileInfo[]
   missingBytes: number
   notes: string[]
@@ -730,10 +741,13 @@ export function getProvisionStatus(): Promise<ProvisionStatus> {
 }
 
 /** POST /api/provision/install：开始自动下载（服务端执行） */
-export function startProvisionInstall(profiles: ProvisionProfileId[]): Promise<{ jobId: string; job: ProvisionJob }> {
+export function startProvisionInstall(
+  profiles: ProvisionProfileId[],
+  options: { adapters?: boolean } = {},
+): Promise<{ jobId: string; job: ProvisionJob }> {
   return request<{ jobId: string; job: ProvisionJob }>('/api/provision/install', {
     method: 'POST',
-    body: JSON.stringify({ profiles }),
+    body: JSON.stringify({ profiles, adapters: options.adapters !== false }),
   })
 }
 

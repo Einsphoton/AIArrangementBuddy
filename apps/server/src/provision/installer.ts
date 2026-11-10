@@ -14,12 +14,15 @@ import process from 'node:process'
 import { readZipEntries } from '../sync/zip-read.js'
 import { downloadFile } from './downloader.js'
 import {
+  ADAPTER_ASSETS,
   DOWNLOAD_CACHE_DIR,
   MODEL_FILES,
   PROVISION_DIR_NAME,
   RUNTIME_ASSETS,
   RUNTIME_BINARIES,
   RUNTIME_EXECUTABLES,
+  adapterUrl,
+  adaptersTotalBytes,
   modelUrl,
   modelsForProfiles,
   resolvePlatform,
@@ -71,6 +74,16 @@ export interface RuntimeStatus {
   version?: string
 }
 
+export interface AdapterStatus {
+  id: string
+  name: string
+  installed: boolean
+  bytes: number
+  expectedBytes: number
+  style?: string
+  license: string
+}
+
 export interface ModelStatus {
   name: string
   installed: boolean
@@ -85,6 +98,7 @@ export interface ProvisionStatus {
   root: string
   runtime: RuntimeStatus
   models: ModelStatus[]
+  adapters: AdapterStatus[]
   profiles: Record<ProvisionProfile, boolean>
   missingBytes: number
   notes: string[]
@@ -96,6 +110,38 @@ function fileSizeSafe(target: string): number {
   } catch {
     return 0
   }
+}
+
+export interface AdapterPaths {
+  dir: string
+  downloads: string
+}
+
+export function adapterPaths(dataDir: string, adaptersDir?: string): AdapterPaths {
+  return {
+    dir: adaptersDir || path.join(dataDir, 'adapters'),
+    downloads: path.join(dataDir, PROVISION_DIR_NAME, DOWNLOAD_CACHE_DIR),
+  }
+}
+
+export function adapterStatus(options: { dataDir: string; adaptersDir?: string }): AdapterStatus[] {
+  const dir = adapterPaths(options.dataDir, options.adaptersDir).dir
+  return ADAPTER_ASSETS.map((asset) => {
+    const base = path.join(dir, asset.id)
+    const config = path.join(base, 'adapter.json')
+    const weights = path.join(base, 'adapter_model.safetensors')
+    const custom = path.join(base, 'lokr_weights.safetensors')
+    const bytes = fileSizeSafe(weights) || fileSizeSafe(custom)
+    return {
+      id: asset.id,
+      name: asset.name,
+      style: asset.style,
+      license: asset.license,
+      installed: existsSync(config) && bytes > 0,
+      bytes,
+      expectedBytes: asset.size,
+    }
+  })
 }
 
 export function provisionStatus(options: { dataDir: string; platform?: ProvisionPlatform }): ProvisionStatus {
@@ -120,6 +166,7 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
       profiles: file.profiles,
     }
   })
+  const adapters = adapterStatus({ dataDir: options.dataDir })
   const installedByName = new Map(models.map((model) => [model.name, model.installed]))
   const satisfied = (profile: ProvisionProfile): boolean => {
     if (!binary) return false
@@ -138,16 +185,24 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
     notes.push(`模型缺 ${missingModels.length} 个，共约 ${(missingModels.reduce((sum, model) => sum + model.expectedBytes, 0) / 1e9).toFixed(1)}GB`)
   }
   if (binary && essential) notes.push('基础能力已就绪（快模式可直接生成）')
+  const missingAdapters = adapters.filter((adapter) => !adapter.installed)
+  if (missingAdapters.length > 0) {
+    notes.push(`LoRA 适配器缺 ${missingAdapters.length} 个（共 ${(adaptersTotalBytes() / 1e6).toFixed(0)}MB，自生成数据、可安全分发）`)
+  } else {
+    notes.push('LoRA 适配器已就绪（jrpg_v1 / jrpg_v2 / jrock_v1）')
+  }
   return {
     platform,
     supported: true,
     root: paths.root,
     runtime: { installed: Boolean(binary), path: binary, sizeBytes: runtimeSize, version },
     models,
+    adapters,
     profiles,
     missingBytes:
       (binary ? 0 : RUNTIME_ASSETS[platform].size) +
-      missingModels.reduce((sum, model) => sum + model.expectedBytes, 0),
+      missingModels.reduce((sum, model) => sum + model.expectedBytes, 0) +
+      missingAdapters.reduce((sum, adapter) => sum + adapter.expectedBytes, 0),
     notes,
   }
 }
@@ -279,6 +334,66 @@ export async function installModels(options: InstallModelsOptions): Promise<{ in
   return { installed, cached, bytes: doneBytes }
 }
 
+export interface InstallAdaptersOptions {
+  dataDir: string
+  adaptersDir?: string
+  ids?: string[]
+  signal?: AbortSignal
+  onProgress?: (progress: number, message: string) => void
+  fetchImpl?: typeof fetch
+  log?: (message: string) => void
+}
+
+/**
+ * 下载并安装 LoRA 适配器（tar.gz → data/adapters/<id>/）。
+ * 只允许清单里的自生成适配器；真实数据内部研究版不在清单中，传错 id 直接报错。
+ */
+export async function installAdapters(options: InstallAdaptersOptions): Promise<{ installed: number; cached: number }> {
+  const selected = options.ids && options.ids.length > 0 ? options.ids : ADAPTER_ASSETS.map((asset) => asset.id)
+  const unknown = selected.filter((id) => !ADAPTER_ASSETS.some((asset) => asset.id === id))
+  if (unknown.length > 0) throw new Error(`不认识的适配器：${unknown.join(', ')}（可用：${ADAPTER_ASSETS.map((a) => a.id).join(' / ')}）`)
+  const assets = ADAPTER_ASSETS.filter((asset) => selected.includes(asset.id))
+  const paths = adapterPaths(options.dataDir, options.adaptersDir)
+  mkdirSync(paths.dir, { recursive: true })
+  mkdirSync(paths.downloads, { recursive: true })
+  const totalBytes = assets.reduce((sum, asset) => sum + asset.size, 0)
+  let doneBytes = 0
+  let installed = 0
+  let cached = 0
+  for (const asset of assets) {
+    const archivePath = path.join(paths.downloads, asset.file)
+    const result = await downloadFile({
+      url: adapterUrl(asset),
+      dest: archivePath,
+      sha256: asset.sha256,
+      size: asset.size,
+      signal: options.signal,
+      fetchImpl: options.fetchImpl,
+      log: options.log,
+      onProgress: ({ received }) => {
+        const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
+        options.onProgress?.(ratio, `下载适配器 ${asset.id}（${((doneBytes + received) / 1e6).toFixed(1)}/${(totalBytes / 1e6).toFixed(1)}MB）`)
+      },
+    })
+    const entries = extractTarGz(readFileSync(archivePath))
+    for (const [name, data] of entries) {
+      const safeName = name.replace(/\\/g, '/').replace(/^\.?\//, '')
+      if (!safeName || safeName.startsWith('..') || path.isAbsolute(safeName)) continue
+      const target = path.join(paths.dir, safeName)
+      if (!target.startsWith(paths.dir)) continue
+      mkdirSync(path.dirname(target), { recursive: true })
+      writeFileSync(target, data)
+    }
+    const status = adapterStatus({ dataDir: options.dataDir, adaptersDir: options.adaptersDir }).find((item) => item.id === asset.id)
+    if (!status?.installed) throw new Error(`适配器解压后未找到文件：${asset.id}`)
+    if (result.status === 'downloaded') installed += 1
+    else cached += 1
+    doneBytes += asset.size
+    options.onProgress?.(totalBytes > 0 ? doneBytes / totalBytes : 1, `适配器 ${asset.id} 就绪`)
+  }
+  return { installed, cached }
+}
+
 /* ------------------------------------------------------------------ */
 /* 安装任务（内存态，带进度；同一时刻只跑一个）                          */
 /* ------------------------------------------------------------------ */
@@ -342,6 +457,10 @@ export interface StartProvisionOptions {
   profiles: ProvisionProfile[]
   platform?: ProvisionPlatform
   force?: boolean
+  /** 是否安装 LoRA 适配器（默认 true；P8-B） */
+  adapters?: boolean
+  /** 指定适配器 id（默认清单全部） */
+  adapterIds?: string[]
 }
 
 /** 启动安装任务（异步执行；返回立即返回 job）。 */
@@ -364,6 +483,20 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
     if (!installed || options.force) {
       steps.push({ key: `model:${file.name}`, label: file.name, status: 'pending', progress: 0, totalBytes: file.size })
     }
+  }
+  const wantAdapters = options.adapters !== false
+  const adapterIds = options.adapterIds && options.adapterIds.length > 0 ? options.adapterIds : ADAPTER_ASSETS.map((asset) => asset.id)
+  const missingAdapters = adapterStatus({ dataDir: options.dataDir }).filter(
+    (adapter) => adapterIds.includes(adapter.id) && (!adapter.installed || options.force),
+  )
+  if (wantAdapters && missingAdapters.length > 0) {
+    steps.push({
+      key: 'adapters',
+      label: `LoRA 适配器（${missingAdapters.map((adapter) => adapter.id).join(', ')}）`,
+      status: 'pending',
+      progress: 0,
+      totalBytes: missingAdapters.reduce((sum, adapter) => sum + adapter.expectedBytes, 0),
+    })
   }
   const job: ProvisionJob = {
     id,
@@ -404,6 +537,22 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
               updateJob(id, {
                 steps: jobNow.steps.map((item) => (item.key === step.key ? { ...item, progress, message } : item)),
               })
+            },
+            log: (message) => {
+              const jobNow = jobs.get(id)
+              if (!jobNow) return
+              updateJob(id, { steps: jobNow.steps.map((item) => (item.key === step.key ? { ...item, message } : item)) })
+            },
+          })
+        } else if (step.key === 'adapters') {
+          await installAdapters({
+            dataDir: options.dataDir,
+            ids: adapterIds,
+            signal,
+            onProgress: (progress, message) => {
+              const jobNow = jobs.get(id)
+              if (!jobNow) return
+              updateJob(id, { steps: jobNow.steps.map((item) => (item.key === step.key ? { ...item, progress, message } : item)) })
             },
             log: (message) => {
               const jobNow = jobs.get(id)

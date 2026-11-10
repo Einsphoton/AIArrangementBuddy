@@ -39,6 +39,8 @@ export function ProvisionButton() {
   const [status, setStatus] = useState<ProvisionStatus | null>(null)
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<ProvisionProfileId[]>(['essential'])
+  /** P8-B：是否同时下载 LoRA 适配器（自生成数据，默认勾选） */
+  const [withAdapters, setWithAdapters] = useState(true)
   const [job, setJob] = useState<ProvisionJob | null>(null)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -80,7 +82,7 @@ export function ProvisionButton() {
     setStarting(true)
     setError(null)
     try {
-      const result = await startProvisionInstall(selected)
+      const result = await startProvisionInstall(selected, { adapters: withAdapters })
       setJob(result.job)
       const tick = async () => {
         try {
@@ -119,7 +121,9 @@ export function ProvisionButton() {
 
   /* 已就绪且没有未完成安装时不显示（避免打扰） */
   const essentialReady = status?.profiles?.find((item) => item.id === 'essential')?.ready === true
-  const hidden = !status || (essentialReady && status.runtime.installed) || !status.supported
+  const adapters = status?.adapters ?? []
+  const missingAdapters = adapters.filter((adapter) => !adapter.installed).length
+  const hidden = !status || (essentialReady && status.runtime.installed && missingAdapters === 0) || !status.supported
   if (hidden) return null
 
   const running = job?.status === 'running'
@@ -224,6 +228,36 @@ export function ProvisionButton() {
                     )
                   })}
                 </div>
+
+                {missingAdapters > 0 && (
+                  <label
+                    data-provision-adapters
+                    className={cn(
+                      'mt-1.5 flex cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-[10.5px]',
+                      withAdapters ? 'border-accent/45 bg-accent/8' : 'border-line bg-bg-soft',
+                      running && 'pointer-events-none opacity-70',
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={withAdapters}
+                      disabled={running}
+                      onChange={(event) => setWithAdapters(event.target.checked)}
+                      className="mt-[2px] h-3.5 w-3.5 shrink-0 accent-[var(--accent,#4fd1c5)]"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="font-medium text-ink-2">LoRA 适配器（风格包）</span>
+                        <span className="ml-auto shrink-0 text-[9px] text-ink-4">
+                          已就绪 {adapters.length - missingAdapters}/{adapters.length}
+                        </span>
+                      </span>
+                      <span className="mt-0.5 block truncate text-[9px] text-ink-4">
+                        {adapters.map((adapter) => `${adapter.id}${adapter.installed ? '✓' : ''}`).join(' · ')}（自生成数据，可安全分发）
+                      </span>
+                    </span>
+                  </label>
+                )}
 
                 {error && (
                   <p className="mt-2 flex items-start gap-1 rounded border border-danger/30 bg-danger/8 px-2 py-1 text-[10px] text-danger">

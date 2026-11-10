@@ -175,6 +175,65 @@ export function profileLabel(profile: ProvisionProfile): string {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* LoRA 适配器（P8-B）：只发布自生成数据的适配器                        */
+/* ------------------------------------------------------------------ */
+
+export interface AdapterAsset {
+  id: string
+  name: string
+  style?: string
+  license: string
+  file: string
+  size: number
+  sha256: string
+}
+
+/**
+ * 发布在本仓库 GitHub Releases 的适配器（adapters-v1）。
+ * 只包含自生成数据训练的版本；真实录音内部研究版（real_*）永远不在此列。
+ */
+export const ADAPTER_RELEASE_TAG = 'adapters-v1'
+export const ADAPTER_RELEASE_BASE = `https://github.com/Einsphoton/AIArrangementBuddy/releases/download/${ADAPTER_RELEASE_TAG}`
+
+export const ADAPTER_ASSETS: AdapterAsset[] = [
+  {
+    id: 'jrpg_v1',
+    name: 'JRPG v1',
+    style: 'jrpg',
+    license: 'self-generated (ACE-Step 1.5 MIT weights); no third-party rights',
+    file: 'adapter-jrpg_v1.tar.gz',
+    size: 17_108_566,
+    sha256: 'f07c710cdee5d49ffde4063a81154e197e3ad028da1d310077eff03cce5b27dd',
+  },
+  {
+    id: 'jrpg_v2',
+    name: 'JRPG v2',
+    style: 'jrpg',
+    license: 'self-generated (ACE-Step 1.5 MIT weights); no third-party rights',
+    file: 'adapter-jrpg_v2.tar.gz',
+    size: 34_142_622,
+    sha256: '42116497b5d383215935255f7ee027ce824c2a3db5d0b6f9b8befc85bb59c1b1',
+  },
+  {
+    id: 'jrock_v1',
+    name: 'J-Rock v1',
+    style: 'jrock',
+    license: 'self-generated (ACE-Step 1.5 MIT weights); no third-party rights',
+    file: 'adapter-jrock_v1.tar.gz',
+    size: 34_110_127,
+    sha256: '14859aafd442ba90b9cba5685c9d78024f080af1c501342c93cfd407827b3d47',
+  },
+]
+
+export function adapterUrl(asset: AdapterAsset): string {
+  return `${ADAPTER_RELEASE_BASE}/${asset.file}`
+}
+
+export function adaptersTotalBytes(assets: AdapterAsset[] = ADAPTER_ASSETS): number {
+  return assets.reduce((sum, asset) => sum + asset.size, 0)
+}
+
 /** 本机 agent 引擎根目录（在数据目录下，随产品数据走） */
 export const PROVISION_DIR_NAME = 'ace-step'
 /** 下载缓存（支持断点续传） */

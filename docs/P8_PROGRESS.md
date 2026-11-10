@@ -31,11 +31,27 @@
 ### 文档
 `docs/SETUP_MAC.md`（环境、两种安装方式、Companion 启动、代理、验收命令、边界）
 
-## 阶段 B：LoRA 适配器自动下载（待做）
+## 阶段 B：LoRA 适配器自动下载 ✅ 2026-11-10
 
-- 只发布**自生成数据**适配器（jrpg_v1 / jrpg_v2 / jrock_v1，各 22–44MB）到本仓库 GitHub Releases
-- 产品内「模型管理器」按需下载/校验/安装到 `data/adapters/`
-- 真实数据内部研究版（real_jrpg_v1 / real_jrock_v1）**绝不上传**
+### 交付
+- **发布**：自生成数据的 3 个适配器已打包上传到本仓库 GitHub Releases `adapters-v1`：
+  - `adapter-jrpg_v1.tar.gz`（17.1MB, sha256 `f07c710c…`）
+  - `adapter-jrpg_v2.tar.gz`（34.1MB, sha256 `42116497…`）
+  - `adapter-jrock_v1.tar.gz`（34.1MB, sha256 `14859aaf…`）
+  - 包内是 `adapter.json` + `adapter_config.json` + `adapter_model.safetensors` + `verified.json`；**真实数据内部研究版不在发布清单中**
+- **清单**：`ADAPTER_ASSETS`（id/名称/风格/license/大小/sha256/URL）随安装器下发，传未知 id 直接报错
+- **安装器**：`installAdapters()` 下载 tar.gz → sha256 校验 → 解压到 `<数据目录>/adapters/<id>/`；已存在则跳过（缓存）
+- **进安装任务**：`POST /api/provision/install` 支持 `adapters`（默认 true），任务里多一步「LoRA 适配器」并显示进度；`--no-adapters` 可跳过
+- **状态/CLI**：`/api/provision/status` 与 `provision.mjs status` 显示每个适配器是否就绪、总大小；产品顶栏安装面板列出适配器勾选行
+- **自检**：`node scripts/self-check.mjs` 显示适配器数量
+
+### 验收
+| 项 | 结果 |
+|---|---|
+| 安装内核（tsx 直跑） | **10/10**：原 7 项 + 适配器清单（无 real_*、sha256/URL/license）+ 状态检测 + **真实从 GitHub Releases 下载安装 3 个适配器并二次命中缓存** |
+| 安装 UI | **5/5**：安装请求带 `adapters:true`、适配器选项行可见、进度到完成、1024px、无 console |
+| CLI 真机 | `provision.mjs status` 显示 `LoRA 适配器：3/3 就绪（自生成数据，共 81MB）` |
+| 安全边界 | 发布清单只有自生成数据版本；真实录音研究版只在本机 `data/adapters`，未进入 release |
 
 ## 阶段 C：训练按需下载与续接训练（待做）
 

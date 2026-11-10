@@ -25,7 +25,7 @@ node scripts/start.mjs        # 打开 http://127.0.0.1:8787
 
 打开页面后，顶栏会出现 **「安装本机引擎」** 按钮：
 
-1. 点开 → 选择能力（基础 / 质量模式 / 分轨）；
+1. 点开 → 选择能力（基础 / 质量模式 / 分轨）+ 默认勾选「LoRA 适配器（风格包，约 81MB）」；
 2. 点「开始下载」，面板里显示每个文件的进度与总体百分比；
 3. 安装完成后按钮消失（引擎就绪）；若中途关闭页面，后端任务继续跑，重新打开可继续看进度（`GET /api/provision/jobs`）。
 
@@ -36,7 +36,7 @@ node scripts/provision.mjs status --server http://127.0.0.1:8787
 node scripts/provision.mjs install --profile essential,quality,stems --server http://127.0.0.1:8787
 ```
 
-安装内容落到 `<数据目录>/ace-step/`（默认仓库下 `data/ace-step/`，可用 `AIAB_DATA_DIR` 指定）：
+安装内容落到 `<数据目录>/ace-step/`，适配器落到 `<数据目录>/adapters/`（默认仓库下 `data/`，可用 `AIAB_DATA_DIR` 指定）：
 
 ```
 data/ace-step/
@@ -44,6 +44,9 @@ data/ace-step/
   models/*.gguf          # 模型（HF Serveurperso/ACE-Step-1.5-GGUF）
   .downloads/            # 断点续传缓存（.part）
   runtime.json           # 已安装运行时版本/平台/sha256
+
+data/adapters/           # LoRA 适配器（自生成数据，GitHub Releases adapters-v1）
+  jrpg_v1/ jrpg_v2/ jrock_v1/   # 每个含 adapter.json/config/权重
 ```
 
 ## 3. 启动 GPU 工作节点（Companion）
@@ -97,5 +100,5 @@ node scripts/start.mjs
 
 - 模型下载源是公开 HuggingFace 仓库（`Serveurperso/ACE-Step-1.5-GGUF`），需要能访问 `huggingface.co`（受限网络请走代理）；运行时来自 GitHub Releases。
 - Linux x64 运行时目前没有钉死 sha256（只有大小校验）；Windows/macOS 已钉死。
-- **真实数据训练的适配器（real_jrpg_v1 / real_jrock_v1）不会分发**，只在你本机 Windows 上；P8-B 只发布自生成数据的适配器。
+- **真实数据训练的适配器（real_jrpg_v1 / real_jrock_v1）不会分发**，只在本机；自动安装只发布自生成数据的适配器（jrpg_v1 / jrpg_v2 / jrock_v1，见 GitHub Releases `adapters-v1`）。
 - P8-C「按需训练」尚未实现；现在 `music-gen/` 训练管线仍只在开发机存在。

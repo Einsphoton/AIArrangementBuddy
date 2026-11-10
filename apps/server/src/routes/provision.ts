@@ -64,7 +64,8 @@ export function registerProvisionRoutes(app: FastifyInstance): void {
     try {
       const profiles = parseProfiles(body.profiles)
       const force = body.force === true
-      const job = startProvision({ dataDir, profiles, force })
+      const adapters = body.adapters !== false
+      const job = startProvision({ dataDir, profiles, force, adapters })
       return reply.send({ jobId: job.id, job })
     } catch (error) {
       return reply.code(400).send({ error: errorMessage(error) })
