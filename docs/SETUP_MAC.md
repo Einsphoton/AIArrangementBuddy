@@ -96,7 +96,17 @@ node scripts/start.mjs
   - 顶栏入口与平台/缺失大小；面板 3 个 profile；install 调用与进度到 100%；1024px 无溢出；无 console
 - `node music-gen/tools/verify_companion.mjs`：**90/90**（跨平台路径/预检提示回归）
 
-## 6. 边界与已知限制
+## 6. 在 Mac 上继续训练（P8-C，进行中）
+
+训练所需的代码/数据集/检查点/Python 都是**按需下载**（只在点「开始训练」时），当前已发布：
+- 训练代码包：GitHub Releases `training-code-v1`（323KB，含 runner + ACE-Step/Side-Step 快照）
+- 自生成数据集：`training-data-v1`（jrpg_v1 74MB / jrpg_v2 207MB / jrock_v1 209MB）
+- 基座检查点：HF `ACE-Step/Ace-Step1.5`（turbo+VAE+文本编码器，共 6.34GB，LFS sha256）
+- 独立 Python：python-build-standalone 3.12 macOS arm64（25MB）
+
+macOS 训练走 MPS（**比 CUDA 慢很多**，建议 epochs 60–100 起步、先跑小数据集验证）；完整的产品内「开始训练」面板与服务端按需下载仍在 P8-C 后续轮次落地。手动 runner 用法见 `training/README.md`。
+
+## 7. 边界与已知限制
 
 - 模型下载源是公开 HuggingFace 仓库（`Serveurperso/ACE-Step-1.5-GGUF`），需要能访问 `huggingface.co`（受限网络请走代理）；运行时来自 GitHub Releases。
 - Linux x64 运行时目前没有钉死 sha256（只有大小校验）；Windows/macOS 已钉死。

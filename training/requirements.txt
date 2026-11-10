@@ -1,0 +1,51 @@
+# ArrangementBuddy LoRA 训练依赖（P8-C，跨平台，含 Apple Silicon MPS）
+#
+# 安装方式（由产品自动创建 venv 后执行）：
+#   python -m pip install -r requirements.txt
+#
+# 说明：
+# - Windows/Linux 如果需要 CUDA 版 torch，请先按 https://pytorch.org 安装对应 wheel；
+#   本文件只在 macOS 上固定了 Metal/MPS 可用的 torch。
+# - 训练代码（acestep/training_v2）来自 Side-Step（MIT）与 ACE-Step（MIT）的定制快照，
+#   详见 NOTICE.md。
+
+# ---- PyTorch（macOS Apple Silicon：MPS）----
+torch>=2.9.1; sys_platform == "darwin" and platform_machine == "arm64"
+torchaudio>=2.9.1; sys_platform == "darwin" and platform_machine == "arm64"
+torchvision>=0.24.1; sys_platform == "darwin" and platform_machine == "arm64"
+# ---- 其它平台由用户/产品预装 torch（CUDA 版）----
+torch; sys_platform != "darwin"
+torchaudio; sys_platform != "darwin"
+
+# ---- 核心训练依赖 ----
+transformers>=4.51.0,<4.58.0
+diffusers>=0.33.0
+lightning>=2.5.1
+peft>=0.18.0
+accelerate>=1.6.0
+safetensors
+einops>=0.8.1
+numpy
+
+# ---- 音频 ----
+torchcodec>=0.9.1; sys_platform != "win32"
+soundfile>=0.13.1
+pyloudnorm>=0.1.0
+librosa==0.11.0
+
+# ---- 模型运行时 ----
+vector-quantize-pytorch>=1.27.15
+
+# ---- 适配器 ----
+lycoris-lora>=2.0.0
+
+# ---- 日志/监控 ----
+loguru>=0.7.3
+tensorboard>=2.20.0
+tensorboardX
+rich>=13.0.0
+tqdm
+
+# ---- 可选（Mac 上不装 CUDA 专用包）----
+bitsandbytes>=0.45.0; sys_platform != "darwin"
+prodigyopt>=1.1.2; sys_platform != "darwin"

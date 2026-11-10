@@ -53,7 +53,25 @@
 | CLI 真机 | `provision.mjs status` 显示 `LoRA 适配器：3/3 就绪（自生成数据，共 81MB）` |
 | 安全边界 | 发布清单只有自生成数据版本；真实录音研究版只在本机 `data/adapters`，未进入 release |
 
-## 阶段 C：训练按需下载与续接训练（待做）
+## 阶段 C：训练按需下载与续接训练 🟡 进行中（2026-11-10 已交付基础设施）
 
-- 只有点击「开始训练」才下载：训练脚本包、自生成数据集、HF 基座检查点、Python 环境依赖
-- 支持在 macOS 上跑训练（MPS；慢，需明确提示）与注册新适配器
+### 已完成
+- **训练代码包** `training-code-v1.tar.gz`（323KB，sha256 `92912e91…`）已发布到本仓库 Releases：
+  - `acestep/{training,training_v2,models}` 最小子集 + `pyshim`（torchaudio→soundfile）+ `training/runner.py` + `requirements.txt` + MIT LICENSE（ACE-Step / Side-Step）
+- **自生成训练数据集** `training-data-v1` 已发布（真实录音研究版不在其中）：
+  - `dataset-jrpg_v1.tar.gz` 77,248,630B sha256 `61135a17…`
+  - `dataset-jrpg_v2.tar.gz` 217,126,315B sha256 `ea9063af…`
+  - `dataset-jrock_v1.tar.gz` 219,057,663B sha256 `3d0b1df3…`
+- **检查点清单**：`apps/server/src/provision/trainingManifest.ts` 从 HF `ACE-Step/Ace-Step1.5` 钉死 16 个文件（turbo 4.57GB + VAE + Qwen3-Embedding，共 **6.34GB**），带 LFS sha256；另有独立 Python（python-build-standalone 3.12，macOS arm64 25.2MB sha256 `fbf4afef…`）
+- **跨平台 runner**（`training/runner.py`）：环境变量驱动（`AIAB_TRAINING_CODE/CKPT/WORK/CACHE/SHIM`），支持 `--device auto|cuda|mps|cpu`、`--precision auto|bf16|fp16|fp32`；子进程 UTF-8、日志落盘、失败给 `TRAINING_FAILED reason=`、成功给 `TRAINING_DONE output= files= bytes=` 供服务端解析
+- **真机验证**（Windows + CUDA 作为快速路径）：用新 runner 对 `jrpg_v1` 数据集跑 `preprocess + 3 epoch LoRA`：
+  - 预处理 **12/12** 张量（93.7s）
+  - 训练 36 步、loss 0.4244→0.3477、峰值 VRAM 4.7GiB（26s）
+  - 产物 `final/adapter_model.safetensors` **21.1MB**；输出 `TRAINING_DONE output=… files=1 bytes=22069696`
+
+### 待做（下一轮）
+- 服务端 `apps/server/src/provision/training.ts`：状态检测（代码/数据集/检查点/venv 是否就绪）、按需下载与解压、PBS Python + venv + pip 依赖安装、训练任务（阶段进度、取消、日志尾部）
+- API `/api/training/*` + `scripts/training.mjs` CLI
+- 产品 UI「模型管理器 → 开始训练」（只在点击时下载，显示阶段与进度；完成后注册到 `data/adapters/`）
+- macOS 实机 MPS 训练验收（Windows 上仅能验证 CUDA 快速路径；Mac 用平台模拟 + 文档标注）
+- 训练完成后自动注册适配器并出现在 `/api/adapters`
