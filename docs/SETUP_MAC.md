@@ -104,7 +104,13 @@ node scripts/start.mjs
 - 基座检查点：HF `ACE-Step/Ace-Step1.5`（turbo+VAE+文本编码器，共 6.34GB，LFS sha256）
 - 独立 Python：python-build-standalone 3.12 macOS arm64（25MB）
 
-macOS 训练走 MPS（**比 CUDA 慢很多**，建议 epochs 60–100 起步、先跑小数据集验证）；完整的产品内「开始训练」面板与服务端按需下载仍在 P8-C 后续轮次落地。手动 runner 用法见 `training/README.md`。
+产品内使用（推荐）：
+1. 顶栏「训练风格」→ 显示五个阶段状态；
+2. 点「下载并准备环境」（仅此时下载 ≈6.9GB：训练代码 + 数据集 + 独立 Python + 基座检查点，随后创建 venv 安装依赖；可随时取消，重试会续传）；
+3. 填数据集（jrpg_v1 小 / jrpg_v2 推荐 / jrock_v1）、tag、风格、epochs、device、precision；
+4. 点「开始训练」，面板显示 预处理 → LoRA 训练 → 注册适配器 的进度与日志尾部；完成后提示「已注册适配器 xxx」，模型管理器即可选用。
+
+macOS 建议：`device=mps`、`precision=fp32`、epochs 60–100 起步，先用 jrpg_v1 小数据集验证（MPS 明显慢于 CUDA）。CLI：`node scripts/training.mjs status|setup|train`。手动 runner 用法见 `training/README.md`。
 
 ## 7. 边界与已知限制
 

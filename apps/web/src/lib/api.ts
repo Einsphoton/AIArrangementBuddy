@@ -759,6 +759,79 @@ export function cancelProvisionJob(jobId: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/provision/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
 }
 
+/* ---------------- P8-C：按需训练 ---------------- */
+
+export type TrainingPhaseId = 'code' | 'datasets' | 'python' | 'checkpoints' | 'env'
+
+export interface TrainingStatus {
+  platform: string
+  phases: Record<TrainingPhaseId, boolean>
+  bytes: { code: number; datasets: number; checkpoints: number; python: number; env: number }
+  missingBytes: number
+  checkpointBytes: number
+  datasetBytes: number
+  datasets: { id: string; installed: boolean; size: number }[]
+  venvPython: string | null
+  notes: string[]
+}
+
+export interface TrainingJobStep {
+  key: string
+  label: string
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+  progress: number
+  message?: string
+}
+
+export interface TrainingJob {
+  id: string
+  kind: 'setup' | 'train'
+  status: 'running' | 'done' | 'failed' | 'canceled'
+  steps: TrainingJobStep[]
+  progress: number
+  tag?: string
+  adapterId?: string
+  error?: string
+  startedAt: number
+  updatedAt: number
+  logTail?: string
+}
+
+export function getTrainingStatus(): Promise<TrainingStatus> {
+  return request<TrainingStatus>('/api/training/status')
+}
+
+export function startTrainingSetup(): Promise<{ jobId: string; job: TrainingJob }> {
+  return request<{ jobId: string; job: TrainingJob }>('/api/training/setup', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
+export function startTrainingJob(params: {
+  datasetId: string
+  tag: string
+  styleId?: string
+  name?: string
+  epochs?: number
+  rank?: number
+  device?: string
+  precision?: string
+}): Promise<{ jobId: string; job: TrainingJob }> {
+  return request<{ jobId: string; job: TrainingJob }>('/api/training/train', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  })
+}
+
+export function getTrainingJob(jobId: string): Promise<{ job: TrainingJob }> {
+  return request<{ job: TrainingJob }>(`/api/training/jobs/${encodeURIComponent(jobId)}`)
+}
+
+export function cancelTrainingJob(jobId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/training/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+}
+
 /** POST /api/companion/tasks 的 generate_audio 参数 */
 export interface GenerateAudioParams {
   /** 英文提示词：风格 / 乐器 / 情绪 / 速度 */

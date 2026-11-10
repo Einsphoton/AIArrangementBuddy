@@ -30,6 +30,7 @@ import { registerCompanionRoutes } from './routes/companion.js'
 import { registerSyncRoutes } from './routes/sync.js'
 import { registerVst3Routes } from './routes/vst3.js'
 import { registerProvisionRoutes } from './routes/provision.js'
+import { registerTrainingRoutes } from './routes/training.js'
 
 export async function buildServer(): Promise<FastifyInstance> {
   ensureDataDirs()
@@ -79,6 +80,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   registerSyncRoutes(app)
   registerVst3Routes(app)
   registerProvisionRoutes(app)
+  registerTrainingRoutes(app)
 
   // 生产模式：托管前端构建产物，并为 SPA 兜底
   if (serveStatic) {

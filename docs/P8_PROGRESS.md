@@ -69,9 +69,23 @@
   - 训练 36 步、loss 0.4244→0.3477、峰值 VRAM 4.7GiB（26s）
   - 产物 `final/adapter_model.safetensors` **21.1MB**；输出 `TRAINING_DONE output=… files=1 bytes=22069696`
 
-### 待做（下一轮）
-- 服务端 `apps/server/src/provision/training.ts`：状态检测（代码/数据集/检查点/venv 是否就绪）、按需下载与解压、PBS Python + venv + pip 依赖安装、训练任务（阶段进度、取消、日志尾部）
-- API `/api/training/*` + `scripts/training.mjs` CLI
-- 产品 UI「模型管理器 → 开始训练」（只在点击时下载，显示阶段与进度；完成后注册到 `data/adapters/`）
-- macOS 实机 MPS 训练验收（Windows 上仅能验证 CUDA 快速路径；Mac 用平台模拟 + 文档标注）
-- 训练完成后自动注册适配器并出现在 `/api/adapters`
+### 后续交付（同日完成）✅
+- **服务端** `apps/server/src/provision/training.ts`
+  - `trainingStatus`：代码 / 数据集 / 独立 Python / 检查点 / venv 五阶段就绪与缺失字节
+  - `setupTraining`：按需下载（代码包 323KB → 数据集 513MB → PBS Python 25MB → HF 检查点 6.34GB）→ 解压 → venv + pip 依赖（流式日志）
+  - `startTraining`：spawn 训练 runner（cwd 公共根满足路径安全检查、UTF-8、日志），解析 `TRAINING_DONE` → 复制 final 权重 → 写 `adapter.json`（id/name/style/base/tasks/license/datasetNote/training 元数据）到 `data/adapters/<tag>/`
+  - 任务模型：步骤进度 / 取消（终止子进程）/ 日志尾部；`AIAB_TRAINING_ALLOW_OVERRIDES=1` 时支持 sources 覆盖（真机验收/高级用户）
+- **API**：`GET /api/training/status`、`POST /api/training/setup`、`POST /api/training/train`、`GET /api/training/jobs/:id`、`POST .../cancel`
+- **CLI**：`scripts/training.mjs status|setup|train|jobs|cancel`
+- **产品 UI**：顶栏「训练风格」→ 五阶段状态 → 「下载并准备环境」（显示约 6.9GB）→ 数据集/tag/风格/epochs/device/precision 表单 → 训练进度与日志 → 完成提示「已注册适配器 xxx」
+- **真机验收**
+  | 项 | 结果 |
+  |---|---|
+  | 训练 API 全链路（临时数据目录、真实 2 epoch） | **5/5**：status 结构/缺 6.9GB；train 启动；**73s 完成**；`/api/adapters` 出现新适配器 `p8c_api_*`（权重+adapter.json 落盘）；jobs 可查 |
+  | 训练 UI（fetch 模拟） | **5/5**：入口；5 阶段与 6.9GB 提示；setup 调用→就绪→表单出现；train 参数（tag=ui_smoke, epochs=60）→完成→「已注册适配器」；1024px 无溢出、0 console |
+  | 训练 runner（真实 GPU） | 预处理 12/12 + 2–3 epoch，`TRAINING_DONE output=… files=1 bytes=22069696` |
+
+### 边界
+- macOS MPS 路径：代码按 Side-Step 的 MPS/fp32 支持实现，runner 支持 `--device mps --precision fp32`；本轮无 Mac 硬件，仅平台模拟与文档验收（Mac 建议先小数据集、epochs 60–100）。
+- 自动安装的 venv 依赖体积大（PyTorch 等约 2–4GB，仅首次训练时下载）；若用户已有 Python/torch 可用 sources 覆盖跳过。
+- 真实数据内部研究版仍只在本机，不参与任何发布/训练数据下载清单。
