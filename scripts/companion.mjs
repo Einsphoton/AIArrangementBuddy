@@ -53,9 +53,36 @@ const DEFAULT_HEARTBEAT_MS = 5000
 const DEFAULT_POLL_MS = 3000
 const DEFAULT_ENGINE_IDLE_SEC = 600
 
-const ACESTEP_DIR = path.join(ROOT, 'music-gen', 'acestep-cpp')
-const ACESTEP_BIN = path.join(ACESTEP_DIR, 'bin', 'ace-server.exe')
-const ACESTEP_MODELS_DIR = path.join(ACESTEP_DIR, 'models')
+/** 数据目录：与产品一致（AIAB_DATA_DIR/DATA_DIR > <repo>/data） */
+const DATA_ROOT = process.env.AIAB_DATA_DIR || process.env.DATA_DIR || path.join(ROOT, 'data')
+/** P8 自动安装目录（node scripts/provision.mjs install 装到这里） */
+const PROVISIONED_ACESTEP_DIR = path.join(DATA_ROOT, 'ace-step')
+/** 旧版开发布局（Windows 本地实验区）；仅作为兼容回退 */
+const LEGACY_ACESTEP_DIR = path.join(ROOT, 'music-gen', 'acestep-cpp')
+const IS_WINDOWS = process.platform === 'win32'
+const RUNTIME_BIN_NAMES = IS_WINDOWS
+  ? ['ace-server.exe', 'bin/ace-server.exe']
+  : ['ace-server', 'bin/ace-server']
+
+/** 引擎根目录：AIAB_ACESTEP_DIR > 已安装目录 > 旧版目录 */
+function resolveAceStepDir() {
+  const explicit = process.env.AIAB_ACESTEP_DIR || process.env.ACESTEP_DIR
+  if (explicit) return path.resolve(explicit)
+  for (const candidate of [PROVISIONED_ACESTEP_DIR, LEGACY_ACESTEP_DIR]) {
+    if (RUNTIME_BIN_NAMES.some((name) => existsSync(path.join(candidate, name)))) return candidate
+  }
+  return PROVISIONED_ACESTEP_DIR
+}
+
+export const ACESTEP_DIR = resolveAceStepDir()
+export const ACESTEP_BIN =
+  RUNTIME_BIN_NAMES.map((name) => path.join(ACESTEP_DIR, name)).find((candidate) => existsSync(candidate)) ??
+  path.join(ACESTEP_DIR, RUNTIME_BIN_NAMES[0])
+export const ACESTEP_MODELS_DIR = process.env.AIAB_ACESTEP_MODELS_DIR || path.join(ACESTEP_DIR, 'models')
+/** 计算后端：macOS 用 Metal，其它平台默认 CUDA0（可用 GGML_BACKEND 覆盖） */
+export const ACESTEP_BACKEND = process.env.GGML_BACKEND || (process.platform === 'darwin' ? 'METAL' : 'CUDA0')
+/** 缺引擎时给用户的自动安装提示 */
+export const PROVISION_HINT = 'node scripts/provision.mjs install --profile essential'
 /** 三种 DiT 的文件名（模型能力按「文件是否存在」真实上报给服务端做任务匹配） */
 export const MODEL_FILENAMES = Object.freeze({
   turbo: 'acestep-v15-turbo-Q8_0.gguf',
@@ -413,7 +440,7 @@ export function buildCapabilities(executor = 'acestep', { variants } = {}) {
   if (executor === 'mock') return { tasks, models: [...MOCK_MODEL_VARIANTS] }
   return {
     tasks,
-    gpu: process.env.GGML_BACKEND || 'CUDA0',
+    gpu: ACESTEP_BACKEND,
     models: variants ? [...variants] : detectModelVariants(),
   }
 }
@@ -948,15 +975,20 @@ export async function terminateChild(child, { graceMs = 15_000, killMs = 5000, l
 /* ------------------------------------------------------------------ */
 
 /** 检查 bin + 必需模型（turbo/sft/embedding/vae）是否存在；缺失时返回中文原因，不抛异常。 */
-export function preflightAceStep() {
-  const missing = REQUIRED_MODEL_FILES.filter((file) => !existsSync(file))
-  if (!missing.length) return { ok: true, missing: [] }
+export function preflightAceStep({ exists = existsSync } = {}) {
+  const missing = REQUIRED_MODEL_FILES.filter((file) => !exists(file))
+  if (missing.length === 0) return { ok: true, missing: [] }
+  const names = missing.map((file) => path.relative(ROOT, file) || file)
   return {
     ok: false,
     missing,
-    message: `ACE-Step 引擎文件缺失（${missing.length} 个）：${missing.map((file) => path.relative(ROOT, file)).join('、')}`,
+    message:
+      `本机 AI 引擎未安装完整（缺少 ${names.join(', ')}）。` +
+      `可运行自动安装：${PROVISION_HINT}（或在产品界面点“安装本机引擎”）；` +
+      `已装好但路径不同可设置 AIAB_ACESTEP_DIR / AIAB_ACESTEP_MODELS_DIR`,
   }
 }
+
 
 function aceLogTail(logTail) {
   const text = String(logTail ?? '').trim()
@@ -1217,7 +1249,7 @@ export class EngineManager {
     try {
       child = this.spawnImpl(ACESTEP_BIN, args, {
         cwd: ACESTEP_DIR,
-        env: { ...process.env, GGML_BACKEND: process.env.GGML_BACKEND || 'CUDA0' },
+        env: { ...process.env, GGML_BACKEND: ACESTEP_BACKEND },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       })

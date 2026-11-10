@@ -18,6 +18,7 @@ import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
 import { getHealth } from '../../lib/api'
 import { CompanionBadge } from '../audio/CompanionBadge'
+import { ProvisionButton } from '../audio/ProvisionButton'
 import { GenerateAudioPanel } from '../audio/GenerateAudioPanel'
 import { TaskCenterPanel } from '../audio/TaskCenterPanel'
 import { ProjectMenu } from './ProjectMenu'
@@ -182,6 +183,7 @@ export function TopBar() {
         <span className="hidden min-[1360px]:inline">生成音频</span>
       </button>
       <CompanionBadge onOpenPanel={() => setGenerateOpen(true)} />
+        <ProvisionButton />
       {/* P4-B：Companion 任务中心（队列 / 优先级 / 取消） */}
       <button
         data-task-center-trigger

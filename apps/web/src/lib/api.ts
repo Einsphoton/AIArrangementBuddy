@@ -670,6 +670,81 @@ export function getCompanionStatus(): Promise<CompanionStatus> {
   return request<CompanionStatus>('/api/companion/status')
 }
 
+/* ---------------- P8：本机引擎自动安装 ---------------- */
+
+export type ProvisionProfileId = 'essential' | 'quality' | 'stems'
+
+export interface ProvisionProfileInfo {
+  id: ProvisionProfileId
+  label: string
+  files: string[]
+  downloadBytes: number
+  ready: boolean
+}
+
+export interface ProvisionModelStatus {
+  name: string
+  installed: boolean
+  sizeBytes: number
+  expectedBytes: number
+  profiles: ProvisionProfileId[]
+}
+
+export interface ProvisionStatus {
+  platform: string
+  supported: boolean
+  error?: string
+  root?: string
+  dataDir?: string
+  runtime: { installed: boolean; path: string | null; sizeBytes: number; version?: string }
+  models: ProvisionModelStatus[]
+  profiles: ProvisionProfileInfo[]
+  missingBytes: number
+  notes: string[]
+}
+
+export interface ProvisionJobStep {
+  key: string
+  label: string
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+  progress: number
+  bytes?: number
+  totalBytes?: number
+  message?: string
+}
+
+export interface ProvisionJob {
+  id: string
+  status: 'running' | 'done' | 'failed' | 'canceled'
+  profiles: ProvisionProfileId[]
+  steps: ProvisionJobStep[]
+  progress: number
+  startedAt: number
+  updatedAt: number
+  error?: string
+}
+
+/** GET /api/provision/status：本机引擎/模型安装状态 */
+export function getProvisionStatus(): Promise<ProvisionStatus> {
+  return request<ProvisionStatus>('/api/provision/status')
+}
+
+/** POST /api/provision/install：开始自动下载（服务端执行） */
+export function startProvisionInstall(profiles: ProvisionProfileId[]): Promise<{ jobId: string; job: ProvisionJob }> {
+  return request<{ jobId: string; job: ProvisionJob }>('/api/provision/install', {
+    method: 'POST',
+    body: JSON.stringify({ profiles }),
+  })
+}
+
+export function getProvisionJob(jobId: string): Promise<{ job: ProvisionJob }> {
+  return request<{ job: ProvisionJob }>(`/api/provision/jobs/${encodeURIComponent(jobId)}`)
+}
+
+export function cancelProvisionJob(jobId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/provision/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+}
+
 /** POST /api/companion/tasks 的 generate_audio 参数 */
 export interface GenerateAudioParams {
   /** 英文提示词：风格 / 乐器 / 情绪 / 速度 */

@@ -48,3 +48,4 @@ music-gen/
 # 模型运行期缓存（ACE-Step / HuggingFace 等落盘到仓库根时会出现在这里）
 .cache/
 .verify-ui-p7/
+.verify-ui-p8/
