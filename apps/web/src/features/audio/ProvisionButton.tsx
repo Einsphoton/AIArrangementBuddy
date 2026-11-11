@@ -6,13 +6,14 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CheckCircle2, Download, HardDriveDownload, LoaderCircle, TriangleAlert, X } from 'lucide-react'
+import { Check, CheckCircle2, Copy, Download, HardDriveDownload, LoaderCircle, TriangleAlert, X } from 'lucide-react'
 import {
   cancelProvisionJob,
   getProvisionJob,
   getProvisionStatus,
   startProvisionInstall,
   type ProvisionJob,
+  type ProvisionJobStep,
   type ProvisionProfileId,
   type ProvisionStatus,
 } from '../../lib/api'
@@ -21,6 +22,35 @@ import { cn } from '../../lib/format'
 
 const PROFILE_ORDER: ProvisionProfileId[] = ['essential', 'quality', 'stems']
 const POLL_MS = 1200
+
+/** 步骤状态的中文文案（data-provision-step-status 仍保留原始英文值，自动化脚本依赖） */
+const STEP_STATUS_LABELS: Record<ProvisionJobStep['status'], string> = {
+  pending: '等待中',
+  running: '进行中',
+  done: '完成',
+  failed: '失败',
+  skipped: '跳过',
+}
+
+/**
+ * 网络类错误关键词：命中时在红色错误框下面给「开代理 / 复制诊断命令」的可操作提示。
+ * 服务端的报错文案（下载失败：网络错误（ETIMEDOUT，github.com）… / 代理 127.0.0.1:10808 连接失败…）
+ * 与 undici 原始的 fetch failed 都会命中。
+ */
+const NETWORK_ERROR_RE =
+  /fetch failed|网络错误|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|proxy|代理/i
+
+function isNetworkError(message: string): boolean {
+  return NETWORK_ERROR_RE.test(message)
+}
+
+/**
+ * 给用户的诊断命令。前端与后端同源：生产模式两者同端口，开发模式 Vite 已把 /api
+ * 代理到后端，因此统一用当前页面地址即可（无需猜后端端口）。
+ */
+function diagnosticCommand(): string {
+  return `node scripts/provision.mjs jobs --server ${window.location.origin}`
+}
 
 function humanBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0B'
@@ -48,6 +78,8 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
   const [job, setJob] = useState<ProvisionJob | null>(null)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** 「复制诊断命令」按钮的短暂反馈（1.6s 后恢复） */
+  const [copied, setCopied] = useState(false)
   /** 由 AI 音频意图自动唤起时展示的说明（为什么需要下载） */
   const [reason, setReason] = useState<string | null>(null)
   /** AI 指定要安装的 profile（不被「建议选择」覆盖） */
@@ -146,6 +178,17 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
       await cancelProvisionJob(job.id)
     } catch {
       /* 服务端会自己收尾 */
+    }
+  }
+
+  /** 复制诊断命令：剪贴板不可用（非安全上下文 / 权限被拒）时静默失败，不打断下载面板 */
+  const copyDiagnostic = async () => {
+    try {
+      await navigator.clipboard.writeText(diagnosticCommand())
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch {
+      /* 静默失败 */
     }
   }
 
@@ -314,6 +357,40 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                   </p>
                 )}
 
+                {error && isNetworkError(error) && (
+                  <div data-provision-network-tip className="mt-1.5 rounded-lg border border-accent/25 bg-accent/8 px-2.5 py-2">
+                    <div className="flex items-start gap-1.5 text-[9.5px] leading-relaxed text-ink-3">
+                      <TriangleAlert size={11} className="mt-[2px] shrink-0 text-accent" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-accent-soft">国内网络访问 GitHub / HuggingFace 通常需要代理</p>
+                        <p className="mt-0.5">
+                          应用已自动识别 <code className="text-ink-2">HTTPS_PROXY</code> 与 macOS 系统代理；若仍失败，请先打开代理软件，
+                          或在终端执行{' '}
+                          <code className="break-all text-ink-2">export HTTPS_PROXY=http://127.0.0.1:10808</code>
+                          （端口换成你的代理端口）后重启应用。
+                        </p>
+                        <p className="mt-1 text-[8.5px] text-ink-4">在当前工程目录执行以下命令可查看安装任务详情：</p>
+                        <code className="mt-0.5 block break-all rounded bg-bg-soft px-1.5 py-1 font-mono text-[8.5px] text-ink-2">
+                          {diagnosticCommand()}
+                        </code>
+                        <button
+                          type="button"
+                          data-provision-copy-diag
+                          className="btn btn-ghost mt-1 h-6 px-2 text-[10px]"
+                          onClick={() => void copyDiagnostic()}
+                        >
+                          {copied ? (
+                            <Check size={10} className="mr-1 text-success" />
+                          ) : (
+                            <Copy size={10} className="mr-1" />
+                          )}
+                          {copied ? '已复制' : '复制诊断命令'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {job && (
                   <div className="mt-2.5 rounded-lg border border-line bg-bg-soft px-2.5 py-2">
                     <div className="flex items-center gap-2 text-[10px]">
@@ -332,10 +409,10 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                     </div>
                     <div className="mt-1.5 space-y-0.5">
                       {job.steps.map((step) => (
-                        <div key={step.key} data-provision-step data-provision-step-status={step.status} className="flex items-center gap-1.5 text-[9px]">
+                        <div key={step.key} data-provision-step data-provision-step-status={step.status} className="flex items-start gap-1.5 text-[9px]">
                           <span
                             className={cn(
-                              'h-1.5 w-1.5 shrink-0 rounded-full',
+                              'mt-[3px] h-1.5 w-1.5 shrink-0 rounded-full',
                               step.status === 'done'
                                 ? 'bg-success'
                                 : step.status === 'failed'
@@ -345,9 +422,19 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                                     : 'bg-surface-3',
                             )}
                           />
-                          <span className="min-w-0 flex-1 truncate text-ink-3">{step.label}</span>
-                          <span className="mono shrink-0 text-ink-4">
-                            {step.status === 'running' ? `${Math.round(step.progress * 100)}%` : step.status === 'done' ? '完成' : step.status}
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-1.5">
+                              <span className="min-w-0 flex-1 truncate text-ink-3">{step.label}</span>
+                              <span className="mono shrink-0 text-ink-4">
+                                {step.status === 'running' ? `${Math.round(step.progress * 100)}%` : STEP_STATUS_LABELS[step.status]}
+                              </span>
+                            </span>
+                            {/* 失败步骤补出 message（截断展示，title 看全文）：运行时/下载的具体报错原来完全看不到 */}
+                            {step.status === 'failed' && step.message && (
+                              <span className="mt-0.5 block truncate text-danger/90" title={step.message}>
+                                {step.message}
+                              </span>
+                            )}
                           </span>
                         </div>
                       ))}

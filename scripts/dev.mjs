@@ -10,6 +10,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { pickFreePort } from './lib/ports.mjs'
+import { logProxyHint, proxyAwareChildEnv } from './lib/proxy-env.mjs'
 import { spawnBin } from './lib/spawn-bin.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -39,7 +40,8 @@ let shuttingDown = false
 function run(name, command, args, cwd, env = {}) {
   const child = spawnBin(command, args, {
     cwd,
-    env: { ...process.env, FORCE_COLOR: '1', NODE_ENV: 'development', ...env },
+    // 检测到 HTTPS_PROXY 等代理变量时补 NODE_USE_ENV_PROXY=1，服务端下载才能走代理
+    env: proxyAwareChildEnv({ ...process.env, FORCE_COLOR: '1', NODE_ENV: 'development', ...env }),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const prefix = `${COLORS[name]}[${name}]${COLORS.reset} `
@@ -102,6 +104,9 @@ console.log(`${COLORS.dim}   前端 ${webUrl}   后端 ${apiUrl}${COLORS.reset}\
 
 // 把实际端口告诉调用方（launch.mjs 用它打开浏览器）
 console.log(`AIAB_DEV_URL=${webUrl}`)
+
+// 代理提示只打印变量名，不打印地址（避免泄露代理账号密码）
+logProxyHint(process.env)
 
 run('server', tsxBin, ['watch', path.join(root, 'apps/server/src/index.ts')], root, {
   PORT: String(apiPort),

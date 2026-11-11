@@ -5,6 +5,7 @@
  */
 import { existsSync } from 'node:fs'
 import { pickFreePort } from './lib/ports.mjs'
+import { logProxyHint, proxyAwareChildEnv } from './lib/proxy-env.mjs'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import process from 'node:process'
@@ -28,10 +29,14 @@ if (!explicitPort && port !== '8787') {
 }
 console.log(`\x1b[33m♪ AI 编曲伴侣\x1b[0m \x1b[2mhttp://${host}:${port}\x1b[0m`)
 
+// 代理提示只打印变量名，不打印地址（避免泄露代理账号密码）
+logProxyHint(process.env)
+
 const child = spawn(process.execPath, [serverBundle], {
   cwd: root,
   stdio: 'inherit',
-  env: { ...process.env, NODE_ENV: 'production', PORT: port, HOST: host, SERVE_STATIC: '1' },
+  // 检测到 HTTPS_PROXY 等代理变量时补 NODE_USE_ENV_PROXY=1，内置 fetch 下载才能走代理
+  env: proxyAwareChildEnv({ ...process.env, NODE_ENV: 'production', PORT: port, HOST: host, SERVE_STATIC: '1' }),
 })
 
 child.on('exit', (code) => process.exit(code ?? 0))

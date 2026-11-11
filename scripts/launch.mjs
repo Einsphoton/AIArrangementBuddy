@@ -20,6 +20,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { pickFreePort } from './lib/ports.mjs'
+import { logProxyHint, proxyAwareChildEnv } from './lib/proxy-env.mjs'
 import { spawnBinSync } from './lib/spawn-bin.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -127,6 +128,10 @@ function openBrowser(url) {
   }
 }
 
+// 检测到 HTTPS_PROXY 等代理变量时，下面启动的子进程会补 NODE_USE_ENV_PROXY=1；
+// 这里只提示变量名，不打印地址（避免泄露代理账号密码）。
+logProxyHint(process.env)
+
 if (wantProd) {
   const serverBundle = path.join(root, 'apps/server/dist/server.mjs')
   const webIndex = path.join(root, 'apps/web/dist/index.html')
@@ -147,7 +152,7 @@ if (wantProd) {
   const child = spawn(process.execPath, [path.join(root, 'scripts/start.mjs')], {
     cwd: root,
     stdio: 'inherit',
-    env: { ...process.env, PORT: port },
+    env: proxyAwareChildEnv({ ...process.env, PORT: port }),
   })
   child.on('exit', (code) => process.exit(code ?? 0))
   process.on('SIGINT', () => child.kill('SIGINT'))
@@ -165,7 +170,7 @@ if (wantProd) {
   const child = spawn(process.execPath, [path.join(root, 'scripts/dev.mjs')], {
     cwd: root,
     stdio: 'inherit',
-    env: { ...process.env, AIAB_API_PORT: String(apiPort), AIAB_WEB_PORT: String(webPort) },
+    env: proxyAwareChildEnv({ ...process.env, AIAB_API_PORT: String(apiPort), AIAB_WEB_PORT: String(webPort) }),
   })
   child.on('exit', (code) => process.exit(code ?? 0))
   process.on('SIGINT', () => child.kill('SIGINT'))

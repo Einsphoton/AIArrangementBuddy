@@ -72,19 +72,58 @@ curl -s http://127.0.0.1:8787/api/adapters | head
 
 ## 4. 网络受限时（代理）
 
-自动安装使用 Node 内置 fetch。Node 24 支持通过环境变量走代理：
+自动安装使用 Node 内置 fetch：ACE-Step 运行时来自 GitHub Releases，模型来自 HuggingFace（`huggingface.co`）。新版下载链路会**自动识别代理**，国内网络通常不用手动配置：
+
+- **环境变量代理**：终端里设置过 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`（大小写均可）即可。
+  启动脚本 `launch.mjs` / `dev.mjs` / `start.mjs` / `supervise.mjs` 检测到后会为服务端子进程自动补
+  `NODE_USE_ENV_PROXY=1`，并打印一行 dim 提示：`[proxy] 检测到 HTTPS_PROXY，已为服务端子进程启用 NODE_USE_ENV_PROXY=1`。
+- **macOS 系统代理**：系统设置 → 网络 → 代理（Clash / Surge 等软件的「系统代理」模式）开启后，
+  下载层会读取 `scutil --proxy`，即使没有环境变量也能走代理。
+
+`NODE_USE_ENV_PROXY=1` 的作用：Node 内置 fetch（undici）默认**不读**代理环境变量，只有**进程启动时**
+带上该变量才会启用 `EnvHttpProxyAgent`。所以：
+
+1. 启动脚本会自动补，一般无需手动设置；如果你自己在终端显式设置（包括设为 `0` 关闭），启动脚本不会覆盖；
+2. **改完代理设置或环境变量后必须重启应用**（`NODE_USE_ENV_PROXY` 只在启动时生效）：
+   `Ctrl+C` 停掉后重新执行 `node scripts/launch.mjs`（或 `pnpm dev` / `pnpm start`）；
+3. 该变量同时让服务端其它 fetch（AI 服务商、联网搜索等）走代理。
+
+手动指定代理（端口换成你代理软件的 HTTP 端口，常见 7890 / 10808 / 10809）：
 
 ```bash
-export NODE_USE_ENV_PROXY=1
 export HTTPS_PROXY=http://127.0.0.1:10808
 export HTTP_PROXY=http://127.0.0.1:10808
-node scripts/start.mjs
+export ALL_PROXY=http://127.0.0.1:10808
+node scripts/launch.mjs
 ```
 
-下载器支持断点续传：中断后重新点安装会从 `.part` 继续（需要 sha256 校验的场景会从头重下以保证正确性）。
+> 说明：Node 内置 fetch 仅支持 HTTP(S) 代理（CONNECT 隧道），不支持 `socks5://`；请填代理软件提供的 HTTP 端口。
+> 面板里下载失败时，错误框下方会给出「开启代理 / 复制诊断命令」的可操作提示。
+
+### 故障排查
+
+| 现象（面板或日志） | 可能原因 | 处理 |
+| --- | --- | --- |
+| `fetch failed` | Node 进程没有可用代理或网络不可达 | 确认代理软件已开启并能访问 <https://github.com>；重启应用让 `NODE_USE_ENV_PROXY=1` 生效；或在终端 `curl -I https://github.com` 验证 |
+| `网络错误（ETIMEDOUT，github.com/…）` | 直连超时（国内网络常见） | 开启代理后重启应用；用面板里的「复制诊断命令」查看任务详情 |
+| `ECONNRESET` / `ECONNREFUSED` | TLS 连接被重置，或代理端口写错/代理未启动 | 换一个代理节点；核对 `HTTPS_PROXY` 的端口与代理软件一致；确认代理软件允许本机连接 |
+| `HTTP 404` | 资产地址或版本已变更（Release 被删、HF 文件名改了） | 升级到最新版本再试；或到 GitHub Releases / HuggingFace 确认文件名 |
+| `HTTP 416` | 断点续传偏移与服务端不一致（`.part` 大小对不上） | 新版会自动丢弃偏移并重下；仍失败则删掉 `data/ace-step/.downloads/` 下对应 `.part` 后重试 |
+| `sha256 校验失败` | 缓存损坏，或代理做了内容劫持/MITM | 删除对应缓存（`.downloads/*.part` 或已下载文件）后重下；检查代理是否开启 HTTPS 解密 |
+
+**断点续传**：下载器支持 `.part` 缓存，中途取消或断网后重新点「开始下载」会从断点继续（发 `Range: bytes=<已下载>-`）；
+带 sha256 校验的资产续传时会把已有 `.part` 字节补进同一个哈希再继续追加，**不会**因为要校验而从头重下 2.5GB 模型；
+若服务器返回的区间起点与本地 `.part` 对不上，会自动丢弃分片、从头重下（不会拼出坏文件）。
+手动清理缓存：删除 `<数据目录>/ace-step/.downloads/` 下对应的 `.part` 文件即可（数据目录默认是仓库下 `data/`）。
 
 ## 5. 已验收证据（P8-A）
 
+- `node --import tsx scripts/verify-provision.mjs`（或 `pnpm verify:provision`）：**36/36**
+  - 代理环境解析（大小写 / `ALL_PROXY` 兜底 / `user:pass` / `no_proxy` 通配与端口）
+  - 本地假代理（绝对 URL + CONNECT）下的 `proxyAwareFetch`：200/404、`Range` 透传、302 跟随、中止、代理不可达错误码
+  - 下载器：缓存命中 0 请求、sha256 正误、**续传只请求剩余字节**、服务器忽略 `Range` 时从头下、206 区间起点不符时丢弃分片重试、网络错误/429/5xx 重试（默认 3 次）、可诊断错误文案
+  - 全部 loopback 随机端口 + 注入 `fetchImpl`，不需要公网
+- 真实网络（Lead 验收，本机 Apple Silicon + 代理）：经代理下载运行时 2.5MB（sha256 与 manifest 一致）→ 解压出 **10 个 dylib 软链** → `ace-server --help` 退出码 0；HF 模型 1MB Range 返回 206（`content-range: bytes 0-1048575/337420928`）；URL 级 API 走完「启动安装 → 运行时完成 → 取消 → `/api/provision/status` 显示已安装」
 - `node --import tsx music-gen/tools/verify_provision.mjs`：**7/7**
   - 平台映射（win32-x64 / darwin-arm64 / linux-x64，Intel Mac 明确报错）
   - manifest profile/sha256 完整性

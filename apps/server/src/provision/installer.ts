@@ -31,7 +31,7 @@ import {
   type ProvisionPlatform,
   type ProvisionProfile,
 } from './manifest.js'
-import { extractTarGz } from './untar.js'
+import { extractTarGzToDir, safeArchivePath } from './untar.js'
 
 export interface ProvisionPaths {
   root: string
@@ -247,18 +247,24 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<{ 
   })
 
   options.onProgress?.(0.75, '解压运行时…')
-  const archiveBuffer = readFileSync(archivePath)
-  const entries =
-    asset.format === 'zip' ? readZipEntries(archiveBuffer) : extractTarGz(archiveBuffer)
   let written = 0
-  for (const [name, data] of entries) {
-    const safeName = name.replace(/\\/g, '/').replace(/^\.?\//, '')
-    if (!safeName || safeName.startsWith('..') || path.isAbsolute(safeName)) continue
-    const target = path.join(paths.root, safeName)
-    if (!target.startsWith(paths.root)) continue
-    mkdirSync(path.dirname(target), { recursive: true })
-    writeFileSync(target, data)
-    written += 1
+  let symlinks = 0
+  if (asset.format === 'zip') {
+    const entries = readZipEntries(readFileSync(archivePath))
+    for (const [name, data] of entries) {
+      const safeName = safeArchivePath(name)
+      if (!safeName) continue
+      const target = path.join(paths.root, safeName)
+      if (!target.startsWith(paths.root)) continue
+      mkdirSync(path.dirname(target), { recursive: true })
+      writeFileSync(target, data)
+      written += 1
+    }
+  } else {
+    // macOS/Linux 运行时包内有相对软链（dylib/so），必须按软链落盘，否则 dyld 找不到库
+    const extracted = extractTarGzToDir(readFileSync(archivePath), paths.root, { log: options.log })
+    written = extracted.files
+    symlinks = extracted.symlinks + extracted.copies
   }
   if (platform !== 'win32-x64') {
     for (const name of RUNTIME_EXECUTABLES) {
@@ -275,7 +281,7 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<{ 
   writeFileSync(
     path.join(paths.root, 'runtime.json'),
     JSON.stringify(
-      { platform, version: RUNTIME_ASSETS[platform].archive, archive: asset.archive, sha256: asset.sha256, files: written, installedAt: new Date().toISOString() },
+      { platform, version: RUNTIME_ASSETS[platform].archive, archive: asset.archive, sha256: asset.sha256, files: written, symlinks, installedAt: new Date().toISOString() },
       null,
       2,
     ),
@@ -375,15 +381,7 @@ export async function installAdapters(options: InstallAdaptersOptions): Promise<
         options.onProgress?.(ratio, `下载适配器 ${asset.id}（${((doneBytes + received) / 1e6).toFixed(1)}/${(totalBytes / 1e6).toFixed(1)}MB）`)
       },
     })
-    const entries = extractTarGz(readFileSync(archivePath))
-    for (const [name, data] of entries) {
-      const safeName = name.replace(/\\/g, '/').replace(/^\.?\//, '')
-      if (!safeName || safeName.startsWith('..') || path.isAbsolute(safeName)) continue
-      const target = path.join(paths.dir, safeName)
-      if (!target.startsWith(paths.dir)) continue
-      mkdirSync(path.dirname(target), { recursive: true })
-      writeFileSync(target, data)
-    }
+    extractTarGzToDir(readFileSync(archivePath), paths.dir, { log: options.log })
     const status = adapterStatus({ dataDir: options.dataDir, adaptersDir: options.adaptersDir }).find((item) => item.id === asset.id)
     if (!status?.installed) throw new Error(`适配器解压后未找到文件：${asset.id}`)
     if (result.status === 'downloaded') installed += 1
@@ -422,6 +420,13 @@ export interface ProvisionJob {
 const jobs = new Map<string, ProvisionJob>()
 let activeJobId: string | null = null
 let activeAbort: AbortController | null = null
+
+/** 压缩错误文本为面板可展示的一行摘要（严格 ≤ max 字符，含省略号） */
+function summarizeError(text: string, max: number): string {
+  const compact = text.replace(/\s+/g, ' ').trim()
+  if (compact.length <= max) return compact
+  return `${compact.slice(0, Math.max(0, max - 1))}…`
+}
 
 function updateJob(id: string, patch: Partial<ProvisionJob>): void {
   const job = jobs.get(id)
@@ -591,10 +596,23 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
       updateJob(id, { status: 'done', progress: 1 })
     } catch (error) {
       const aborted = signal?.aborted
+      const message = aborted ? '已取消' : error instanceof Error ? error.message : String(error)
+      const summary = summarizeError(message, 160)
+      // 失败步骤逐行展示摘要，job.error 保留完整错误（≤400 字符）方便排查
+      let summaryWritten = false
+      const steps = (jobs.get(id)?.steps ?? []).map((item) => {
+        if (item.status !== 'running') return item
+        const next: ProvisionJobStep = { ...item, status: 'failed' }
+        if (!summaryWritten) {
+          next.message = summary
+          summaryWritten = true
+        }
+        return next
+      })
       updateJob(id, {
         status: aborted ? 'canceled' : 'failed',
-        error: aborted ? '已取消' : error instanceof Error ? error.message : String(error),
-        steps: (jobs.get(id)?.steps ?? []).map((item) => (item.status === 'running' ? { ...item, status: 'failed', error: undefined } : item)),
+        error: summarizeError(message, 400),
+        steps,
       })
     } finally {
       if (activeJobId === id) {

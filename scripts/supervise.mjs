@@ -16,6 +16,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { logProxyHint, proxyAwareChildEnv } from './lib/proxy-env.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -43,7 +44,13 @@ function startServer() {
   log(`启动服务端（端口 ${port}）…`)
   serverChild = spawn(process.execPath, [path.join(root, 'scripts', 'start.mjs')], {
     cwd: root,
-    env: { ...process.env, PORT: port, SERVE_STATIC: '1', LOG_LEVEL: process.env.LOG_LEVEL || 'warn' },
+    // 检测到 HTTPS_PROXY 等代理变量时补 NODE_USE_ENV_PROXY=1，服务端下载才能走代理
+    env: proxyAwareChildEnv({
+      ...process.env,
+      PORT: port,
+      SERVE_STATIC: '1',
+      LOG_LEVEL: process.env.LOG_LEVEL || 'warn',
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   serverChild.stdout.on('data', (chunk) => appendFileSync(logFile, chunk))
@@ -104,6 +111,7 @@ process.on('SIGTERM', shutdown)
 process.on('SIGHUP', shutdown)
 
 log(`守护启动：端口 ${port}，日志 ${logFile}`)
+logProxyHint(process.env, (message) => log(message))
 startServer()
 const healthy = await waitHealthy()
 log(healthy ? '服务端健康检查通过' : '服务端健康检查超时（仍会继续守护）')
