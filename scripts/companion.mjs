@@ -1920,31 +1920,46 @@ export class CompanionClient {
     return json
   }
 
-  /** 注册（幂等重试；404 说明服务端没加载协议路由，直接给出可读原因）。 */
+  /** 注册（幂等重试；404 视为服务端可能正在重启/升级，先重试再退出）。 */
   async register() {
     const body = buildRegisterBody({ name: this.name, version: this.version, executor: this.executor })
+    const doRegister = async () => {
+      const json = await this.requestJson('/api/companion/register', { body })
+      if (!json || typeof json !== 'object') throw new Error('注册响应不是 JSON 对象')
+      const workerId = typeof json.workerId === 'string' ? json.workerId : json.worker?.id
+      if (typeof workerId !== 'string' || !workerId) throw new Error('注册响应缺少 workerId')
+      if (typeof json.token !== 'string' || !json.token) throw new Error('注册响应缺少 token')
+      this.workerId = workerId
+      this.token = json.token
+      this.sessionExpired = false
+      const timing = normalizePollTiming(json)
+      this.heartbeatMs = timing.heartbeatMs
+      this.pollMs = timing.pollMs
+      return { workerId: this.workerId, heartbeatMs: this.heartbeatMs, pollMs: this.pollMs }
+    }
     try {
       return await withRetry(
         async () => {
-          const json = await this.requestJson('/api/companion/register', { body })
-          if (!json || typeof json !== 'object') throw new Error('注册响应不是 JSON 对象')
-          const workerId = typeof json.workerId === 'string' ? json.workerId : json.worker?.id
-          if (typeof workerId !== 'string' || !workerId) throw new Error('注册响应缺少 workerId')
-          if (typeof json.token !== 'string' || !json.token) throw new Error('注册响应缺少 token')
-          this.workerId = workerId
-          this.token = json.token
-          this.sessionExpired = false
-          const timing = normalizePollTiming(json)
-          this.heartbeatMs = timing.heartbeatMs
-          this.pollMs = timing.pollMs
-          return { workerId: this.workerId, heartbeatMs: this.heartbeatMs, pollMs: this.pollMs }
+          // 404 单独重试：服务端重启/升级的窗口期（最多约 1 分钟），避免工作节点被一次重启打死
+          for (let attempt = 0; ; attempt++) {
+            try {
+              return await doRegister()
+            } catch (error) {
+              const retry404 = error instanceof HttpError && error.status === 404 && attempt < 8
+              if (!retry404) throw error
+              if (this.shouldStop?.()) throw new CancelledError('已停止（注册）')
+              const delay = backoffDelay(attempt, { baseMs: 1_000, maxMs: 10_000 })
+              this.log?.(`⚠ 注册收到 HTTP 404（服务端可能正在重启/升级），${Math.round(delay / 100) / 10}s 后重试（第 ${attempt + 1} 次）`)
+              await sleep(delay)
+            }
+          }
         },
         { label: '注册', attempts: Infinity, shouldStop: this.shouldStop, log: this.log },
       )
     } catch (error) {
       if (error instanceof HttpError && error.status === 404) {
         throw new Error(
-          `注册失败：服务端没有 Companion 协议路由（HTTP 404）。请确认服务端已升级并重启，且 --server 指向正确（当前 ${this.baseUrl}）。`,
+          `注册失败：服务端没有 Companion 协议路由（HTTP 404，已重试 8 次）。请确认服务端已升级并重启，且 --server 指向正确（当前 ${this.baseUrl}）。`,
         )
       }
       throw error
