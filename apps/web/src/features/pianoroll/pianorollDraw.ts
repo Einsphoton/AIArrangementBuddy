@@ -134,8 +134,8 @@ function roundedRect(
   ctx.closePath()
 }
 
-const FONT_SMALL = '9px "Inter", "PingFang SC", system-ui, sans-serif'
-const FONT_LABEL = '9.5px "Inter", "PingFang SC", system-ui, sans-serif'
+const FONT_SMALL = '9.5px "Inter", "PingFang SC", system-ui, sans-serif'
+const FONT_LABEL = '10px "Inter", "PingFang SC", system-ui, sans-serif'
 
 /* ------------------------------------------------------------------ */
 /* 主绘制                                                              */

@@ -52,7 +52,7 @@ function ToolButton({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        'flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md border transition-colors',
+        'flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded-md border transition-colors',
         active
           ? 'border-accent/60 bg-accent/15 text-accent-soft'
           : 'border-transparent text-ink-3 hover:border-line-strong hover:bg-surface-3 hover:text-ink',
@@ -166,12 +166,12 @@ export function TimelineToolbar({
               aria-pressed={toolMode === tool.value}
               onClick={() => setToolMode(tool.value)}
               className={cn(
-                'flex h-[23px] shrink-0 items-center gap-1 rounded-[6px] px-1.5 text-[10.5px] font-medium transition-colors',
+                'flex h-[24px] shrink-0 items-center gap-1 rounded-[6px] px-2 text-[11px] font-medium transition-colors',
                 toolMode === tool.value ? 'bg-surface-3 text-ink shadow-sm' : 'text-ink-3 hover:text-ink-2',
               )}
             >
               {tool.icon}
-              {!compact && <span className="hidden text-[10.5px] sm:inline">{tool.label}</span>}
+              {!compact && <span className="hidden text-[11px] sm:inline">{tool.label}</span>}
             </button>
           ))}
         </div>
@@ -195,7 +195,7 @@ export function TimelineToolbar({
               const next = Number(event.target.value)
               if (Number.isFinite(next)) setSnap(next)
             }}
-            className="mono h-[26px] w-[66px] shrink-0 cursor-pointer appearance-none rounded-md border border-line-strong bg-surface-2 pl-1.5 pr-5 text-center text-[10.5px] text-ink-2 outline-none transition-colors hover:border-line-strong hover:text-ink"
+            className="mono h-[28px] w-[72px] shrink-0 cursor-pointer appearance-none rounded-md border border-line-strong bg-surface-2 pl-1.5 pr-5 text-center text-[11px] text-ink-2 outline-none transition-colors hover:border-line-strong hover:text-ink"
           >
             {SNAP_OPTIONS.map((option) => (
               <option key={option.value} value={String(option.value)} title={option.label}>
@@ -214,7 +214,7 @@ export function TimelineToolbar({
         </ToolButton>
         {!tight && (
           <span
-            className="mono hidden w-[54px] shrink-0 text-center text-[10px] tabular-nums text-ink-3 sm:block"
+            className="mono hidden w-[58px] shrink-0 text-center text-[10.5px] tabular-nums text-ink-3 sm:block"
             title="横向缩放：⌘/Ctrl + 滚轮横向缩放，Shift + 滚轮纵向缩放"
           >
             {Math.round((zoomX / 64) * 100)}%
@@ -237,14 +237,14 @@ export function TimelineToolbar({
           aria-pressed={followPlayhead}
           onClick={toggleFollowPlayhead}
           className={cn(
-            'flex h-[26px] shrink-0 items-center gap-1 rounded-md border px-1.5 text-[10.5px] font-medium transition-colors',
+            'flex h-[28px] shrink-0 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors',
             followPlayhead
               ? 'border-accent/55 bg-accent/12 text-accent-soft'
               : 'border-transparent text-ink-3 hover:border-line-strong hover:bg-surface-3 hover:text-ink',
           )}
         >
           <LocateFixed size={12} />
-          {!compact && <span className="hidden text-[10.5px] lg:inline">跟随</span>}
+          {!compact && <span className="hidden text-[11px] lg:inline">跟随</span>}
         </button>
       </div>
 
@@ -257,7 +257,7 @@ export function TimelineToolbar({
           <span
             data-selection-hint
             aria-label={`选区状态：${selectionText}`}
-            className="hidden max-w-[92px] shrink-0 truncate text-[10px] text-ink-4 sm:block"
+            className="hidden max-w-[104px] shrink-0 truncate text-[10.5px] text-ink-4 sm:block"
           >
             {selectionText}
           </span>
@@ -267,10 +267,10 @@ export function TimelineToolbar({
           title={`添加轨道（${modSymbol()}⇧N）：选择乐器后加入编曲`}
           aria-label="添加轨道"
           onClick={(event) => onOpenAddTrack(event.currentTarget.getBoundingClientRect())}
-          className="btn btn-accent h-[26px] shrink-0 gap-1 px-2 text-[11px]"
+          className="btn btn-accent h-[28px] shrink-0 gap-1 px-2.5 text-[11.5px]"
         >
           <Plus size={12} />
-          <span className="text-[11px]">轨道</span>
+          <span className="text-[11.5px]">轨道</span>
         </button>
       </div>
     </div>

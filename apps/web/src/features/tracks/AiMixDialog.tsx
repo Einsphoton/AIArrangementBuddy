@@ -240,7 +240,7 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
               <h2 className="flex items-center gap-2 text-[14px] font-semibold tracking-tight">
                 <Sparkles size={14} className="shrink-0 text-accent" />
                 AI 混音方案
-                <span className="rounded-full border border-line bg-bg-soft px-1.5 text-[9.5px] font-normal text-ink-4">
+                <span className="rounded-full border border-line bg-bg-soft px-2 text-[10.5px] font-normal text-ink-4">
                   只读预览
                 </span>
               </h2>
@@ -287,7 +287,7 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <label
               className={cn(
-                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[10.5px] transition-colors',
+                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] transition-colors',
                 applyChains && hasChains
                   ? 'border-cyan/45 bg-cyan/10 text-ink-2'
                   : 'border-line bg-bg-soft text-ink-3',
@@ -306,16 +306,16 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                 onChange={(event) => setApplyChains(event.target.checked)}
                 disabled={!hasChains}
                 aria-label="同时应用音频处理链（EQ/压缩）"
-                className="h-3 w-3 shrink-0 accent-[#3ddbd9]"
+                className="h-3.5 w-3.5 shrink-0 accent-[#3ddbd9]"
               />
               <Waves size={11} className={cn('shrink-0', applyChains && hasChains ? 'text-cyan' : 'text-ink-4')} />
               同时应用音频处理链（EQ/压缩）
             </label>
-            {!hasChains && <span className="text-[9.5px] text-ink-4">本次方案未包含处理链</span>}
+            {!hasChains && <span className="text-[10px] text-ink-4">本次方案未包含处理链</span>}
             {/* P3.2：总线 / 母带链开关（默认勾选） */}
             <label
               className={cn(
-                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[10.5px] transition-colors',
+                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] transition-colors',
                 applyMaster && hasMasterChain
                   ? 'border-accent/45 bg-accent/10 text-ink-2'
                   : 'border-line bg-bg-soft text-ink-3',
@@ -334,19 +334,19 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                 onChange={(event) => setApplyMaster(event.target.checked)}
                 disabled={!hasMasterChain}
                 aria-label="同时应用总线/母带处理链（EQ/压缩/限幅）"
-                className="h-3 w-3 shrink-0 accent-[#f0b429]"
+                className="h-3.5 w-3.5 shrink-0 accent-[#f0b429]"
               />
               <Sparkles size={11} className={cn('shrink-0', applyMaster && hasMasterChain ? 'text-accent' : 'text-ink-4')} />
               同时应用总线/母带链
             </label>
-            {!hasMasterChain && <span className="text-[9.5px] text-ink-4">本次方案未包含母带链</span>}
+            {!hasMasterChain && <span className="text-[10px] text-ink-4">本次方案未包含母带链</span>}
           </div>
 
           {/* P6-A：进阶处理（多段总线压缩 / 侧链 ducking），默认关闭 */}
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <label
               className={cn(
-                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[10.5px] transition-colors',
+                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] transition-colors',
                 applyMultiband ? 'border-accent/50 bg-accent/10 text-ink-2' : 'border-line bg-bg-soft text-ink-3',
               )}
               title="三段总线压缩：低(<200Hz)/中(200-3k)/高(>3k) 各自压缩后再合并（与整体母线压缩串联）"
@@ -358,15 +358,15 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                 onChange={(event) => setApplyMultiband(event.target.checked)}
                 disabled={!canApplyMultiband}
                 aria-label="启用三段总线压缩（multiband）"
-                className="h-3 w-3 shrink-0 accent-[#d4a95c]"
+                className="h-3.5 w-3.5 shrink-0 accent-[#d4a95c]"
               />
               <Waves size={11} className={cn('shrink-0', applyMultiband ? 'text-accent' : 'text-ink-4')} />
               三段总线压缩
-              {hasAnyMultiband && <span className="text-[9px] text-success">已启用</span>}
+              {hasAnyMultiband && <span className="text-[10px] text-success">已启用</span>}
             </label>
             <label
               className={cn(
-                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[10.5px] transition-colors',
+                'flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] transition-colors',
                 applyDuck ? 'border-cyan/50 bg-cyan/10 text-ink-2' : 'border-line bg-bg-soft text-ink-3',
                 !duckPlan && 'cursor-not-allowed opacity-60',
               )}
@@ -383,11 +383,11 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                 onChange={(event) => setApplyDuck(event.target.checked)}
                 disabled={!duckPlan}
                 aria-label="启用侧链 ducking（鼓组 → 贝斯）"
-                className="h-3 w-3 shrink-0 accent-[#3ddbd9]"
+                className="h-3.5 w-3.5 shrink-0 accent-[#3ddbd9]"
               />
               <Waves size={11} className={cn('shrink-0', applyDuck && duckPlan ? 'text-cyan' : 'text-ink-4')} />
               侧链 ducking{duckPlan ? `（${duckPlan.sourceName} → ${duckPlan.targetName}）` : ''}
-              {hasAnyDuck && <span className="text-[9px] text-success">已启用</span>}
+              {hasAnyDuck && <span className="text-[10px] text-success">已启用</span>}
             </label>
           </div>
         </header>
@@ -396,7 +396,7 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div
             className={cn(
-              'sticky top-0 z-10 grid items-center gap-2 border-b border-line bg-surface-2/95 px-4 py-1.5 text-[9.5px] font-semibold tracking-wide text-ink-4 backdrop-blur',
+              'sticky top-0 z-10 grid items-center gap-2 border-b border-line bg-surface-2/95 px-4 py-2 text-[10.5px] font-semibold tracking-wide text-ink-4 backdrop-blur',
               GRID_COLS,
             )}
           >
@@ -428,29 +428,29 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                   <span className="truncate text-[11.5px] font-medium text-ink" title={item.name}>
                     {item.name}
                   </span>
-                  <span className="shrink-0 rounded border border-line bg-bg-soft px-1 text-[9px] text-ink-3">
+                  <span className="shrink-0 rounded border border-line bg-bg-soft px-1.5 text-[10px] text-ink-3">
                     {ROLE_LABEL[item.role] ?? item.role}
                   </span>
                   {changed && (
-                    <span className="shrink-0 text-[9px] font-semibold text-accent" title="该轨会被改动">
+                    <span className="shrink-0 text-[10px] font-semibold text-accent" title="该轨会被改动">
                       ●
                     </span>
                   )}
                 </div>
                 {item.reasons.length > 0 && (
-                  <p className="mt-0.5 truncate text-[9.5px] text-ink-4" title={item.reasons.join('；')}>
+                  <p className="mt-0.5 truncate text-[10px] text-ink-4" title={item.reasons.join('；')}>
                     {item.reasons.join(' · ')}
                   </p>
                 )}
               </div>
 
               <div className="text-right">
-                <div className="mono text-[10.5px] tabular-nums text-ink-2" title={`目标音量 ${formatPercent(item.volume)}`}>
+                <div className="mono text-[11px] tabular-nums text-ink-2" title={`目标音量 ${formatPercent(item.volume)}`}>
                   {gainToDbText(item.volume)} dB
                 </div>
                 <div
                   className={cn(
-                    'mono text-[9px] tabular-nums',
+                    'mono text-[10px] tabular-nums',
                     changed ? 'text-accent-soft' : 'text-ink-4',
                   )}
                   title={`当前 ${current ? `${gainToDbText(current.volume)} dB` : '轨道已不存在'}`}
@@ -460,19 +460,19 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
               </div>
 
               <div
-                className="mono text-right text-[10.5px] tabular-nums text-ink-2"
+                className="mono text-right text-[11px] tabular-nums text-ink-2"
                 title={`目标声像 ${item.pan.toFixed(2)}`}
               >
                 {formatPan(item.pan)}
               </div>
               <div
-                className="mono text-right text-[10.5px] tabular-nums text-ink-2"
+                className="mono text-right text-[11px] tabular-nums text-ink-2"
                 title={`目标混响发送 ${formatPercent(item.reverbSend)}`}
               >
                 {formatPercent(item.reverbSend)}
               </div>
               <div
-                className="mono text-right text-[10.5px] tabular-nums text-ink-2"
+                className="mono text-right text-[11px] tabular-nums text-ink-2"
                 title={`目标延迟发送 ${formatPercent(item.delaySend)}`}
               >
                 {formatPercent(item.delaySend)}
@@ -485,8 +485,8 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
             <section className="border-t border-line/70 bg-bg-soft/40" data-ai-mix-chain-section="">
               <div className="flex items-center gap-2 px-4 py-2">
                 <Waves size={12} className="shrink-0 text-cyan/80" />
-                <span className="text-[11px] font-medium text-ink-2">音频处理链（EQ / 压缩）</span>
-                <span className="min-w-0 flex-1 truncate text-[9.5px] text-ink-4">
+                <span className="text-[11.5px] font-medium text-ink-2">音频处理链（EQ / 压缩）</span>
+                <span className="min-w-0 flex-1 truncate text-[10px] text-ink-4">
                   {chains.length} 轨 · {applyChains ? '应用混音时一起写入（同一条撤销记录）' : '本次不写入'}
                 </span>
               </div>
@@ -505,19 +505,19 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                         className="h-1.5 w-1.5 shrink-0 rounded-full"
                         style={{ background: current ? trackColor(current.color) : 'rgb(100 116 139)' }}
                       />
-                      <span className="shrink-0 text-[10.5px] font-medium text-ink" title={item.name}>
+                      <span className="shrink-0 text-[11px] font-medium text-ink" title={item.name}>
                         {item.name}
                       </span>
                       <span className="shrink-0 rounded border border-line bg-bg-soft px-1 text-[9px] text-ink-3">
                         {ROLE_LABEL[item.role] ?? item.role}
                       </span>
-                      {!item.chain.enabled && <span className="shrink-0 text-[9px] text-ink-4">（未启用）</span>}
+                      {!item.chain.enabled && <span className="shrink-0 text-[10px] text-ink-4">（未启用）</span>}
                     </div>
-                    <p className="mono mt-0.5 truncate text-[9.5px] text-ink-3" title={summary}>
+                    <p className="mono mt-0.5 truncate text-[10px] text-ink-3" title={summary}>
                       {summary}
                     </p>
                     {item.reasons.length > 0 && (
-                      <p className="truncate text-[9px] text-ink-4" title={item.reasons.join('；')}>
+                      <p className="truncate text-[10px] text-ink-4" title={item.reasons.join('；')}>
                         {item.reasons.join(' · ')}
                       </p>
                     )}
@@ -525,7 +525,7 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                 )
               })}
               {result.chainNotes && result.chainNotes.length > 0 && (
-                <p className="border-t border-line/40 px-4 py-1.5 text-[9.5px] leading-relaxed text-ink-4">
+                <p className="border-t border-line/40 px-4 py-1.5 text-[10px] leading-relaxed text-ink-4">
                   {result.chainNotes.join(' · ')}
                 </p>
               )}
@@ -537,8 +537,8 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
             <section className="border-t border-line/70 bg-bg-soft/40" data-master-chain-section="">
               <div className="flex items-center gap-2 px-4 py-2">
                 <Sparkles size={12} className="shrink-0 text-accent/80" />
-                <span className="text-[11px] font-medium text-ink-2">总线 / 母带处理</span>
-                <span className="min-w-0 flex-1 truncate text-[9.5px] text-ink-4">
+                <span className="text-[11.5px] font-medium text-ink-2">总线 / 母带处理</span>
+                <span className="min-w-0 flex-1 truncate text-[10px] text-ink-4">
                   {applyMaster ? '应用混音时一起写入（同一条撤销记录）' : '本次不写入'}
                 </span>
               </div>
@@ -548,13 +548,13 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
                   data-master-chain-row=""
                   className="border-t border-line/40 px-4 py-1.5"
                 >
-                  <p className="mono truncate text-[9.5px] text-ink-3" title={line}>
+                  <p className="mono truncate text-[10px] text-ink-3" title={line}>
                     {line}
                   </p>
                 </div>
               ))}
               {masterNotes.length > 0 && (
-                <p className="border-t border-line/40 px-4 py-1.5 text-[9.5px] leading-relaxed text-ink-4">
+                <p className="border-t border-line/40 px-4 py-1.5 text-[10px] leading-relaxed text-ink-4">
                   {masterNotes.join(' · ')}
                 </p>
               )}
@@ -563,14 +563,14 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
 
           {/* 服务端差异文本 + 方案说明（次要信息，默认折叠） */}
           {(result.preview.length > 0 || plan.notes.length > 0) && (
-            <details className="px-4 py-2.5 text-[10px] text-ink-4">
-              <summary className="cursor-pointer select-none text-[10.5px] text-ink-3 hover:text-ink-2">
+            <details className="px-4 py-2.5 text-[10.5px] text-ink-4">
+              <summary className="cursor-pointer select-none text-[11px] text-ink-3 hover:text-ink-2">
                 差异明细 / 方案说明
               </summary>
               {result.preview.length > 0 && (
                 <ul className="mt-2 space-y-1">
                   {result.preview.map((line, index) => (
-                    <li key={`${index}-${line}`} className="mono text-[10px] leading-relaxed">
+                    <li key={`${index}-${line}`} className="mono text-[10.5px] leading-relaxed">
                       {line}
                     </li>
                   ))}
@@ -589,7 +589,7 @@ export function AiMixDialog({ result, onClose }: { result: MixSuggestResult; onC
 
         {/* 底部操作 */}
         <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-line px-5 py-3">
-          <span className="text-[10px] leading-tight text-ink-4">
+          <span className="text-[10.5px] leading-tight text-ink-4">
             应用后记为一条撤销记录，⌘Z 可整批回退
           </span>
           <div className="flex-1" />

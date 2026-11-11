@@ -5,6 +5,7 @@ import { useStore } from '../../store/store'
 import { toolMeta } from './toolDisplay'
 import { applyAgentUiAction } from './uiActionBridge'
 import { finishMessageMetrics, startMessageMetrics } from './chatMetrics'
+import { handleAudioPlanFromToolData, runHeuristicAudioFallback } from '../audio/audioIntent'
 
 interface SendOptions {
   intent?: string
@@ -44,6 +45,8 @@ export function useChatStream(): ChatStreamApi {
   const sendingRef = useRef(false)
   const sawDoneRef = useRef(false)
   const stoppedRef = useRef(false)
+  /** 本次运行是否已经由 generate_audio 工具计划接管音频任务 */
+  const audioPlanHandledRef = useRef(false)
 
   const run = useCallback((payload: ChatRequestPayload, reuseMessageId?: string) => {
     if (sendingRef.current) return
@@ -51,6 +54,7 @@ export function useChatStream(): ChatStreamApi {
     sendingRef.current = true
     sawDoneRef.current = false
     stoppedRef.current = false
+    audioPlanHandledRef.current = false
     setInterrupted(false)
     payloadRef.current = payload
 
@@ -172,9 +176,19 @@ export function useChatStream(): ChatStreamApi {
           break
         }
         case 'tool_end': {
-          const payload = data as { id?: string; ok?: boolean; result?: unknown; error?: string } | null
+          const payload = data as {
+            id?: string
+            ok?: boolean
+            result?: unknown
+            error?: string
+            data?: unknown
+          } | null
           if (!payload?.id) break
           state.finishToolCall(id, payload.id, payload.ok !== false, stringifyResult(payload.result), payload.error)
+          // generate_audio 工具会带回执行计划：交给前端音频桥异步生成并落轨
+          if (payload.ok !== false && payload.data && handleAudioPlanFromToolData(payload.data)) {
+            audioPlanHandledRef.current = true
+          }
           break
         }
         case 'project': {
@@ -196,6 +210,15 @@ export function useChatStream(): ChatStreamApi {
           finishMessageMetrics(id, typeof elapsed === 'number' ? elapsed : undefined)
           state.patchMessage(id, { streaming: false })
           state.setAiBusy(false)
+          // 兜底：音频意图已识别，但 Agent 没调用 generate_audio（常见于 Codex/DSH 等外部后端，
+          // 它们的 tool_end 不携带 data）。此时按用户原话启发式执行一次，避免“只说不做”。
+          if (payloadRef.current?.intent === 'audio' && !audioPlanHandledRef.current) {
+            const messages = useStore.getState().messages
+            const lastUser = [...messages].reverse().find((message) => message.role === 'user')
+            if (lastUser?.content) {
+              audioPlanHandledRef.current = runHeuristicAudioFallback(lastUser.content)
+            }
+          }
           break
         }
         case 'error': {

@@ -138,7 +138,7 @@ export function ExportDialog() {
       setHealth(null)
       setHealthError(
         error instanceof Error && /fetch|network|load failed/i.test(error.message)
-          ? '无法连接本地服务（127.0.0.1:8787）'
+          ? '无法连接本地服务（请确认后端已启动：pnpm dev）'
           : (error as Error).message || '无法读取后端状态',
       )
     } finally {
@@ -179,6 +179,10 @@ export function ExportDialog() {
 
   const duration = format === 'mid' ? 0 : projectDurationSeconds(exportProject)
   const estimatedSize = estimateBytes(format, duration, bitrate)
+  /** 文件名预览：用户填的 base 会去掉已有音频后缀，最终统一追加当前格式后缀 */
+  const filenamePreview = `${sanitizeFilename(
+    stripKnownExtension(filename.trim()) || exportProject.name || '未命名工程',
+  )}${activeFormat.ext}`
 
   const startTicker = () => {
     if (tickerRef.current) clearInterval(tickerRef.current)
@@ -215,7 +219,7 @@ export function ExportDialog() {
       setJob({ status: 'error', progress: 0, message: '该格式需要服务端 ffmpeg，请先安装 ffmpeg 并重启后端。' })
       return
     }
-    const finalBase = sanitizeFilename(filename || exportProject.name || '未命名工程')
+    const finalBase = sanitizeFilename(stripKnownExtension(filename.trim() || exportProject.name || '未命名工程'))
     resultRef.current = null
 
     if (format === 'mid') {
@@ -361,7 +365,7 @@ export function ExportDialog() {
               <span className="text-[10px] text-ink-4">服务端未检测到 ffmpeg</span>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="导出格式">
             {FORMATS.map((item) => {
               const Icon = item.icon
               const active = format === item.id
@@ -369,6 +373,9 @@ export function ExportDialog() {
               return (
                 <button
                   key={item.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
                   onClick={() => setFormat(item.id)}
                   disabled={busy}
                   title={unavailable ? `${item.name} 需要服务端安装 ffmpeg` : item.description}
@@ -409,15 +416,19 @@ export function ExportDialog() {
               <span className="mb-1 block text-[10.5px] font-semibold tracking-wide text-ink-3">文件名</span>
               <div className="flex items-center gap-1.5">
                 <input
-                  className="field text-[12px]"
+                  className="field min-w-0 flex-1 text-[12px]"
                   value={filename}
                   onChange={(event) => setFilename(event.target.value)}
                   placeholder="导出文件名"
+                  maxLength={120}
                   disabled={busy}
                   aria-label="导出文件名"
                 />
                 <span className="mono shrink-0 text-[11px] text-ink-4">{activeFormat.ext}</span>
               </div>
+              <p className="mt-1 truncate text-[10.5px] leading-relaxed text-ink-4" title={filenamePreview}>
+                将导出为 <span className="mono text-ink-2">{filenamePreview}</span>（无需填写后缀）
+              </p>
             </label>
 
             {/* 导出范围：全曲 / 循环区间 */}
@@ -600,6 +611,17 @@ function sanitizeFilename(value: string): string {
   return cleaned || '未命名工程'
 }
 
+const KNOWN_EXTENSIONS = ['.midi', '.mid', '.wav', '.mp3', '.flac', '.ogg']
+
+/** 去掉用户手输的音频后缀，避免导出成 song.wav.wav */
+function stripKnownExtension(value: string): string {
+  const lower = value.toLowerCase()
+  for (const ext of KNOWN_EXTENSIONS) {
+    if (lower.endsWith(ext) && value.length > ext.length) return value.slice(0, -ext.length).trim()
+  }
+  return value
+}
+
 /** 粗估文件大小（仅用于给用户一个数量级，实际以导出结果为准） */
 function estimateBytes(format: ExportFormat, duration: number, bitrate: string): number {
   if (duration <= 0 || format === 'mid') return 0
@@ -677,7 +699,7 @@ function describeExportError(error: unknown): string {
   }
   if (error instanceof Error) {
     if (/fetch|network|load failed/i.test(error.message)) {
-      return '无法连接本地服务（127.0.0.1:8787）。WAV / MIDI 可离线导出，其他格式请先启动后端。'
+      return '无法连接本地服务（请确认后端已启动：pnpm dev）。WAV / MIDI 可离线导出，其他格式请先启动后端。'
     }
     return error.message
   }

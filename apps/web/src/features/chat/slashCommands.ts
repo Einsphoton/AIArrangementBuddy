@@ -17,7 +17,7 @@ export interface SlashCommand {
   /** 参数提示（有参数时显示在命令名后面） */
   argsHint?: string
   /** 发送给后端的意图（必须是服务端白名单里的值） */
-  intent?: 'compose' | 'arrange' | 'melody' | 'chords' | 'optimize'
+  intent?: 'compose' | 'arrange' | 'melody' | 'chords' | 'optimize' | 'audio'
   /** 展开成提示词；args 是用户在命令后输入的补充说明（可能为空） */
   build: (args: string) => string
   /** 本地命令：不请求 AI */
@@ -88,6 +88,39 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     intent: 'optimize',
     build: (args) =>
       `把当前工程的整体情绪调整为${args || '更温暖、更有空间感'}：通过配器、音区与力度实现，不要改变和弦与节奏骨架。`,
+  },
+  {
+    name: '/audio',
+    label: '生成音频',
+    description: '直接产出可播放的整首音频成品',
+    argsHint: '风格 / 乐器 / 情绪 / 时长（可省略）',
+    intent: 'audio',
+    build: (args) =>
+      args
+        ? `用音频生成模型做一首成品：${args}。直接产出可播放的音频并加入工程，不需要我先点“生成音频”。`
+        : '用音频生成模型做一首 30 秒的温暖 cinematic 成品（钢琴 + 弦乐 + 轻鼓，72 BPM），直接产出可播放音频并加入工程。',
+  },
+  {
+    name: '/render',
+    label: 'MIDI→音频',
+    description: '把当前工程渲染成音频轨',
+    argsHint: '渲染说明（可省略）',
+    intent: 'audio',
+    build: (args) =>
+      args
+        ? `把当前工程渲染成音频成品：${args}。必要时先补全编曲再渲染，最终加一条音频轨。`
+        : '把当前工程按现有编配离线渲染成音频并加入工程；如果工程还是空的，先帮我补一段完整编曲再渲染。',
+  },
+  {
+    name: '/stems',
+    label: '生成分轨音频',
+    description: '先生成整曲，再按乐器分轨',
+    argsHint: '风格 / 编制（可省略）',
+    intent: 'audio',
+    build: (args) =>
+      args
+        ? `生成一首成品音频并按乐器分轨：${args}。先出整曲，再分别生成吉他、贝斯、鼓组分轨，各自成轨。`
+        : '生成一首成品音频并分轨：流行乐队编制，先出整曲，再分别生成吉他、贝斯、鼓组分轨，各自成轨。',
   },
   {
     name: '/help',

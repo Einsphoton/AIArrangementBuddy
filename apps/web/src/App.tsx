@@ -16,12 +16,15 @@ import { CommandPalette } from './features/command/CommandPalette'
 import { StatusBar } from './features/status/StatusBar'
 import { ToastHost } from './components/ToastHost'
 import { TopBar } from './features/topbar/TopBar'
+import { NewProjectWizardDialog } from './features/topbar/NewProjectWizard'
+import { ProvisionButton } from './features/audio/ProvisionButton'
 import { MixerPanel } from './features/tracks/MixerPanel'
 import { cn } from './lib/format'
 import { useProjectSession } from './lib/session'
 import { useMidiPerformance } from './features/midi/useMidiPerformance'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
 import { useUiStore, CHAT_WIDTH_LIMITS } from './lib/uiStore'
+import { detectAudioIntent, handleAudioPlanFromToolData, runAudioPlan } from './features/audio/audioIntent'
 
 const VIEW_TABS = [
   { id: 'arrangement' as const, label: '编曲', icon: <Boxes size={13} />, shortcut: '1' },
@@ -43,6 +46,8 @@ export default function App() {
   const [needsAudio, setNeedsAudio] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [welcomeOpen, setWelcomeOpen] = useState(false)
+  /** 顶栏/命令面板的「新建工程」统一打开向导（菜单关闭时也能用） */
+  const [wizardOpen, setWizardOpen] = useState(false)
   const chatCollapsed = useUiStore((s) => s.chatCollapsed)
   const chatWidth = useUiStore((s) => s.chatWidth)
   const [viewportWidth, setViewportWidth] = useState(() =>
@@ -60,15 +65,18 @@ export default function App() {
   // 全局快捷键（只接管跨视图命令，见 hooks/useGlobalShortcuts.ts）
   useGlobalShortcuts()
 
-  /* 命令面板 / 首次引导的全局入口：工具栏、帮助页、命令本身都通过事件唤起 */
+  /* 命令面板 / 首次引导 / 新建工程向导的全局入口：工具栏、帮助页、命令都通过事件唤起 */
   useEffect(() => {
     const openPalette = () => setPaletteOpen(true)
     const openWelcome = () => setWelcomeOpen(true)
+    const openWizard = () => setWizardOpen(true)
     window.addEventListener('aiab:command-palette', openPalette)
     window.addEventListener('aiab:welcome', openWelcome)
+    window.addEventListener('aiab:open-new-project-wizard', openWizard)
     return () => {
       window.removeEventListener('aiab:command-palette', openPalette)
       window.removeEventListener('aiab:welcome', openWelcome)
+      window.removeEventListener('aiab:open-new-project-wizard', openWizard)
     }
   }, [])
 
@@ -135,11 +143,17 @@ export default function App() {
     if (panel === 'help') useStore.getState().setHelpOpen(true)
     if (panel === 'palette') setPaletteOpen(true)
     if (panel === 'welcome' || params.get('intro') === '1') setWelcomeOpen(true)
+    if (panel === 'new-project' || panel === 'wizard') setWizardOpen(true)
   }, [])
 
   /* 调试句柄：window.AIAB（仅本机应用，方便排查问题与自动化验收） */
   useEffect(() => {
-    ;(window as unknown as Record<string, unknown>).AIAB = { useStore, useUiStore, engine }
+    ;(window as unknown as Record<string, unknown>).AIAB = {
+      useStore,
+      useUiStore,
+      engine,
+      audio: { detectAudioIntent, runAudioPlan, handleAudioPlanFromToolData },
+    }
   }, [engine])
 
   /* 走带 -> store 同步 */
@@ -235,6 +249,7 @@ export default function App() {
         store.setExportOpen(false)
         setPaletteOpen(false)
         setWelcomeOpen(false)
+        setWizardOpen(false)
         store.clearSelection()
       }
     }
@@ -360,6 +375,10 @@ export default function App() {
         onClose={() => setWelcomeOpen(false)}
         onOpenHelp={() => useStore.getState().setHelpOpen(true)}
       />
+      {/* 新建工程向导：顶栏/命令面板统一入口（ProjectMenu 内部仍可独立打开同一个组件） */}
+      <NewProjectWizardDialog open={wizardOpen} onClose={() => setWizardOpen(false)} />
+      {/* 全局下载对话框宿主：AI 音频意图缺模型时通过 aiab:provision-open 自动唤起 */}
+      <ProvisionButton mode="global" />
       <ToastHost />
     </div>
   )

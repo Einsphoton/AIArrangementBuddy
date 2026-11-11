@@ -1406,23 +1406,23 @@ export function PianoRollView() {
         {clipInfo ? (
           <>
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: trackColor(clipInfo.track.color) }} />
-            <span className="max-w-[130px] truncate text-[10.5px] text-ink-3" title={clipInfo.track.name}>
+            <span className="max-w-[130px] truncate text-[11px] text-ink-3" title={clipInfo.track.name}>
               {clipInfo.track.name}
             </span>
             <span className="text-[10px] text-ink-4">/</span>
-            <span className="max-w-[160px] truncate text-[12px] font-medium" title={clipInfo.clip.name}>
+            <span className="max-w-[168px] truncate text-[12.5px] font-medium" title={clipInfo.clip.name}>
               {clipInfo.clip.name}
             </span>
             {clipInfo.clip.smart && toolbarMode !== 'narrow' && (
-              <span className="rounded border border-violet/40 bg-violet/12 px-1 py-[1px] text-[9px] text-violet">
+              <span className="rounded border border-violet/40 bg-violet/12 px-1 py-[1px] text-[9.5px] text-violet">
                 智能 {SMART_KIND_META[clipInfo.clip.smart.kind].name}
               </span>
             )}
             {toolbarMode !== 'narrow' && (
-              <span className="mono text-[10px] text-ink-4">{clipInfo.clip.notes.length} 音符</span>
+              <span className="mono text-[10.5px] text-ink-4">{clipInfo.clip.notes.length} 音符</span>
             )}
             {selectedCount > 0 && (
-              <span className="rounded bg-accent/12 px-1.5 py-[1px] text-[9.5px] text-accent-soft">已选 {selectedCount}</span>
+              <span className="rounded bg-accent/12 px-1.5 py-[2px] text-[10px] text-accent-soft">已选 {selectedCount}</span>
             )}
           </>
         ) : (
@@ -1443,7 +1443,7 @@ export function PianoRollView() {
         >
           <ZoomOut size={12} />
         </IconButton>
-        <span className="mono w-[42px] text-center text-[10px] tabular-nums text-ink-4">{pxPerBeat.toFixed(0)}px</span>
+        <span className="mono w-[46px] text-center text-[10.5px] tabular-nums text-ink-4">{pxPerBeat.toFixed(0)}px</span>
         <IconButton title="放大时间轴（⌘滚轮）" onClick={() => zoomBy(1.25)} className="h-7 w-7">
           <ZoomIn size={12} />
         </IconButton>
@@ -1460,7 +1460,7 @@ export function PianoRollView() {
           ariaLabel="吸附网格"
           value={String(snap)}
           onChange={(value) => setSnap(Number(value))}
-          className="h-7 w-[92px] shrink-0 text-[11px]"
+          className="h-[30px] w-[96px] shrink-0 text-[11.5px]"
           options={SNAP_OPTIONS}
         />
         {!ultraNarrow && (
@@ -1470,7 +1470,7 @@ export function PianoRollView() {
               ariaLabel="网格线细度"
               value={gridDivision}
               onChange={(value) => setGridDivision(value as GridDivision)}
-              className="h-7 w-[76px] shrink-0 text-[11px]"
+              className="h-[30px] w-[82px] shrink-0 text-[11.5px]"
               options={GRID_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
             />
           </>
@@ -1481,12 +1481,12 @@ export function PianoRollView() {
             ariaLabel="量化强度"
             value={String(quantizeStrength)}
             onChange={(value) => setQuantizeStrength(Number(value))}
-            className="h-7 w-[86px] shrink-0 text-[11px]"
+            className="h-[30px] w-[90px] shrink-0 text-[11.5px]"
             options={QUANTIZE_STRENGTH_OPTIONS}
           />
         )}
         <button
-          className="btn btn-ghost h-7 shrink-0 px-2 text-[10.5px]"
+          className="btn btn-ghost h-[30px] shrink-0 px-2.5 text-[11px]"
           onClick={() => applyQuantize(quantizeStrength)}
           title={`量化到吸附网格（Q），按 ${strengthLabel(quantizeStrength)} 强度插值`}
           disabled={!clip}
@@ -1500,7 +1500,7 @@ export function PianoRollView() {
             <button
               key={toggle.id}
               type="button"
-              className={cn('btn btn-ghost h-7 shrink-0 px-2 text-[10.5px]', toggle.active && 'text-accent')}
+              className={cn('btn btn-ghost h-[30px] shrink-0 px-2.5 text-[11px]', toggle.active && 'text-accent')}
               aria-pressed={toggle.action ? undefined : toggle.active}
               aria-label={toggle.label}
               title={toggle.title}
@@ -1516,7 +1516,7 @@ export function PianoRollView() {
             <button
               key={toggle.id}
               type="button"
-              className={cn('btn btn-ghost h-7 w-7 shrink-0 px-0', toggle.active && 'text-accent')}
+              className={cn('btn btn-ghost h-[30px] w-[30px] shrink-0 px-0', toggle.active && 'text-accent')}
               aria-pressed={toggle.action ? undefined : toggle.active}
               aria-label={toggle.label}
               title={toggle.title}
@@ -1529,7 +1529,7 @@ export function PianoRollView() {
         <span className="vdivider mx-1 h-5" />
         {/* 低频操作收进「更多」菜单，保证 1024px 编辑区也不溢出（DAW 常见做法） */}
         <button
-          className={cn('btn btn-ghost h-7 shrink-0 gap-1 px-2 text-[10.5px]', moreAnchor && 'text-accent')}
+          className={cn('btn btn-ghost h-[30px] shrink-0 gap-1 px-2.5 text-[11px]', moreAnchor && 'text-accent')}
           aria-label="更多编辑操作"
           aria-haspopup="menu"
           aria-expanded={Boolean(moreAnchor)}
@@ -1546,8 +1546,8 @@ export function PianoRollView() {
       {moreAnchor && (
         <Popover
           anchor={moreAnchor}
-          width={248}
-          estimatedHeight={toolbarMode === 'narrow' ? 600 : 460}
+          width={264}
+          estimatedHeight={toolbarMode === 'narrow' ? 620 : 480}
           onClose={() => setMoreAnchor(null)}
           label="更多编辑操作"
         >
@@ -1560,14 +1560,14 @@ export function PianoRollView() {
                     ariaLabel="网格线细度"
                     value={gridDivision}
                     onChange={(value) => setGridDivision(value as GridDivision)}
-                    className="h-7 w-full text-[11px]"
+                    className="h-8 w-full text-[11.5px]"
                     options={GRID_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
                   />
                   <Select
                     ariaLabel="量化强度"
                     value={String(quantizeStrength)}
                     onChange={(value) => setQuantizeStrength(Number(value))}
-                    className="h-7 w-full text-[11px]"
+                    className="h-8 w-full text-[11.5px]"
                     options={QUANTIZE_STRENGTH_OPTIONS}
                   />
                 </div>
@@ -1716,7 +1716,7 @@ export function PianoRollView() {
                       >
                         <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: trackColor(pickerTrack.color) }} />
                         <span className="min-w-0 flex-1 truncate text-[12px]">{item.name}</span>
-                        <span className="mono shrink-0 text-[10px] text-ink-4">
+                        <span className="mono shrink-0 text-[10.5px] text-ink-4">
                           {item.lengthBeats} 拍 · {item.notes.length} 音符
                         </span>
                       </button>
@@ -1735,7 +1735,7 @@ export function PianoRollView() {
                     <Plus size={12} />
                     在「{pickerTrack?.name ?? '轨道'}」上新建 2 小节片段
                   </button>
-                  <p className="mt-2 text-center text-[9.5px] leading-relaxed text-ink-4">
+                  <p className="mt-2 text-center text-[10px] leading-relaxed text-ink-4">
                     写音符后：右键音符可删除 / 复制 / 量化 / 移调；右键空白可粘贴、全选或在播放头新建。
                   </p>
                 </>
@@ -1746,7 +1746,7 @@ export function PianoRollView() {
       </div>
 
       {/* 底部状态条 */}
-      <div className="flex h-[24px] shrink-0 items-center gap-3 border-t border-line px-2.5 text-[9.5px] text-ink-4">
+      <div className="flex h-[26px] shrink-0 items-center gap-3 border-t border-line px-2.5 text-[10px] text-ink-4">
         <span>
           音域{' '}
           {clip && clip.notes.length > 0

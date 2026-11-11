@@ -51,6 +51,7 @@ const TOOL_META: Record<string, ToolMeta> = {
   generate_smart_clip: { title: '生成智能片段', icon: Sparkles, tone: 'text-violet' },
   arrange_from_melody: { title: '旋律 → 自动编曲', icon: Sparkles, tone: 'text-violet' },
   melody_from_chords: { title: '和弦 → 填旋律', icon: Sparkles, tone: 'text-violet' },
+  generate_audio: { title: '生成音频', icon: AudioWaveform, tone: 'text-accent' },
   set_tempo: { title: '设置速度', icon: SlidersHorizontal, tone: 'text-cyan' },
   set_key_scale: { title: '设置调式', icon: SlidersHorizontal, tone: 'text-cyan' },
   set_chords: { title: '设置和弦进行', icon: SlidersHorizontal, tone: 'text-cyan' },
@@ -138,6 +139,11 @@ const ARG_LABELS: Record<string, string> = {
   clipIds: '片段',
   timing: '时值抖动',
   velocity: '力度',
+  mode: '方式',
+  caption: '描述',
+  stems: '分轨',
+  durationSec: '时长',
+  reason: '理由',
 }
 
 /** 从参数里提取一眼能看懂的摘要 */

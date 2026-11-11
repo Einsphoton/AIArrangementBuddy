@@ -78,7 +78,7 @@ export interface AgentEmitter {
   text(delta: string): void
   reasoning(delta: string): void
   toolStart(call: { id: string; name: string; args: Record<string, unknown>; title?: string }): void
-  toolEnd(data: { id: string; ok: boolean; result?: string; error?: string }): void
+  toolEnd(data: { id: string; ok: boolean; result?: string; error?: string; data?: unknown }): void
   project(project: Project, label: string): void
   /** AI 请求前端执行界面动作（播放/跳转/切视图…） */
   ui(action: AgentUiAction): void

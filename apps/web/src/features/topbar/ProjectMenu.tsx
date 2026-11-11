@@ -30,7 +30,7 @@ import { cn, formatRelativeTime } from '../../lib/format'
 import { audioFileBaseName, placeAudioClip } from '../audio/audioTrack'
 import { primeAssetPeaks } from '../audio/peaks'
 import { tidy } from '../arrangement/timeline'
-import { NewProjectWizard } from './NewProjectWizard'
+import { NewProjectWizardDialog } from './NewProjectWizard'
 
 type Panel = 'root' | 'open' | 'saveas' | 'new'
 
@@ -75,7 +75,12 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
   const [importingMidi, setImportingMidi] = useState(false)
   const [importingAudio, setImportingAudio] = useState(false)
 
+  /* 菜单外的点击 / Esc 关闭菜单。
+     注意：新建向导与简谱导入是 portal 到 body 的独立弹层，点击它们的内容
+     不能算「点了菜单外面」，否则菜单卸载会把弹层一起带走（历史 bug）。
+     因此弹层打开时不再注册外点关闭，交给弹层自己处理 Esc / 遮罩。 */
   useEffect(() => {
+    if (panel === 'new' || jianpuOpen) return
     const handler = (event: MouseEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node)) onClose()
     }
@@ -88,7 +93,19 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
       window.removeEventListener('mousedown', handler)
       window.removeEventListener('keydown', escape)
     }
-  }, [onClose])
+  }, [onClose, panel, jianpuOpen])
+
+  /* 简谱导入弹层的 Esc 关闭（向导弹层自己处理） */
+  useEffect(() => {
+    if (!jianpuOpen) return
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      setJianpuOpen(false)
+    }
+    window.addEventListener('keydown', escape)
+    return () => window.removeEventListener('keydown', escape)
+  }, [jianpuOpen])
 
   const loadProjects = useCallback(async () => {
     setListLoading(true)
@@ -316,26 +333,13 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
 
   return (
     <>
-      {/* 新建向导：portal 到 body 的独立模态框。
-          放在顶栏里会被主编辑区的层叠上下文（时间轴工具条）盖住，且 292px 下拉宽度装不下 9 个风格。 */}
-      {panel === 'new' &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[200] flex items-start justify-center overflow-y-auto bg-black/65 p-4 pt-[7vh]"
-            role="dialog"
-            aria-modal="true"
-            aria-label="新建工程"
-            onClick={onClose}
-          >
-            <div
-              className="w-full max-w-[760px] overflow-hidden rounded-xl border border-line-strong bg-surface-2 shadow-[0_32px_80px_-24px_rgba(0,0,0,0.9)]"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <NewProjectWizard onDone={onClose} onBack={() => setPanel('root')} />
-            </div>
-          </div>,
-          document.body,
-        )}
+      {/* 新建向导：与顶栏「新建」共用同一个弹窗宿主（Esc / 遮罩关闭行为一致）。
+          放在顶栏里会被主编辑区的层叠上下文（时间轴工具条）盖住，所以 portal 到 body。 */}
+      <NewProjectWizardDialog
+        open={panel === 'new'}
+        onClose={onClose}
+        onBack={() => setPanel('root')}
+      />
 
       {jianpuOpen &&
         createPortal(
@@ -353,8 +357,8 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
             >
               <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
                 <div>
-                  <h2 className="text-[13px] font-semibold">导入简谱</h2>
-                  <p className="mt-0.5 text-[10px] leading-relaxed text-ink-4">
+                  <h2 className="text-[13.5px] font-semibold">导入简谱</h2>
+                  <p className="mt-0.5 text-[10.5px] leading-relaxed text-ink-4">
                     支持 <code>1=C</code> / <code>4/4</code> / <code>♩=120</code> 头信息；音符 1–7（0 休止），
                     <code>'</code>/<code>,</code> 八度，<code>/</code> 减半（<code>1/</code> 八分），
                     <code>.</code> 附点，<code>-</code> 延长，<code>~</code> 连音，<code>|</code> 小节线。
@@ -381,13 +385,13 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
                   className="field w-full resize-y font-mono text-[11px] leading-relaxed"
                 />
                 {jianpuError && (
-                  <p className="mt-1.5 rounded border border-danger/30 bg-danger/8 px-2 py-1 text-[10px] text-danger">{jianpuError}</p>
+                  <p className="mt-1.5 rounded border border-danger/30 bg-danger/8 px-2 py-1 text-[10.5px] text-danger">{jianpuError}</p>
                 )}
                 <div className="mt-2 flex items-center justify-end gap-1.5">
-                  <button type="button" className="btn btn-ghost h-7 px-2.5 text-[11px]" data-jianpu-cancel onClick={() => setJianpuOpen(false)}>
+                  <button type="button" className="btn btn-ghost h-8 px-2.5 text-[11.5px]" data-jianpu-cancel onClick={() => setJianpuOpen(false)}>
                     取消
                   </button>
-                  <button type="button" className="btn btn-primary h-7 px-3 text-[11px]" data-jianpu-submit onClick={() => importJianpu()}>
+                  <button type="button" className="btn btn-primary h-8 px-3 text-[11.5px]" data-jianpu-submit onClick={() => importJianpu()}>
                     导入并替换工程
                   </button>
                 </div>
@@ -400,7 +404,7 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
       <div
         ref={ref}
         className={cn(
-          'absolute left-0 top-9 z-50 w-[292px] overflow-hidden rounded-xl border border-line-strong bg-surface-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.85)]',
+          'absolute left-0 top-9 z-50 w-[306px] overflow-hidden rounded-xl border border-line-strong bg-surface-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.85)]',
           panel === 'new' && 'hidden',
         )}
         role="menu"
@@ -472,17 +476,17 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
           />
 
           <div className="my-1 h-px bg-line" />
-          <div className="px-2 py-1 text-[9.5px] font-semibold tracking-[0.12em] text-ink-4">示例工程</div>
+          <div className="px-2 py-1 text-[10px] font-semibold tracking-[0.12em] text-ink-4">示例工程</div>
           {EXAMPLES.map((example) => (
             <button
               key={example.style}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-3 disabled:opacity-50"
+              className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-surface-3 disabled:opacity-50"
               onClick={() => loadExample(example)}
               disabled={creating !== null}
               title={`生成示例：${example.name}`}
             >
               <span
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border"
                 style={{
                   borderColor: `${example.accent}55`,
                   background: `${example.accent}18`,
@@ -492,13 +496,13 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
                 {creating === example.style ? <LoaderCircle size={11} className="animate-spin" /> : <Music4 size={11} />}
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[11.5px] font-medium text-ink">{example.name}</span>
-                <span className="block truncate text-[9.5px] text-ink-4">{example.description}</span>
+                <span className="block truncate text-[12px] font-medium text-ink">{example.name}</span>
+                <span className="block truncate text-[10px] text-ink-4">{example.description}</span>
               </span>
             </button>
           ))}
 
-          <div className="mt-1 border-t border-line px-2 py-1.5 text-[9.5px] leading-relaxed text-ink-4">
+          <div className="mt-1 border-t border-line px-2 py-2 text-[10px] leading-relaxed text-ink-4">
             示例由本地生成器创建，可直接编辑或让 AI 继续加工。
           </div>
         </div>
@@ -515,7 +519,7 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
             >
               <ArrowLeft size={11} />
             </button>
-            <span className="text-[11.5px] font-medium text-ink">打开工程</span>
+            <span className="text-[12px] font-medium text-ink">打开工程</span>
             <button
               className="btn btn-ghost btn-icon ml-auto h-6 w-6"
               onClick={() => void loadProjects()}
@@ -529,7 +533,7 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
 
           <div className="min-h-0 flex-1 overflow-y-auto p-1">
             {listLoading && projects === null ? (
-              <div className="flex items-center justify-center gap-2 py-8 text-[11px] text-ink-3">
+              <div className="flex items-center justify-center gap-2 py-8 text-[11.5px] text-ink-3">
                 <LoaderCircle size={12} className="animate-spin" />
                 正在读取工程列表…
               </div>
@@ -537,14 +541,14 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
               <div className="px-2 py-4">
                 <div className="flex items-start gap-1.5 rounded-lg border border-danger/35 bg-danger/8 px-2 py-1.5">
                   <TriangleAlert size={11} className="mt-[1px] shrink-0 text-danger" />
-                  <div className="min-w-0 flex-1 text-[10.5px] leading-relaxed text-ink-2">{listError}</div>
+                  <div className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-2">{listError}</div>
                 </div>
                 <button className="btn mt-2 h-7 w-full text-[11px]" onClick={() => void loadProjects()}>
                   重试
                 </button>
               </div>
             ) : !projects || projects.length === 0 ? (
-              <div className="px-3 py-8 text-center text-[11px] leading-relaxed text-ink-3">
+              <div className="px-3 py-8 text-center text-[11.5px] leading-relaxed text-ink-3">
                 还没有保存过的工程。
                 <br />
                 编辑后会自动保存到本机。
@@ -553,12 +557,12 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
               projects.map((item) => (
                 <button
                   key={item.id}
-                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-3 disabled:opacity-50"
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-surface-3 disabled:opacity-50"
                   onClick={() => void openProject(item.id)}
                   disabled={loadingId !== null}
                   title={item.name}
                 >
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-line-strong bg-bg-soft text-ink-3">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-bg-soft text-ink-3">
                     {loadingId === item.id ? (
                       <LoaderCircle size={11} className="animate-spin" />
                     ) : (
@@ -566,8 +570,8 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
                     )}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[11.5px] font-medium text-ink">{item.name}</span>
-                    <span className="block truncate text-[9.5px] text-ink-4">
+                    <span className="block truncate text-[12px] font-medium text-ink">{item.name}</span>
+                    <span className="block truncate text-[10px] text-ink-4">
                       {item.trackCount} 轨 · {item.tempo} BPM · {formatRelativeTime(item.updatedAt)}
                     </span>
                   </span>
@@ -589,11 +593,11 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
             >
               <ArrowLeft size={11} />
             </button>
-            <span className="text-[11.5px] font-medium text-ink">另存为副本</span>
+            <span className="text-[12px] font-medium text-ink">另存为副本</span>
           </div>
           <input
             autoFocus
-            className="field text-[12px]"
+            className="field h-8 text-[12px]"
             value={saveAsName}
             onChange={(event) => setSaveAsName(event.target.value)}
             onKeyDown={(event) => {
@@ -602,15 +606,15 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
             placeholder="新工程名称"
             aria-label="新工程名称"
           />
-          <p className="mt-1 text-[9.5px] leading-relaxed text-ink-4">
+          <p className="mt-1.5 text-[10px] leading-relaxed text-ink-4">
             会创建一个新工程并立即保存到本机，原工程保持不变。
           </p>
           <div className="mt-2 flex items-center gap-1.5">
-            <button className="btn h-7 flex-1 text-[11px]" onClick={() => setPanel('root')} disabled={savingAs}>
+            <button className="btn h-8 flex-1 text-[11.5px]" onClick={() => setPanel('root')} disabled={savingAs}>
               取消
             </button>
             <button
-              className="btn btn-accent h-7 flex-1 text-[11px]"
+              className="btn btn-accent h-8 flex-1 text-[11.5px]"
               onClick={() => void saveAs()}
               disabled={savingAs}
             >
@@ -651,7 +655,7 @@ function MenuItem({
       data-import-audio={dataImportAudio ? '' : undefined}
       data-import-jianpu={dataImportJianpu ? '' : undefined}
       className={cn(
-        'flex w-full items-center gap-2 rounded-lg px-2 py-[7px] text-left text-[11.5px] text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink',
+        'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[12px] text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink',
         disabled && 'pointer-events-none opacity-50',
       )}
       onClick={onClick}
@@ -660,7 +664,7 @@ function MenuItem({
     >
       <span className="shrink-0 text-ink-3">{icon}</span>
       <span className="flex-1">{label}</span>
-      {hint && <span className="mono shrink-0 text-[9.5px] text-ink-4">{hint}</span>}
+      {hint && <span className="mono shrink-0 text-[10px] text-ink-4">{hint}</span>}
       {trailing}
     </button>
   )

@@ -186,6 +186,18 @@ button:focus-visible {
   .field::placeholder {
     color: var(--color-ink-4);
   }
+  /* 多行输入：.field 的固定高度只适用于单行控件；textarea 必须有可用的行高，
+     否则 rows={3} 会被压成 32px（只能看到一行，滚动条还看不见）。 */
+  textarea.field {
+    height: auto;
+    min-height: 72px;
+    padding: 8px 10px;
+    line-height: 1.6;
+  }
+  textarea.field[rows="1"],
+  textarea.field[rows="2"] {
+    min-height: 0;
+  }
 
   .chip {
     display: inline-flex;

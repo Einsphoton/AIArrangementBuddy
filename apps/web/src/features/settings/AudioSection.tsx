@@ -197,7 +197,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
           </div>
         </FieldGroup>
 
-        <div className="flex items-center gap-2 text-[10.5px] text-ink-3">
+        <div className="flex items-center gap-2 text-[11px] text-ink-3">
           <Waves size={11} className="text-cyan" />
           {soundfontStatus.loaded ? (
             <span>
@@ -220,7 +220,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
         <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-bg-soft/50 px-2.5 py-2">
           <div>
             <div className="text-[12px] text-ink-2">优先使用采样音源</div>
-            <div className="mt-0.5 text-[10px] text-ink-4">关闭后强制使用内置合成器，启动更快</div>
+            <div className="mt-0.5 text-[10.5px] text-ink-4">关闭后强制使用内置合成器，启动更快</div>
           </div>
           <Switch
             checked={draft.audio.preferSoundfont}
@@ -240,7 +240,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
             </span>
             <div className="min-w-0 flex-1">
               <div className="text-[12px] font-medium text-ink">MuseScore General</div>
-              <div className="mt-0.5 text-[10px] text-ink-4">
+              <div className="mt-0.5 text-[10.5px] text-ink-4">
                 {museFile
                   ? `${museFile.name} · ${formatBytes(museFile.size)}${museFile.license ? ` · ${museFile.license}` : ''}`
                   : '通用 GM 音色库，覆盖绝大多数乐器'}
@@ -286,6 +286,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
             <Select
               value={draft.audio.soundfontUrl}
               ariaLabel="音色库文件"
+              className="min-w-0 flex-1"
               options={[
                 { value: '', label: loadingFonts ? '读取中…' : soundfonts.length ? '选择音色库文件' : '暂无可用文件' },
                 ...soundfonts.map((file) => ({
@@ -335,10 +336,10 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
               >
                 <AudioLines size={11} className="shrink-0 text-cyan" />
                 <span className="min-w-0 flex-1 truncate text-[11px] text-ink-2">{file.name}</span>
-                <span className="mono shrink-0 text-[9.5px] text-ink-4">{formatBytes(file.size)}</span>
+                <span className="mono shrink-0 text-[10px] text-ink-4">{formatBytes(file.size)}</span>
                 {file.license && <Badge tone="neutral">{file.license}</Badge>}
                 <button
-                  className="btn h-6 shrink-0 px-1.5 text-[10px]"
+                  className="btn h-6 shrink-0 px-1.5 text-[10.5px]"
                   onClick={() => {
                     update((next) => {
                       next.audio.soundfontUrl = file.url
@@ -350,7 +351,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
                   加载
                 </button>
                 <button
-                  className="btn h-6 shrink-0 px-1.5 text-[10px]"
+                  className="btn h-6 shrink-0 px-1.5 text-[10.5px]"
                   disabled={downloading !== null}
                   onClick={() => void download(soundfontDownloadId(file))}
                   title="重新下载该音色库"
@@ -361,7 +362,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
             ))}
           </div>
         ) : (
-          <span className="text-[10.5px] text-ink-4">
+          <span className="text-[11px] text-ink-4">
             {loadingFonts ? '正在读取服务端音色库…' : '服务端未提供音色库文件，可先一键下载 MuseScore General。'}
           </span>
         )}
@@ -380,6 +381,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
             <Select
               value={midiActiveId ?? ''}
               ariaLabel="MIDI 输入设备"
+              className="min-w-0 flex-1"
               options={[
                 { value: '', label: midiDevices.length ? '不启用 MIDI 输入' : '未检测到设备' },
                 ...midiDevices.map((device) => ({ value: device.id, label: device.name })),
@@ -435,7 +437,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
               <Timer size={11} className="text-ink-3" />
               MIDI Thru（监听直出）
             </div>
-            <div className="mt-0.5 text-[10px] text-ink-4">弹奏时立即发声，方便试听音色</div>
+            <div className="mt-0.5 text-[10.5px] text-ink-4">弹奏时立即发声，方便试听音色</div>
           </div>
           <Switch
             checked={draft.audio.midiThru}
@@ -456,7 +458,7 @@ export function AudioSection({ draft, update }: SettingsSectionProps) {
       </Section>
 
       <Section title="引擎信息" description="用于排查音频问题。" icon={<Gauge size={13} />}>
-        <div className="grid grid-cols-2 gap-2 text-[10.5px] text-ink-3">
+        <div className="grid grid-cols-2 gap-2 text-[11px] text-ink-3">
           <div className="rounded-lg border border-line bg-bg-soft/40 px-2.5 py-1.5">
             <div className="text-ink-4">引擎状态</div>
             <div className={ready ? 'text-success' : 'text-ink-2'}>{ready ? '运行中' : '等待初始化'}</div>

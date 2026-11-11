@@ -26,7 +26,7 @@ export function Section({
             <h3 className="text-[12.5px] font-semibold tracking-tight text-ink">{title}</h3>
             {badge}
           </div>
-          {description && <p className="mt-0.5 text-[10.5px] leading-relaxed text-ink-3">{description}</p>}
+          {description && <p className="mt-1 text-[11px] leading-relaxed text-ink-3">{description}</p>}
         </div>
       </header>
       <div className="space-y-3 px-3.5 py-3">{children}</div>
@@ -50,7 +50,7 @@ export function Row({
     <div className={cn('flex gap-3', align === 'center' ? 'items-center' : 'items-start')}>
       <div className="min-w-0 flex-1">
         <div className="text-[12px] text-ink-2">{label}</div>
-        {hint && <div className="mt-0.5 text-[10.5px] leading-relaxed text-ink-4">{hint}</div>}
+        {hint && <div className="mt-0.5 text-[11px] leading-relaxed text-ink-4">{hint}</div>}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -71,9 +71,9 @@ export function FieldGroup({
 }) {
   return (
     <label className={cn('block', className)}>
-      <span className="mb-1 block text-[10.5px] font-semibold tracking-wide text-ink-3">{label}</span>
+      <span className="mb-1 block text-[11px] font-semibold tracking-wide text-ink-3">{label}</span>
       {children}
-      {hint && <span className="mt-1 block text-[10px] leading-relaxed text-ink-4">{hint}</span>}
+      {hint && <span className="mt-1 block text-[10.5px] leading-relaxed text-ink-4">{hint}</span>}
     </label>
   )
 }
@@ -95,7 +95,7 @@ export function StatusLine({
     accent: 'text-accent-soft',
   }
   return (
-    <span className={cn('flex items-center gap-1 text-[10.5px] leading-relaxed', tones[tone])}>
+    <span className={cn('flex items-center gap-1 text-[11px] leading-relaxed', tones[tone])}>
       {icon}
       <span className="min-w-0 break-words">{children}</span>
     </span>
@@ -116,13 +116,13 @@ export function Details({
     <details className="group rounded-lg border border-line bg-bg-soft/50 px-2.5 py-2">
       <summary
         className={cn(
-          'cursor-pointer list-none text-[11px] font-medium',
+          'cursor-pointer list-none text-[11.5px] font-medium',
           tone === 'accent' ? 'text-accent-soft' : 'text-ink-2',
         )}
       >
         {summary}
       </summary>
-      <div className="mt-1.5 space-y-1 text-[10.5px] leading-relaxed text-ink-3">{children}</div>
+      <div className="mt-1.5 space-y-1 text-[11px] leading-relaxed text-ink-3">{children}</div>
     </details>
   )
 }
@@ -130,7 +130,7 @@ export function Details({
 /** 代码片段 */
 export function Code({ children }: { children: React.ReactNode }) {
   return (
-    <code className="mono inline-block max-w-full overflow-x-auto rounded border border-line bg-black/30 px-1.5 py-[1px] text-[10.5px] text-accent-soft">
+    <code className="mono inline-block max-w-full overflow-x-auto rounded border border-line bg-black/30 px-1.5 py-[1px] text-[11px] text-accent-soft">
       {children}
     </code>
   )

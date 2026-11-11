@@ -225,7 +225,7 @@ export function AiProvidersSection({
                   缺少 API Key
                 </StatusLine>
               )}
-              <span className="flex min-w-0 max-w-full items-center gap-1 text-[10.5px] text-ink-4">
+              <span className="flex min-w-0 max-w-full items-center gap-1 text-[11px] text-ink-4">
                 <span className="shrink-0">模型</span>
                 <span className="mono min-w-0 max-w-[220px] truncate text-ink-2" title={activeProvider?.model || '未选模型'}>
                   {activeProvider?.model || '—'}
@@ -284,7 +284,7 @@ export function AiProvidersSection({
           <div className="space-y-2 pt-1">
             {groupedPresets.map((entry) => (
               <div key={entry.group}>
-                <div className="mb-1 text-[10px] font-semibold tracking-wide text-ink-4">{entry.group}</div>
+                <div className="mb-1 text-[10.5px] font-semibold tracking-wide text-ink-4">{entry.group}</div>
                 <div className="flex flex-wrap gap-1.5">
                   {entry.presets.map((preset) => (
                     <PresetChip
@@ -363,13 +363,13 @@ function PresetHeroCard({
             {preset.tag && <Badge tone="accent">{preset.tag}</Badge>}
             {active && <Badge tone="success">使用中</Badge>}
           </div>
-          <p className="mt-0.5 text-[10.5px] leading-relaxed text-ink-3">{preset.blurb ?? preset.hint}</p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-ink-3">{preset.blurb ?? preset.hint}</p>
         </div>
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <button
-          className={cn('btn h-7 px-2.5 text-[11px]', added ? '' : 'btn-accent')}
+          className={cn('btn h-7 px-2.5 text-[11.5px]', added ? '' : 'btn-accent')}
           onClick={onAdd}
           title={added ? `设为当前：${preset.name}` : `添加并使用：${preset.name}`}
         >
@@ -387,7 +387,7 @@ function PresetHeroCard({
         </button>
         {preset.docsUrl && (
           <a
-            className="btn h-7 px-2 text-[11px] text-ink-2"
+            className="btn h-7 px-2 text-[11.5px] text-ink-2"
             href={preset.docsUrl}
             target="_blank"
             rel="noreferrer"
@@ -397,7 +397,7 @@ function PresetHeroCard({
             <ArrowUpRight size={10} />
           </a>
         )}
-        <span className="ml-auto text-[10px] text-ink-4">
+        <span className="ml-auto text-[10.5px] text-ink-4">
           {loading ? '读取模型中…' : modelCount ? `${modelCount} 个模型` : '填 Key 即可用'}
         </span>
       </div>
@@ -419,7 +419,7 @@ function PresetChip({
   return (
     <button
       className={cn(
-        'flex h-7 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+        'flex h-7 items-center gap-1.5 rounded-lg border px-2 text-[11.5px] transition-colors',
         active
           ? 'border-accent/50 bg-accent/12 text-accent-soft'
           : added
@@ -505,7 +505,7 @@ function ProviderCard({
     >
       <header className="flex flex-wrap items-center gap-2 rounded-t-xl border-b border-line/80 px-3 py-2">
         <input
-          className="field h-7 w-40 min-w-0 shrink-0 text-[12px] font-medium sm:w-52"
+          className="field h-8 w-40 min-w-0 shrink-0 text-[12px] font-medium sm:w-52"
           value={provider.name}
           aria-label="服务商名称"
           title={provider.name}
@@ -518,13 +518,13 @@ function ProviderCard({
         {!provider.apiKey && <Badge tone="danger">缺 Key</Badge>}
         <div className="ml-auto flex items-center gap-1">
           {!active && (
-            <button className="btn h-7 px-2 text-[11px]" onClick={onSetActive} title="设为当前服务商">
+            <button className="btn h-8 px-2 text-[11.5px]" onClick={onSetActive} title="设为当前服务商">
               设为当前
             </button>
           )}
           <button
             className={cn(
-              'btn h-7 px-2 text-[11px]',
+              'btn h-8 px-2 text-[11.5px]',
               confirmRemove ? 'border-danger/50 text-danger' : 'text-ink-3 hover:text-danger',
             )}
             onClick={() => {
@@ -550,7 +550,7 @@ function ProviderCard({
               <span>接口地址（Base URL）</span>
               {preset?.docsUrl && (
                 <a
-                  className="flex items-center gap-0.5 text-[10px] font-normal text-accent/80 hover:text-accent"
+                  className="flex items-center gap-0.5 text-[10.5px] font-normal text-accent/80 hover:text-accent"
                   href={preset.docsUrl}
                   target="_blank"
                   rel="noreferrer"
@@ -620,7 +620,7 @@ function ProviderCard({
           label={
             <span className="flex items-center justify-between">
               <span>模型</span>
-              <span className="text-[10px] font-normal text-ink-4">
+              <span className="text-[10.5px] font-normal text-ink-4">
                 {slot?.loading
                   ? '读取中…'
                   : models.length
@@ -647,7 +647,7 @@ function ProviderCard({
 
         {/* 高级参数 */}
         <button
-          className="flex w-full items-center gap-1.5 border-t border-line/70 pt-2 text-[10.5px] text-ink-3 hover:text-ink-2"
+          className="flex w-full items-center gap-1.5 border-t border-line/70 pt-2 text-[11px] text-ink-3 hover:text-ink-2"
           onClick={() => setAdvanced((value) => !value)}
         >
           <ChevronDown size={11} className={cn('transition-transform', advanced && 'rotate-180')} />
@@ -677,7 +677,7 @@ function ProviderCard({
                   width={92}
                   onChange={(value) => onUpdate({ maxTokens: Math.round(value) })}
                 />
-                <div className="flex items-center gap-1.5 text-[10.5px] text-ink-3">
+                <div className="flex items-center gap-1.5 text-[11px] text-ink-3">
                   <Switch
                     checked={provider.parallelToolCalls}
                     label="并行工具调用"
@@ -785,7 +785,7 @@ function ProviderCard({
           </StatusLine>
         )}
         {!testResult && !testError && !testing && (
-          <span className="text-[10px] text-ink-4">改完记得点右下角「保存」</span>
+          <span className="text-[10.5px] text-ink-4">改完记得点右下角「保存」</span>
         )}
       </footer>
     </section>

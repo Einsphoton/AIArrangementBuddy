@@ -128,15 +128,15 @@ function RecordButton() {
       </button>
       {midiRecord && (
         <span className="hidden shrink-0 items-center gap-1.5 min-[1440px]:flex" aria-live="polite">
-          <span className="rounded-[4px] border border-danger/40 bg-danger/10 px-1.5 py-[2px] text-[9.5px] font-semibold text-danger">
+          <span className="rounded-[4px] border border-danger/40 bg-danger/10 px-1.5 py-[2px] text-[10.5px] font-semibold text-danger">
             MIDI 录入
           </span>
           {armedName && (
-            <span className="max-w-[92px] truncate text-[9.5px] text-ink-3" title={`已预备轨道：${armedName}`}>
+            <span className="max-w-[104px] truncate text-[10.5px] text-ink-3" title={`已预备轨道：${armedName}`}>
               预备：{armedName}
             </span>
           )}
-          {view !== 'pianoroll' && <span className="text-[9.5px] text-accent/85">需在钢琴卷帘生效</span>}
+          {view !== 'pianoroll' && <span className="text-[10.5px] text-accent/85">需在钢琴卷帘生效</span>}
         </span>
       )}
     </div>
@@ -251,7 +251,7 @@ function TapTempoButton() {
         TAP
       </button>
       {hint && (
-        <span className="mono shrink-0 whitespace-nowrap text-[9.5px] tabular-nums text-accent" aria-live="polite">
+        <span className="mono shrink-0 whitespace-nowrap text-[10.5px] tabular-nums text-accent" aria-live="polite">
           {hint}
         </span>
       )}
@@ -293,7 +293,7 @@ function Timecode() {
       <span className="mono w-[114px] shrink-0 whitespace-nowrap text-left text-[13.5px] font-medium text-ink tabular-nums">
         {mode === 'bars' ? bars : clock}
       </span>
-      <span className="mono hidden w-[88px] whitespace-nowrap text-left text-[9.5px] tabular-nums text-ink-3 min-[1740px]:inline">
+      <span className="mono hidden w-[92px] whitespace-nowrap text-left text-[10px] tabular-nums text-ink-3 min-[1740px]:inline">
         {mode === 'bars' ? clock : bars}
       </span>
     </button>
@@ -377,7 +377,7 @@ function MasterMeter() {
         onClick={resetPeak}
         aria-label="主输出电平表（点击重置峰值）"
         title="主输出电平（峰值保持）；点击重置峰值"
-        className="relative h-[9px] w-[72px] overflow-hidden rounded-[3px] border border-line bg-bg"
+        className="relative h-[13px] w-[76px] overflow-hidden rounded-[3px] border border-line bg-bg transition-colors hover:border-line-strong"
       >
         <div
           ref={fillRef}
@@ -398,12 +398,12 @@ function MasterMeter() {
         ref={dbRef}
         data-master-db=""
         aria-label="主输出电平（dB）"
-        className="mono w-[28px] text-right text-[9.5px] tabular-nums text-ink-3"
+        className="mono w-[30px] text-right text-[10.5px] tabular-nums text-ink-3"
         title="主输出电平读数（dB，-60…0 dB；limiter 上限 -1 dB）"
       >
         -∞
       </span>
-      <span className="hidden text-[9px] text-ink-4 xl:block">OUT</span>
+      <span className="hidden text-[10px] text-ink-4 xl:block">OUT</span>
     </div>
   )
 }
@@ -504,7 +504,7 @@ function TempoControl() {
       ) : (
         <span className="mono w-[38px] text-[13.5px] tabular-nums">{tempo}</span>
       )}
-      <span className="text-[9px] font-semibold tracking-wider text-ink-4">BPM</span>
+      <span className="text-[10px] font-semibold tracking-wider text-ink-4">BPM</span>
     </div>
   )
 }
@@ -539,9 +539,9 @@ function LoopRange() {
     >
       <Repeat size={12} className={loopEnabled ? 'text-accent' : 'text-ink-3'} />
       <BarInput value={startBar} onChange={(value) => commit(value, endBar)} label="循环起始小节" />
-      <span className="text-[10px] text-ink-4">–</span>
+      <span className="text-[11px] text-ink-4">–</span>
       <BarInput value={endBar} onChange={(value) => commit(startBar, value)} label="循环结束小节" />
-      <span className="text-[9px] text-ink-4">小节</span>
+      <span className="text-[10px] text-ink-4">小节</span>
     </div>
   )
 }
@@ -569,7 +569,7 @@ function BarInput({ value, onChange, label }: { value: number; onChange: (value:
         if (event.key === 'ArrowUp') onChange(value + 1)
         if (event.key === 'ArrowDown') onChange(Math.max(1, value - 1))
       }}
-      className="mono w-[26px] rounded bg-transparent px-0.5 text-center text-[12px] tabular-nums outline-none hover:bg-surface-2 focus:bg-surface-2"
+      className="mono h-[26px] w-[40px] rounded border border-transparent bg-transparent px-1 text-center text-[12.5px] tabular-nums outline-none transition-colors hover:border-line-strong hover:bg-surface-2 focus:border-accent/50 focus:bg-surface-2"
     />
   )
 }
@@ -641,7 +641,7 @@ function MidiInputControl() {
   if (midiDevices.length === 0) {
     return (
       <button
-        className="btn btn-ghost h-[30px] shrink-0 gap-1.5 px-2 text-[11.5px]"
+        className="btn btn-ghost h-[30px] shrink-0 gap-1.5 px-2 text-[12px]"
         onClick={() => void detect()}
         disabled={detecting}
         title="检测 Web MIDI 输入设备（USB 键盘）"
@@ -660,7 +660,7 @@ function MidiInputControl() {
         ariaLabel="MIDI 输入设备"
         value={midiActiveId ?? ''}
         onChange={select}
-        className="h-[30px] w-[126px] shrink-0 text-[11.5px]"
+        className="h-[30px] w-[132px] shrink-0 text-[12px]"
         options={[
           { value: '', label: '不使用 MIDI' },
           ...midiDevices.map((device) => ({ value: device.id, label: device.name })),
@@ -687,7 +687,7 @@ function FollowToggle() {
       data-follow={followPlayhead ? 'on' : 'off'}
       title={`跟随播放头（F）：${followPlayhead ? '开' : '关'}——编曲与钢琴卷帘共用同一状态`}
       className={cn(
-        'flex h-[34px] shrink-0 items-center gap-1.5 rounded-[9px] border px-2 text-[10.5px] font-medium transition-colors',
+        'flex h-[34px] shrink-0 items-center gap-1.5 rounded-[9px] border px-2.5 text-[11px] font-medium transition-colors',
         followPlayhead
           ? 'border-accent/55 bg-accent/12 text-accent-soft'
           : 'border-line-strong bg-bg-soft text-ink-3 hover:text-ink',
@@ -727,11 +727,11 @@ function MasterSection() {
         className="w-[78px]"
       />
       <span
-        className="mono w-[42px] shrink-0 text-right text-[10.5px] tabular-nums text-ink-2"
+        className="mono w-[46px] shrink-0 text-right text-[11px] tabular-nums text-ink-2"
         title="主音量增益（dB）"
       >
         {gainToDbText(masterVolume)}
-        <span className="ml-0.5 text-[8.5px] text-ink-4">dB</span>
+        <span className="ml-0.5 text-[9.5px] text-ink-4">dB</span>
       </span>
       <MasterMeter />
     </div>
@@ -862,14 +862,14 @@ export function TransportBar() {
           const [numerator, denominator] = value.split('/').map((part) => Number(part))
           setTimeSignature({ numerator: numerator || 4, denominator: denominator || 4 })
         }}
-        className="h-[30px] w-[68px] shrink-0 text-[11.5px]"
+        className="h-[30px] w-[70px] shrink-0 text-[12px]"
         options={timeSignatureOptions}
       />
       <Select
         ariaLabel="调性"
         value={project.key}
         onChange={(value) => setKeyScale(value, project.scale as ScaleId)}
-        className="h-[30px] w-[62px] shrink-0 text-[11.5px]"
+        className="h-[30px] w-[64px] shrink-0 text-[12px]"
         options={[
           ...KEYS.map((key) => ({ value: key, label: `${key} 调` })),
           ...((KEYS as readonly string[]).includes(project.key)
@@ -881,7 +881,7 @@ export function TransportBar() {
         ariaLabel="调式"
         value={project.scale}
         onChange={(value) => setKeyScale(project.key, value as ScaleId)}
-        className="h-[30px] w-[96px] shrink-0 text-[11.5px]"
+        className="h-[30px] w-[100px] shrink-0 text-[12px]"
         options={scaleOptions}
       />
     </div>

@@ -67,6 +67,7 @@ export function WelcomeOverlay({
 
   useEffect(() => {
     if (!open) return
+    setBackendLabel('正在检测本地服务…')
     getHealth()
       .then((info) => {
         if (info.ok) setBackendLabel('本地服务已连接')
@@ -83,6 +84,20 @@ export function WelcomeOverlay({
     }
     onClose()
   }
+
+  /* Esc 关闭 = 跳过引导：必须走 finish() 写入 localStorage，
+     否则下次启动还会自动弹出（App 的全局 Esc 只会关状态）。 */
+  useEffect(() => {
+    if (!open) return
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      finish()
+    }
+    document.addEventListener('keydown', handler, true)
+    return () => document.removeEventListener('keydown', handler, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   const startWithPrompt = (card: StartCard) => {
     if (!card.prompt) {

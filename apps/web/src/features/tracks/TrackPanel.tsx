@@ -208,7 +208,7 @@ export function TrackPanel() {
   }
 
   return (
-    <aside className="relative flex w-[248px] shrink-0 flex-col border-r border-line bg-surface" data-track-panel>
+    <aside className="relative flex w-[264px] shrink-0 flex-col border-r border-line bg-surface" data-track-panel>
       {/* 标题栏（与主编辑区 tab 栏同高 38px） */}
       <header className="flex h-[38px] shrink-0 items-center gap-1.5 border-b border-line px-2.5">
         <span className="label">轨道</span>
@@ -217,7 +217,7 @@ export function TrackPanel() {
         <IconButton
           title="添加轨道"
           onClick={(event) => openInstrumentPicker(event.currentTarget.getBoundingClientRect())}
-          className="h-6 w-6"
+          className="h-7 w-7"
         >
           <Plus size={13} />
         </IconButton>
@@ -230,7 +230,7 @@ export function TrackPanel() {
               pushToast('success', '已复制轨道')
             }
           }}
-          className="h-6 w-6"
+          className="h-7 w-7"
         >
           <Copy size={12} />
         </IconButton>
@@ -243,7 +243,7 @@ export function TrackPanel() {
             removeTrack(selectedTrackId)
             pushToast('info', `已删除轨道「${track?.name ?? ''}」`)
           }}
-          className="h-6 w-6 hover:text-danger"
+          className="h-7 w-7 hover:text-danger"
         >
           <Trash2 size={12} />
         </IconButton>
@@ -256,27 +256,27 @@ export function TrackPanel() {
         aria-label="轨道行高工具条"
         title="轨道行高：拖动轨道头底部 4px 可单独调整；这里统一折叠/展开与纵向缩放"
       >
-        <IconButton title="全部折叠（26px）" onClick={collapseAll} className="h-6 w-6 shrink-0">
+        <IconButton title="全部折叠（26px）" onClick={collapseAll} className="h-7 w-7 shrink-0">
           <ChevronsDownUp size={12} />
         </IconButton>
-        <IconButton title="展开全部（跟随纵向缩放）" onClick={expandAll} className="h-6 w-6 shrink-0">
+        <IconButton title="展开全部（跟随纵向缩放）" onClick={expandAll} className="h-7 w-7 shrink-0">
           <ChevronsUpDown size={12} />
         </IconButton>
         <span className="mx-0.5 h-4 w-px bg-line" aria-hidden />
         <IconButton
           title="纵向缩放：减小行高"
           onClick={() => setZoom(undefined, clamp(zoomY - 1, MIN_ZOOM_Y, MAX_ZOOM_Y))}
-          className="h-6 w-6 shrink-0"
+          className="h-7 w-7 shrink-0"
         >
           <Minus size={12} />
         </IconButton>
-        <span className="mono w-[30px] shrink-0 text-center text-[9.5px] tabular-nums text-ink-4" title="默认行高">
+        <span className="mono w-[34px] shrink-0 text-center text-[10.5px] tabular-nums text-ink-4" title="默认行高">
           {fallbackRowHeight}px
         </span>
         <IconButton
           title="纵向缩放：增大行高"
           onClick={() => setZoom(undefined, clamp(zoomY + 1, MIN_ZOOM_Y, MAX_ZOOM_Y))}
-          className="h-6 w-6 shrink-0"
+          className="h-7 w-7 shrink-0"
         >
           <Plus size={12} />
         </IconButton>
@@ -290,11 +290,11 @@ export function TrackPanel() {
       >
         <div className="min-w-0">
           <div className="label">轨道 / 乐器</div>
-          <div className="mt-0.5 text-[10px] text-ink-4">
+          <div className="mt-0.5 text-[10.5px] text-ink-4">
             {clipCount} 片段 · {noteCount} 音符
           </div>
         </div>
-        <div className="shrink-0 text-right text-[9.5px] leading-tight text-ink-4">
+        <div className="shrink-0 text-right text-[10px] leading-tight text-ink-4">
           拖色条排序
           <br />
           右键更多操作
@@ -352,11 +352,11 @@ export function TrackPanel() {
             ))}
             <button
               onClick={(event) => openInstrumentPicker(event.currentTarget.getBoundingClientRect())}
-              className="group flex h-9 w-full items-center justify-center gap-1.5 border-b border-line/60 text-[11px] text-ink-4 transition-colors hover:bg-surface-3/50 hover:text-ink-2"
+              className="group flex h-9 w-full items-center justify-center gap-1.5 border-b border-line/60 text-[11.5px] text-ink-4 transition-colors hover:bg-surface-3/50 hover:text-ink-2"
               title="添加轨道"
             >
               <Plus size={12} />
-              <span className="text-[11px]">添加轨道</span>
+              <span className="text-[11.5px]">添加轨道</span>
             </button>
             {/* 底部留白 58px：36(添加轨道按钮) + 58 = 94 = 编曲视图底部留白 84 + 横向滚动条 10，
                 保证两边的最大滚动距离一致，滚到底部时轨道仍严格对齐 */}

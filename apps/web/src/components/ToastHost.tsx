@@ -16,7 +16,11 @@ export function ToastHost() {
   const dismiss = useStore((s) => s.dismissToast)
 
   return (
-    <div className="pointer-events-none fixed bottom-9 left-1/2 z-[70] flex w-[min(92vw,560px)] -translate-x-1/2 flex-col items-center gap-2">
+    <div
+      role="region"
+      aria-label="通知"
+      className="pointer-events-none fixed bottom-9 left-1/2 z-[300] flex w-[min(92vw,560px)] -translate-x-1/2 flex-col items-center gap-2"
+    >
       {toasts.map((toast) => (
         <ToastItem key={toast.id} id={toast.id} kind={toast.kind} message={toast.message} onDismiss={dismiss} />
       ))}

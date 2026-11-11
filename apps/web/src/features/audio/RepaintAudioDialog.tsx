@@ -45,6 +45,13 @@ const TERMINAL: ReadonlySet<CompanionTaskStatus> = new Set(['done', 'failed', 'c
 
 const round2 = (value: number) => Math.round(value * 100) / 100
 
+/** 只保留数字与一个小数点（受控输入允许用户从空串 / "1." 开始输入） */
+function sanitizeDecimal(raw: string): string {
+  const cleaned = raw.replace(/[^\d.]/g, '')
+  const parts = cleaned.split('.')
+  return parts.length > 1 ? `${parts[0]}.${parts.slice(1).join('')}` : cleaned
+}
+
 /** 默认区间：中间 1/3 */
 function defaultRange(durationSec: number): { start: number; end: number } {
   const duration = Math.max(0.2, durationSec)
@@ -73,8 +80,10 @@ export function RepaintAudioDialog({
       assetId: target?.assetId ?? '',
     }
   })
-  const [startSec, setStartSec] = useState(() => defaultRange(initial.durationSec).start)
-  const [endSec, setEndSec] = useState(() => defaultRange(initial.durationSec).end)
+  /* 区间输入保留「文本」状态：受控的数字 state 会把 "0." 立刻归一成 0，
+     用户根本没法输入小数秒；校验/提交时再 parse。 */
+  const [startText, setStartText] = useState(() => String(defaultRange(initial.durationSec).start))
+  const [endText, setEndText] = useState(() => String(defaultRange(initial.durationSec).end))
   const [caption, setCaption] = useState('')
   const [style, setStyle] = useState('')
   const [seedText, setSeedText] = useState('')
@@ -138,6 +147,12 @@ export function RepaintAudioDialog({
     document.addEventListener('keydown', handler, true)
     return () => document.removeEventListener('keydown', handler, true)
   }, [onClose])
+
+  const startSec = Number.parseFloat(startText)
+  const endSec = Number.parseFloat(endText)
+  /** 输入框可能为空 / 只有小数点：可视化条用兜底值，避免 NaN% 让高亮条消失 */
+  const safeStart = Number.isFinite(startSec) ? startSec : 0
+  const safeEnd = Number.isFinite(endSec) ? endSec : 0
 
   const rangeError = (() => {
     if (!(initial.durationSec > 0)) return '源片段没有有效时长，无法重绘'
@@ -326,8 +341,8 @@ export function RepaintAudioDialog({
   }
 
   const duration = initial.durationSec
-  const bandLeft = duration > 0 ? (Math.max(0, Math.min(startSec, endSec)) / duration) * 100 : 0
-  const bandWidth = duration > 0 ? (Math.abs(endSec - startSec) / duration) * 100 : 0
+  const bandLeft = duration > 0 ? (Math.max(0, Math.min(safeStart, safeEnd)) / duration) * 100 : 0
+  const bandWidth = duration > 0 ? (Math.abs(safeEnd - safeStart) / duration) * 100 : 0
 
   return createPortal(
     <div
@@ -375,7 +390,7 @@ export function RepaintAudioDialog({
             <>
               {/* 区间 */}
               <div className="mb-3 rounded-lg border border-line bg-bg-soft px-3 py-2.5">
-                <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-ink-2">
+                <div className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-ink-2">
                   <Scissors size={12} className="text-ink-3" />
                   重绘区间（相对片段内部，秒）
                 </div>
@@ -387,24 +402,26 @@ export function RepaintAudioDialog({
                 </div>
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
                   <label className="block">
-                    <span className="mb-1 block text-[10.5px] text-ink-3">起点（秒）</span>
+                    <span className="mb-1 block text-[11px] text-ink-3">起点（秒）</span>
                     <input
-                      value={Number.isFinite(startSec) ? String(startSec) : ''}
-                      onChange={(event) => setStartSec(Number(event.target.value.replace(/[^\d.]/g, '')))}
+                      value={startText}
+                      onChange={(event) => setStartText(sanitizeDecimal(event.target.value))}
                       inputMode="decimal"
-                      className="field h-8 w-full text-[12px]"
+                      className="field w-full text-[12px]"
                       aria-label="重绘起点（秒）"
+                      placeholder="0"
                       disabled={formDisabled}
                     />
                   </label>
                   <label className="block">
-                    <span className="mb-1 block text-[10.5px] text-ink-3">终点（秒）</span>
+                    <span className="mb-1 block text-[11px] text-ink-3">终点（秒）</span>
                     <input
-                      value={Number.isFinite(endSec) ? String(endSec) : ''}
-                      onChange={(event) => setEndSec(Number(event.target.value.replace(/[^\d.]/g, '')))}
+                      value={endText}
+                      onChange={(event) => setEndText(sanitizeDecimal(event.target.value))}
                       inputMode="decimal"
-                      className="field h-8 w-full text-[12px]"
+                      className="field w-full text-[12px]"
                       aria-label="重绘终点（秒）"
+                      placeholder={duration.toFixed(2)}
                       disabled={formDisabled}
                     />
                   </label>
@@ -414,19 +431,20 @@ export function RepaintAudioDialog({
                       className="btn btn-ghost h-8 px-2 text-[10.5px]"
                       onClick={() => {
                         const range = defaultRange(duration)
-                        setStartSec(range.start)
-                        setEndSec(range.end)
+                        setStartText(String(range.start))
+                        setEndText(String(range.end))
                       }}
                       disabled={formDisabled}
                       title="重置为片段中间 1/3"
                     >
+                      <Scissors size={10} className="mr-1" />
                       取中间 1/3
                     </button>
                   </div>
                 </div>
-                <p className={cn('mt-1 text-[9.5px]', rangeError ? 'text-danger' : 'text-ink-4')}>
-                  {rangeError ?? `要求 0 ≤ 起点 < 终点 ≤ ${duration.toFixed(2)} 秒；重绘按整段返回替换当前版本`}
-                </p>
+              <p className={cn('mt-1.5 text-[10.5px] leading-relaxed', rangeError ? 'text-danger' : 'text-ink-4')}>
+                {rangeError ?? `要求 0 ≤ 起点 < 终点 ≤ ${duration.toFixed(2)} 秒；重绘按整段返回替换当前版本`}
+              </p>
               </div>
 
               {/* 描述 */}
@@ -451,7 +469,7 @@ export function RepaintAudioDialog({
               {/* 可选参数 */}
               <div className="mt-2.5 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
                 <label className="block">
-                  <span className="mb-1 block text-[10.5px] text-ink-3">风格（可选）</span>
+                  <span className="mb-1 block text-[11px] text-ink-3">风格（可选）</span>
                   <input
                     value={style}
                     onChange={(event) => setStyle(event.target.value)}
@@ -462,7 +480,7 @@ export function RepaintAudioDialog({
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[10.5px] text-ink-3">seed（可选）</span>
+                  <span className="mb-1 block text-[11px] text-ink-3">seed（可选）</span>
                   <input
                     value={seedText}
                     onChange={(event) => setSeedText(event.target.value.replace(/[^\d]/g, ''))}
@@ -474,7 +492,7 @@ export function RepaintAudioDialog({
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[10.5px] text-ink-3">优先级</span>
+                  <span className="mb-1 block text-[11px] text-ink-3">优先级</span>
                   <select
                     value={String(priority)}
                     onChange={(event) => setPriority(Number(event.target.value) as CompanionPriority)}
@@ -489,7 +507,7 @@ export function RepaintAudioDialog({
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[10.5px] text-ink-3">LoRA 适配器（可选）</span>
+                  <span className="mb-1 block text-[11px] text-ink-3">LoRA 适配器（可选）</span>
                   <select
                     value={adapterId}
                     onChange={(event) => setAdapterId(event.target.value)}
@@ -506,7 +524,7 @@ export function RepaintAudioDialog({
                   </select>
                 </label>
               </div>
-              {adapterHint && <p className="mt-1 text-[9.5px] text-ink-4">{adapterHint}</p>}
+              {adapterHint && <p className="mt-1 text-[10px] text-ink-4">{adapterHint}</p>}
 
               {/* 进度 / 错误 */}
               {(taskId || submitError || applyError || doneTakeId) && (
@@ -518,7 +536,7 @@ export function RepaintAudioDialog({
                           {status ? STATUS_LABEL[status] : '已提交'}
                           {running && <span className="ml-1 text-ink-4">{Math.round(progress * 100)}%</span>}
                         </span>
-                        <span className="mono truncate text-[9.5px] text-ink-4" title={taskId}>
+                        <span className="mono truncate text-[10px] text-ink-4" title={taskId}>
                           #{taskId}
                         </span>
                         <div className="flex-1" />
@@ -548,8 +566,8 @@ export function RepaintAudioDialog({
                           style={{ width: `${Math.round(progress * 100)}%` }}
                         />
                       </div>
-                      {task?.message && <p className="mt-1 text-[9.5px] leading-relaxed text-ink-4">{task.message}</p>}
-                      {task?.error && <p className="mt-1 break-all text-[10px] leading-relaxed text-danger">{task.error}</p>}
+                      {task?.message && <p className="mt-1 text-[10px] leading-relaxed text-ink-4">{task.message}</p>}
+                      {task?.error && <p className="mt-1 break-all text-[11px] leading-relaxed text-danger">{task.error}</p>}
                       {finished &&
                         (applying ? (
                           <p className="mt-1 flex items-center gap-1 text-[10px] text-ink-3">
@@ -576,7 +594,7 @@ export function RepaintAudioDialog({
         </div>
 
         <footer className="flex shrink-0 items-center gap-2 border-t border-line px-5 py-3">
-          <span className="text-[10px] leading-tight text-ink-4">
+          <span className="min-w-0 flex-1 truncate text-[10.5px] leading-tight text-ink-4" title="关闭对话框会停止轮询，但任务仍在服务端继续；重绘产物为整段替换">
             关闭对话框会停止轮询，但任务仍在服务端继续；重绘产物为整段替换
           </span>
           <div className="flex-1" />

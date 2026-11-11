@@ -150,11 +150,11 @@ export function TrackCreativeInfoPopover({
 }) {
   const info = buildTrackCreativeInfo(project, track)
   return (
-    <Popover anchor={anchor} onClose={onClose} width={266} estimatedHeight={360} align="end" label="创作信息">
+    <Popover anchor={anchor} onClose={onClose} width={280} estimatedHeight={380} align="end" label="创作信息">
       <div className="p-2.5">
         <div className="mb-2 flex items-center justify-between gap-2">
           <span className="label">创作信息</span>
-          <span className="shrink-0 text-[9px] text-ink-4">只读 · 来自工程数据</span>
+          <span className="shrink-0 text-[9.5px] text-ink-4">只读 · 来自工程数据</span>
         </div>
 
         <div className="space-y-1">
@@ -169,10 +169,10 @@ export function TrackCreativeInfoPopover({
         {info.smart ? (
           <div className="mt-2 rounded-lg border border-violet/30 bg-violet/8 px-2 py-1.5">
             <div className="mb-1 flex items-center gap-1">
-              <span className="min-w-0 truncate text-[10.5px] font-medium text-violet">
+              <span className="min-w-0 truncate text-[11.5px] font-medium text-violet">
                 {info.smart.icon} 智能片段 · {info.smart.kindName}
               </span>
-              <span className="mono ml-auto shrink-0 text-[9px] text-ink-4">seed {info.smart.seedHex}</span>
+              <span className="mono ml-auto shrink-0 text-[9.5px] text-ink-4">seed {info.smart.seedHex}</span>
             </div>
             <div className="grid grid-cols-2 gap-x-2 gap-y-[3px]">
               <ParamCell label="密度" value={pct(info.smart.params.density)} />
@@ -184,7 +184,7 @@ export function TrackCreativeInfoPopover({
               <ParamCell label="八度" value={`C${info.smart.params.octave}`} />
               <ParamCell label="长度" value={`${info.smart.bars} 小节`} />
             </div>
-            <div className="mt-1 flex items-center gap-1 text-[9px] text-ink-4">
+            <div className="mt-1 flex items-center gap-1 text-[9.5px] text-ink-4">
               <span className="min-w-0 truncate">
                 跟随工程和弦：{info.smart.followChords ? '开' : '关（用生成时快照）'}
               </span>
@@ -194,12 +194,12 @@ export function TrackCreativeInfoPopover({
             </div>
           </div>
         ) : (
-          <p className="mt-2 rounded-lg border border-line bg-surface-2/40 px-2 py-1.5 text-[9.5px] leading-relaxed text-ink-4">
+          <p className="mt-2 rounded-lg border border-line bg-surface-2/40 px-2 py-1.5 text-[10px] leading-relaxed text-ink-4">
             该轨没有智能片段参数（普通 MIDI / 音频片段）。
           </p>
         )}
 
-        <p className="mt-2 text-[9px] leading-relaxed text-ink-4">
+        <p className="mt-2 text-[9.5px] leading-relaxed text-ink-4">
           风格与调式优先读智能片段的生成快照；工程没有记录风格时显示「未标注」。
         </p>
       </div>
@@ -209,7 +209,7 @@ export function TrackCreativeInfoPopover({
 
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-2 text-[10px]">
+    <div className="flex items-baseline justify-between gap-2 text-[11px]">
       <span className="shrink-0 text-ink-4">{label}</span>
       <span className="min-w-0 truncate text-right text-ink-2" title={value}>
         {value}
@@ -220,7 +220,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 
 function ParamCell({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-1 text-[9.5px]">
+    <div className="flex items-baseline justify-between gap-1 text-[10px]">
       <span className="shrink-0 text-ink-4">{label}</span>
       <span className="mono shrink-0 text-ink-2">{value}</span>
     </div>

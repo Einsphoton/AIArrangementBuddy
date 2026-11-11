@@ -1,6 +1,7 @@
 /** Agent 工具注册表：权限过滤、描述转换、统一执行入口、工具名别名兜底。 */
 import type { ProviderTool } from '../providers/types.js'
 import { ARRANGE_TOOLS } from './arrange.js'
+import { AUDIO_TOOLS } from './audio.js'
 import { EDIT_TOOLS } from './edit.js'
 import { PROJECT_TOOLS } from './project.js'
 import { THEORY_TOOLS } from './theory.js'
@@ -13,10 +14,11 @@ import { normalizeToolArgs } from './validate.js'
 export * from './schema.js'
 export { projectSummaryData, projectSummaryText, clipNotesSummary, scaleLabel } from './summary.js'
 
-/** 全部工具（顺序会影响模型看到的工具列表，PROJECT → 编辑 → 界面 → 编排 → 乐理 → 联网） */
+/** 全部工具（顺序会影响模型看到的工具列表，PROJECT → 编辑 → 音频 → 界面 → 编排 → 乐理 → 联网） */
 export const ALL_TOOLS: ToolDef[] = [
   ...PROJECT_TOOLS,
   ...EDIT_TOOLS,
+  ...AUDIO_TOOLS,
   ...UI_TOOLS,
   ...ARRANGE_TOOLS,
   ...THEORY_TOOLS,
@@ -63,6 +65,20 @@ export const TOOL_ALIASES: Record<string, ToolAlias> = {
   add_strum: { name: 'generate_smart_clip', args: { kind: 'strum' } },
   add_counter: { name: 'generate_smart_clip', args: { kind: 'counter' } },
   add_countermelody: { name: 'generate_smart_clip', args: { kind: 'counter' } },
+  // 音频生成类 → generate_audio（补 mode）
+  generate_music: { name: 'generate_audio', args: { mode: 'text_to_audio' } },
+  generate_song: { name: 'generate_audio', args: { mode: 'text_to_audio' } },
+  text_to_audio: { name: 'generate_audio', args: { mode: 'text_to_audio' } },
+  text_to_music: { name: 'generate_audio', args: { mode: 'text_to_audio' } },
+  create_audio: { name: 'generate_audio', args: { mode: 'text_to_audio' } },
+  render_audio: { name: 'generate_audio', args: { mode: 'midi_to_audio' } },
+  bounce_audio: { name: 'generate_audio', args: { mode: 'midi_to_audio' } },
+  render_midi: { name: 'generate_audio', args: { mode: 'midi_to_audio' } },
+  export_audio: { name: 'generate_audio', args: { mode: 'midi_to_audio' } },
+  generate_stems: { name: 'generate_audio', args: { mode: 'audio_with_stems' } },
+  split_stems: { name: 'generate_audio', args: { mode: 'audio_with_stems' } },
+  stem_audio: { name: 'generate_audio', args: { mode: 'audio_with_stems' } },
+  audio_stems: { name: 'generate_audio', args: { mode: 'audio_with_stems' } },
   // 编辑类
   duplicate_clip: { name: 'copy_clip' },
   transpose_notes: { name: 'transpose_clip' },
@@ -141,6 +157,25 @@ function remapAliasArgs(aliasName: string, args: Record<string, unknown>): Recor
       if (out.semitones === undefined) {
         const value = take('transpose', 'amount', 'steps', 'interval')
         if (value !== undefined) out.semitones = value
+      }
+      break
+    }
+    case 'generateaudio': {
+      if (out.caption === undefined) {
+        const value = take('prompt', 'description', 'text', 'lyrics', 'music_prompt')
+        if (value !== undefined) out.caption = value
+      }
+      if (out.durationSec === undefined) {
+        const value = take('duration', 'length', 'seconds', 'duration_seconds')
+        if (value !== undefined) out.durationSec = value
+      }
+      if (out.stems === undefined) {
+        const value = take('instruments', 'arms', 'tracks', 'stem_arms')
+        if (value !== undefined) out.stems = value
+      }
+      if (out.mode === undefined) {
+        const value = take('type', 'action', 'kind')
+        if (value !== undefined) out.mode = value
       }
       break
     }

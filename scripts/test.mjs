@@ -8,6 +8,7 @@
  * 不依赖任何测试框架，输出彩色 ✓ / ✗。
  */
 import { mkdtempSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -157,7 +158,17 @@ async function main() {
 
   const cleanup = () => {
     if (!keep) {
-      child.kill('SIGTERM')
+      // Windows 下 tsx 是 .cmd shim：child.kill 只杀掉 cmd.exe，真正监听端口的 node 子进程会变孤儿，
+      // 占住 8899 端口，导致随后跑的 e2e（Chrome 调试端口也是 PORT+2）连不上。这里按进程树杀。
+      if (IS_WINDOWS) {
+        try {
+          spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+        } catch {
+          child.kill('SIGTERM')
+        }
+      } else {
+        child.kill('SIGTERM')
+      }
       setTimeout(() => rmSync(dataDir, { recursive: true, force: true }), 500)
     }
   }

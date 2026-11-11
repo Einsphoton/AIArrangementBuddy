@@ -64,7 +64,7 @@ export function ClipView({
   }, [notesHash, pxPerBeat, rowHeight, color, barBeats])
 
   const width = Math.max(10, clip.lengthBeats * pxPerBeat)
-  const clipHeight = Math.max(18, rowHeight - 8)
+  const clipHeight = Math.max(20, rowHeight - 8)
   const smartMeta = clip.smart ? SMART_KIND_META[clip.smart.kind] : null
   const bladeBeat = bladeX == null ? null : clip.startBeat + bladeX / Math.max(1, pxPerBeat)
 
@@ -125,14 +125,14 @@ export function ClipView({
       {/* 标题条 */}
       <div
         className="flex shrink-0 items-center gap-1 border-b px-1.5"
-        style={{ height: 17, background: withAlpha(color, 0.26), borderColor: withAlpha(color, 0.35) }}
+        style={{ height: 18, background: withAlpha(color, 0.26), borderColor: withAlpha(color, 0.35) }}
       >
-        <span className="h-[5px] w-[5px] shrink-0 rounded-full" style={{ background: color }} />
-        <span className="min-w-0 flex-1 truncate text-[10px] font-medium leading-none text-ink/95">{clip.name}</span>
-        {smartMeta && <span className="shrink-0 text-[9px] leading-none opacity-80">{smartMeta.icon}</span>}
-        {clip.muted && <EyeOff size={9} className="shrink-0 text-ink-2" />}
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} />
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-none text-ink/95">{clip.name}</span>
+        {smartMeta && <span className="shrink-0 text-[10px] leading-none opacity-80">{smartMeta.icon}</span>}
+        {clip.muted && <EyeOff size={10} className="shrink-0 text-ink-2" />}
         {width > 110 && (
-          <span className="mono shrink-0 text-[8.5px] leading-none text-ink-3">{clip.notes.length}</span>
+          <span className="mono shrink-0 text-[9.5px] leading-none text-ink-3" title={`${clip.notes.length} 个音符`}>{clip.notes.length}</span>
         )}
       </div>
 
@@ -143,7 +143,7 @@ export function ClipView({
 
       {/* 多选：左上角计数徽标（只在不影响内容的宽度下显示） */}
       {selected && width > 58 && (
-        <span className="pointer-events-none absolute right-1 top-[2px] hidden h-[12px] items-center rounded-[3px] bg-accent/25 px-1 text-[8px] font-semibold leading-none text-accent-soft group-hover/clip:flex">
+        <span className="pointer-events-none absolute right-1 top-[2px] hidden h-[13px] items-center rounded-[3px] bg-accent/25 px-1 text-[9px] font-semibold leading-none text-accent-soft group-hover/clip:flex">
           选中
         </span>
       )}
@@ -155,7 +155,7 @@ export function ClipView({
         </div>
       )}
       {splitMode && bladeX != null && bladeBeat != null && width > 96 && (
-        <span className="mono pointer-events-none absolute bottom-[2px] z-20 rounded bg-black/65 px-1 text-[8px] leading-tight text-accent-soft" style={{ left: Math.min(bladeX + 4, width - 38) }}>
+        <span className="mono pointer-events-none absolute bottom-[2px] z-20 rounded bg-black/65 px-1 text-[9px] leading-tight text-accent-soft" style={{ left: Math.min(bladeX + 4, width - 38) }}>
           {bladeBeat.toFixed(2)} 拍
         </span>
       )}

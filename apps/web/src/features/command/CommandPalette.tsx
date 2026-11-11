@@ -196,7 +196,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
           {flatCommands.length === 0 && (
             <div className="flex flex-col items-center gap-1 px-6 py-10 text-center">
               <span className="text-[12.5px] text-ink-2">没有找到匹配的命令</span>
-              <span className="text-[11px] text-ink-4">试试「播放」「量化」「导出」「混音」等关键词</span>
+              <span className="text-[11.5px] text-ink-4">试试「播放」「量化」「导出」「混音」等关键词</span>
             </div>
           )}
           {flatCommands.length > 0 &&
@@ -206,7 +206,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
                 return (
                   <div
                     key={row.key}
-                    className="px-3.5 pb-1 pt-2 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-4"
+                    className="px-3.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-4"
                   >
                     {label}
                   </div>
@@ -238,7 +238,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[12.5px] font-medium">{command.title}</span>
-                    {command.subtitle && <span className="block truncate text-[10px] text-ink-4">{command.subtitle}</span>}
+                    {command.subtitle && <span className="block truncate text-[10.5px] text-ink-4">{command.subtitle}</span>}
                   </span>
                   {shortcut && (
                     <span className="flex shrink-0 items-center gap-0.5">
@@ -254,7 +254,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         </div>
 
         {/* 底部提示 */}
-        <div className="flex items-center gap-3 border-t border-line px-4 py-2 text-[10px] text-ink-4">
+        <div className="flex items-center gap-3 border-t border-line px-4 py-2 text-[10.5px] text-ink-4">
           <span className="flex items-center gap-1">
             <Kbd>↑</Kbd>
             <Kbd>↓</Kbd>

@@ -88,7 +88,8 @@ export function registerAiRoutes(app: FastifyInstance): void {
     if (!messages) return reply.code(400).send({ error: 'messages 必须是非空数组，元素为 { role, content }' })
 
     const intent =
-      typeof body.intent === 'string' && ['compose', 'arrange', 'melody', 'chords', 'optimize'].includes(body.intent)
+      typeof body.intent === 'string' &&
+      ['compose', 'arrange', 'melody', 'chords', 'optimize', 'audio'].includes(body.intent)
         ? body.intent
         : undefined
     const attachments = parseAttachments(body.attachments)

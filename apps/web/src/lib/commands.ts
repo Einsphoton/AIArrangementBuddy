@@ -498,8 +498,10 @@ export const COMMANDS: CommandDef[] = [
     group: '工程',
     icon: FilePlus2,
     keywords: 'new project 新建',
+    /* 统一入口：打开「新建工程向导」（由 App 监听并渲染同一份 NewProjectWizard）。
+       不再直接派发 aiab:new-project，避免被 session.ts 立即替换工程、绕过向导。 */
     run: () => {
-      window.dispatchEvent(new CustomEvent('aiab:new-project'))
+      window.dispatchEvent(new CustomEvent('aiab:open-new-project-wizard'))
     },
   },
   {

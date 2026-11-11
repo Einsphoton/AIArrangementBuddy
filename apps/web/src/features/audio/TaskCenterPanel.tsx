@@ -20,7 +20,6 @@ import {
   Copy,
   LoaderCircle,
   Music4,
-  Play,
   RefreshCw,
   Timer,
   TriangleAlert,
@@ -191,6 +190,7 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
   const offline = !loading && (status?.online === false || Boolean(error && !status))
   const queue = status?.queue ?? deriveQueue(status?.tasks)
   const tasks = status?.tasks ?? []
+  const summary = status?.summary
   const activeCount = tasks.filter((task) => task.status === 'queued' || task.status === 'running').length
   const startHint = status?.hint ?? COMPANION_START_HINT
 
@@ -271,7 +271,7 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
               活跃 {activeCount}
             </span>
             <span className="chip cursor-default" title="运行中 / 完成 / 失败">
-              运行 {status?.summary.running ?? 0} · 完成 {status?.summary.done ?? 0} · 失败 {status?.summary.failed ?? 0}
+              运行 {summary?.running ?? 0} · 完成 {summary?.done ?? 0} · 失败 {summary?.failed ?? 0}
             </span>
             {lastUpdated > 0 && (
               <span className="chip cursor-default text-ink-4" title="最近一次刷新时间">
@@ -329,7 +329,7 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
             <div className="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center">
               <Timer size={20} className="text-ink-4" />
               <div className="text-[12px] font-medium text-ink-2">暂无任务</div>
-              <div className="max-w-sm text-[10.5px] leading-relaxed text-ink-4">
+              <div className="max-w-sm text-[11px] leading-relaxed text-ink-4">
                 从「AI 生成音频」或音频片段的「局部重绘」提交任务后，会在这里看到排队位置与进度。
               </div>
             </div>
@@ -375,7 +375,7 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
                       <button
                         type="button"
                         data-task-cancel
-                        className="btn btn-ghost h-6 shrink-0 px-2 text-[10px]"
+                        className="btn btn-ghost h-7 shrink-0 px-2 text-[10.5px]"
                         onClick={() => void cancelTask(task.id)}
                         disabled={canceling === task.id}
                         title="取消任务（服务端不可中断推理时会标记取消并清理）"
@@ -390,7 +390,7 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
                       <button
                         type="button"
                         data-task-open-asset
-                        className="btn btn-ghost h-6 shrink-0 gap-1 px-2 text-[10px]"
+                        className="btn btn-ghost h-7 shrink-0 gap-1 px-2 text-[10.5px]"
                         onClick={() => openArtifact(task)}
                         title={`打开产物：${task.assetId}`}
                       >
@@ -440,11 +440,10 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
         <footer className="flex shrink-0 items-center gap-2 border-t border-line px-5 py-3">
           <span className="min-w-0 flex-1 truncate text-[10px] leading-tight text-ink-4">
             {status
-              ? `${status.summary.workers} 个节点在线 · 队列 ${status.summary.queued} · 运行 ${status.summary.running}`
+              ? `${summary?.workers ?? 0} 个节点在线 · 队列 ${summary?.queued ?? 0} · 运行 ${summary?.running ?? 0}`
               : '等待 Companion 状态…'}
           </span>
           <button className="btn btn-ghost h-8 px-3 text-[12px]" onClick={onClose}>
-            <Play size={11} className="mr-1 rotate-90" />
             关闭
           </button>
         </footer>

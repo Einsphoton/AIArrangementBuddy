@@ -92,14 +92,14 @@ export function StatusBar() {
   }
 
   return (
-    <footer className="flex h-[26px] shrink-0 items-center gap-2.5 overflow-hidden border-t border-line bg-surface px-3 text-[10px] text-ink-3">
+    <footer className="flex h-[26px] shrink-0 items-center gap-2 overflow-hidden border-t border-line bg-surface px-3 text-[10.5px] text-ink-3">
       {/* 保存状态 */}
       <span
-        className="flex items-center gap-1 whitespace-nowrap"
+        className="flex items-center gap-1 whitespace-nowrap leading-none"
         title={saveStatus === 'dirty' ? '有未保存的修改（⌘S 保存）' : '自动保存已开启'}
       >
         <CircleDot
-          size={9}
+          size={10}
           className={cn(
             saveStatus === 'error' ? 'text-danger' : saveStatus === 'dirty' ? 'text-accent' : 'text-success',
           )}
@@ -111,11 +111,11 @@ export function StatusBar() {
 
       {/* 工程基础信息（点击打开设置） */}
       <button
-        className="flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 transition-colors hover:bg-surface-2 hover:text-ink-2"
+        className="flex h-[19px] items-center gap-1 whitespace-nowrap rounded px-1.5 transition-colors hover:bg-surface-2 hover:text-ink-2"
         onClick={() => setSettingsOpen(true)}
         title="工程速度 / 拍号 / 调性（点击打开设置）"
       >
-        <Gauge size={10} />
+        <Gauge size={11} />
         <span className="shrink-0">{project.tempo} BPM</span>
         <span className="shrink-0">
           {' '}
@@ -138,13 +138,13 @@ export function StatusBar() {
       {/* 输入设备 / 录入 */}
       <button
         className={cn(
-          'flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 transition-colors hover:bg-surface-2',
+          'flex h-[19px] shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 transition-colors hover:bg-surface-2',
           activeMidi ? 'text-cyan' : 'text-ink-3',
         )}
         onClick={() => setSettingsOpen(true)}
         title={activeMidi ? `MIDI 输入：${activeMidi.name}` : '未选择 MIDI 输入设备（点击打开音频设置）'}
       >
-        <Usb size={10} />
+        <Usb size={11} />
         <span className="hidden min-[1300px]:inline">{activeMidi ? activeMidi.name : midiDevices.length ? 'MIDI 未选择' : '无 MIDI 设备'}</span>
         <span className="sm:hidden">MIDI</span>
       </button>
@@ -158,13 +158,13 @@ export function StatusBar() {
         }
         aria-pressed={midiRecord}
         className={cn(
-          'flex h-[17px] shrink-0 items-center gap-1 rounded-[5px] border px-1.5 text-[10px] transition-colors',
+          'flex h-[19px] shrink-0 items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] transition-colors',
           midiRecord
             ? 'border-danger/50 bg-danger/15 text-danger'
             : 'border-line-strong bg-surface-2 text-ink-3 hover:text-ink-2',
         )}
       >
-        <Radio size={9} className={midiRecord && view === 'pianoroll' ? 'animate-pulse' : undefined} />
+        <Radio size={10} className={midiRecord && view === 'pianoroll' ? 'animate-pulse' : undefined} />
         录入{midiRecord ? '开' : '关'}
       </button>
 
@@ -178,21 +178,21 @@ export function StatusBar() {
 
       {/* 吸附 / 工具 / 选中 */}
       <button
-        className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 transition-colors hover:bg-surface-2 hover:text-ink-2"
+        className="flex h-[19px] shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 transition-colors hover:bg-surface-2 hover:text-ink-2"
         onClick={cycleSnap}
         title="点击循环切换吸附网格"
       >
-        <Magnet size={10} className={snap > 0 ? 'text-accent/80' : undefined} />
+        <Magnet size={11} className={snap > 0 ? 'text-accent/80' : undefined} />
         吸附 {snap > 0 ? snapLabel(snap) : '关闭'}
       </button>
 
       <span className="hidden shrink-0 items-center gap-1 whitespace-nowrap text-ink-4 min-[1240px]:flex" title="当前编辑工具">
-        <MousePointer2 size={10} />
+        <MousePointer2 size={11} />
         {toolMode === 'select' ? '选择' : toolMode === 'split' ? '切片' : '绘制'}
       </span>
 
       <span className="hidden shrink-0 items-center gap-1 whitespace-nowrap text-ink-4 min-[1240px]:flex" title="当前选中">
-        <Grid3x3 size={10} />
+        <Grid3x3 size={11} />
         {selection.noteIds.length > 0
           ? `${selection.noteIds.length} 音符`
           : selection.clipId
@@ -204,21 +204,21 @@ export function StatusBar() {
 
       {/* 撤销栈 */}
       <button
-        className="hidden shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-ink-4 transition-colors hover:bg-surface-2 hover:text-ink-2 min-[1180px]:flex"
+        className="hidden h-[19px] shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 text-ink-4 transition-colors hover:bg-surface-2 hover:text-ink-2 min-[1180px]:flex"
         onClick={() => useStore.getState().undo()}
         disabled={pastLength === 0}
         title="撤销（⌘Z）"
       >
-        <Undo2 size={10} />
+        <Undo2 size={11} />
         {pastLength}
       </button>
       <button
-        className="hidden shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-ink-4 transition-colors hover:bg-surface-2 hover:text-ink-2 min-[1180px]:flex"
+        className="hidden h-[19px] shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 text-ink-4 transition-colors hover:bg-surface-2 hover:text-ink-2 min-[1180px]:flex"
         onClick={() => useStore.getState().redo()}
         disabled={futureLength === 0}
         title="重做（⌘⇧Z）"
       >
-        <Redo2 size={10} />
+        <Redo2 size={11} />
         {futureLength}
       </button>
 
@@ -230,11 +230,11 @@ export function StatusBar() {
       )}
 
       <button
-        className="hidden shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 transition-colors hover:bg-surface-2 hover:text-ink-2 min-[1180px]:flex"
+        className="hidden h-[19px] shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 transition-colors hover:bg-surface-2 hover:text-ink-2 min-[1180px]:flex"
         onClick={() => setSettingsOpen(true)}
         title={soundfontStatus.loaded ? `采样音源：${soundfontStatus.name}` : '当前使用内置合成器'}
       >
-        <Cpu size={10} className={soundfontStatus.loaded ? 'text-cyan' : undefined} />
+        <Cpu size={11} className={soundfontStatus.loaded ? 'text-cyan' : undefined} />
         {soundfontStatus.loaded ? '采样音源' : '合成器'}
       </button>
 
@@ -243,7 +243,7 @@ export function StatusBar() {
         onClick={() => window.dispatchEvent(new CustomEvent('aiab:command-palette'))}
         title="打开命令面板"
       >
-        <Search size={10} />
+        <Search size={11} />
         <Kbd>{modSymbol()}</Kbd>
         <Kbd>K</Kbd>
       </button>
@@ -251,11 +251,11 @@ export function StatusBar() {
       <span className="hidden text-ink-4 min-[1440px]:inline">v{health?.version ?? '0.1.0'}</span>
 
       <button
-        className="flex shrink-0 items-center gap-1 text-ink-4 transition-colors hover:text-ink-2"
+        className="flex h-[19px] w-[19px] shrink-0 items-center justify-center rounded text-ink-4 transition-colors hover:bg-surface-2 hover:text-ink-2"
         onClick={() => useStore.getState().setHelpOpen(true)}
         title="快捷键与帮助（?）"
       >
-        <Keyboard size={10} />
+        <Keyboard size={11} />
       </button>
     </footer>
   )

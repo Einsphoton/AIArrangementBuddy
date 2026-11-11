@@ -5,7 +5,7 @@
  * 因此「帮助里写了的键」和「真正能按出来的键」不会漂移；同时支持搜索，
  * 用户可以直接搜「量化」「混音」找到对应命令与键位。
  */
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { BookOpen, Command, Keyboard, MousePointerClick, Music4, Search, Sparkles } from 'lucide-react'
 import { Modal } from '../../components/ui'
 import { Kbd } from '../../components/ui/menu'
@@ -63,6 +63,14 @@ export function HelpOverlay() {
   const setChatOpen = useStore((s) => s.setChatOpen)
   const [tab, setTab] = useState<Tab>('start')
   const [query, setQuery] = useState('')
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  const switchTab = (next: Tab) => {
+    setTab(next)
+    /* 切页后滚回顶部，否则会停在上一页的中间 */
+    const body = contentRef.current?.closest('[data-modal-body]')
+    if (body instanceof HTMLElement) body.scrollTop = 0
+  }
 
   const shortcutGroups = useMemo(() => {
     const trimmed = query.trim().toLowerCase()
@@ -88,7 +96,7 @@ export function HelpOverlay() {
       width="lg"
     >
       {/* 标签页 */}
-      <div className="mb-4 flex items-center gap-1 border-b border-line pb-2">
+      <div ref={contentRef} className="mb-4 flex items-center gap-1 border-b border-line pb-2" role="tablist" aria-label="帮助分区">
         {(
           [
             { id: 'start' as const, label: '快速开始', icon: <BookOpen size={12} /> },
@@ -98,7 +106,10 @@ export function HelpOverlay() {
         ).map((item) => (
           <button
             key={item.id}
-            onClick={() => setTab(item.id)}
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            onClick={() => switchTab(item.id)}
             className={cn(
               'flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[11.5px] font-medium transition-colors',
               tab === item.id ? 'bg-surface-3 text-ink' : 'text-ink-3 hover:bg-surface-2 hover:text-ink-2',
@@ -115,7 +126,7 @@ export function HelpOverlay() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="搜索命令…"
-              className="min-w-0 flex-1 bg-transparent text-[11px] text-ink outline-none placeholder:text-ink-4"
+              className="min-w-0 flex-1 bg-transparent text-[11.5px] text-ink outline-none placeholder:text-ink-4"
               aria-label="搜索快捷键"
             />
           </div>
@@ -133,8 +144,8 @@ export function HelpOverlay() {
                   </span>
                   <span className="text-[12px] font-medium text-ink">{step.title}</span>
                 </div>
-                <p className="text-[11px] leading-relaxed text-ink-3">{step.detail}</p>
-                <div className="mt-2 flex items-center gap-1 text-[9.5px] text-ink-4">
+                <p className="text-[11.5px] leading-relaxed text-ink-3">{step.detail}</p>
+                <div className="mt-2 flex items-center gap-1 text-[10.5px] text-ink-4">
                   <Command size={9} />
                   {step.hint}
                 </div>
@@ -150,7 +161,7 @@ export function HelpOverlay() {
               </h3>
               <ul className="space-y-1.5">
                 {MOUSE_TIPS.map((tip) => (
-                  <li key={tip.label} className="flex items-baseline justify-between gap-3 text-[11px]">
+                  <li key={tip.label} className="flex items-baseline justify-between gap-3 text-[11.5px]">
                     <span className="shrink-0 text-ink-2">{tip.label}</span>
                     <span className="text-right text-ink-4">{tip.detail}</span>
                   </li>
@@ -164,7 +175,7 @@ export function HelpOverlay() {
               </h3>
               <ul className="space-y-1.5">
                 {MIDI_TIPS.map((tip) => (
-                  <li key={tip.label} className="flex items-baseline justify-between gap-3 text-[11px]">
+                  <li key={tip.label} className="flex items-baseline justify-between gap-3 text-[11.5px]">
                     <span className="shrink-0 text-ink-2">{tip.label}</span>
                     <span className="text-right text-ink-4">{tip.detail}</span>
                   </li>
@@ -217,7 +228,7 @@ export function HelpOverlay() {
               </ul>
             </section>
           ))}
-          <div className="rounded-xl border border-line bg-surface-2/50 p-3 text-[10.5px] leading-relaxed text-ink-3">
+          <div className="rounded-xl border border-line bg-surface-2/50 p-3 text-[11px] leading-relaxed text-ink-3">
             提示：⌘K 命令面板可以搜索并执行上面所有命令；视图内的编辑键（删除、全选、复制粘贴、方向键微调）根据当前所处视图自动生效。
           </div>
         </div>
@@ -247,7 +258,7 @@ export function HelpOverlay() {
               </p>
             </div>
           </div>
-          <p className="text-[10.5px] text-ink-4">
+          <p className="text-[11px] text-ink-4">
             快捷键设计参考 Ableton Live / Logic Pro / Bitwig / Cubase / Studio One / REAPER 的通用惯例；
             完整架构见 docs/ARCHITECTURE.md，本次交互优化见 docs/UI_UX_UPGRADE.md。
           </p>

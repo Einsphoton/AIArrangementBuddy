@@ -50,7 +50,7 @@ export function UiSection({ draft, update }: SettingsSectionProps) {
             <Grid3x3 size={11} className="text-ink-3" />
             <div>
               <div className="text-[12px] text-ink-2">显示网格</div>
-              <div className="mt-0.5 text-[10px] text-ink-4">时间轴与钢琴卷帘的小节 / 拍线</div>
+              <div className="mt-0.5 text-[10.5px] text-ink-4">时间轴与钢琴卷帘的小节 / 拍线</div>
             </div>
           </div>
           <Switch checked={ui.showGrid} label="显示网格" onChange={(value) => patch({ showGrid: value })} />
@@ -61,7 +61,7 @@ export function UiSection({ draft, update }: SettingsSectionProps) {
             <Map size={11} className="text-ink-3" />
             <div>
               <div className="text-[12px] text-ink-2">显示缩略图</div>
-              <div className="mt-0.5 text-[10px] text-ink-4">编曲视图底部的小地图概览</div>
+              <div className="mt-0.5 text-[10.5px] text-ink-4">编曲视图底部的小地图概览</div>
             </div>
           </div>
           <Switch checked={ui.showMinimap} label="显示缩略图" onChange={(value) => patch({ showMinimap: value })} />
@@ -72,7 +72,7 @@ export function UiSection({ draft, update }: SettingsSectionProps) {
             <Sparkles size={11} className="text-ink-3" />
             <div>
               <div className="text-[12px] text-ink-2">音阶高亮</div>
-              <div className="mt-0.5 text-[10px] text-ink-4">钢琴卷帘中标出当前调式的音级</div>
+              <div className="mt-0.5 text-[10.5px] text-ink-4">钢琴卷帘中标出当前调式的音级</div>
             </div>
           </div>
           <Switch

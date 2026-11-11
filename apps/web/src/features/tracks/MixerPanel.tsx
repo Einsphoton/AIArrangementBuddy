@@ -18,10 +18,12 @@ import { DbRuler, MiniKnob, VerticalFader, gainToDbText, levelToDbText } from '.
 /** 面板固定 chrome：标题栏 34 + 顶部拖拽热区 4 + 底部颜色条 3 */
 const MIXER_CHROME = 41
 /** 通道条固定 chrome：内边距 / 轨道名 / 声像 / 数值 / M·S / 发送 / 乐器行 */
-const STRIP_CHROME = 151
+const STRIP_CHROME = 146
 /** 推子区上方的偏移：pt-2(8) + 名称(15) + gap(4) + 声像(20) + gap(4) */
-const STRIP_FADER_TOP = 51
+const STRIP_FADER_TOP = 48
 const DEFAULT_MIXER_HEIGHT = 318
+/** 推子最小高度：再小 dB 标尺与推子帽就挤在一起了 */
+const MIN_FADER_HEIGHT = 48
 
 const METER_GRADIENT = 'linear-gradient(to top, #34d399 0%, #a3e635 58%, #f0b429 82%, #f0563b 100%)'
 
@@ -97,7 +99,7 @@ function ChannelStrip({
         onContextMenu(track.id, event.clientX, event.clientY)
       }}
       className={cn(
-        'group relative flex w-[78px] min-w-0 shrink-0 cursor-default flex-col items-center gap-1 overflow-hidden border-r border-line/70 px-1.5 pb-2 pt-2 transition-colors',
+        'group relative flex min-w-[88px] max-w-[144px] flex-1 cursor-default flex-col items-center gap-[3px] overflow-hidden border-r border-line/70 px-2 pb-1.5 pt-1.5 transition-colors',
         selected ? 'bg-surface-2' : 'hover:bg-surface-2/50',
       )}
       title={`${track.name} · ${instrument.name}（右键打开通道菜单）`}
@@ -106,10 +108,10 @@ function ChannelStrip({
       <span className="absolute inset-x-0 top-0 h-[2px]" style={{ background: color, opacity: selected ? 1 : 0.55 }} />
 
       {/* 轨道名 */}
-      <div className="flex h-[15px] w-full items-center gap-1">
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} />
+      <div className="flex h-4 w-full items-center gap-1">
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
         <span
-          className={cn('min-w-0 flex-1 truncate text-[10.5px] font-medium', selected ? 'text-ink' : 'text-ink-2')}
+          className={cn('min-w-0 flex-1 truncate text-[11.5px] font-medium', selected ? 'text-ink' : 'text-ink-2')}
           title={`${track.name} · ${instrument.name}`}
         >
           {track.name}
@@ -117,11 +119,11 @@ function ChannelStrip({
       </div>
 
       {/* 声像 */}
-      <div className="flex h-[20px] w-full items-center justify-between">
-        <span className="text-[8.5px] text-ink-4">PAN</span>
+      <div className="flex h-5 w-full items-center justify-between">
+        <span className="text-[9.5px] text-ink-4">PAN</span>
         <MiniKnob
           value={track.pan}
-          size={16}
+          size={18}
           title="声像"
           accent="#3ddbd9"
           onGestureStart={beginEdit}
@@ -144,7 +146,7 @@ function ChannelStrip({
           }}
           aria-label={`${track.name} 通道电平表（点击重置峰值）`}
           title="通道电平（真实）；点击重置峰值"
-          className="relative w-[6px] shrink-0 overflow-hidden rounded-[2px] bg-bg/90 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
+          className="relative w-2 shrink-0 overflow-hidden rounded-[2px] bg-bg/90 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
           style={{ height: faderHeight }}
         >
           <div
@@ -158,7 +160,7 @@ function ChannelStrip({
             style={{ bottom: '0%' }}
           />
         </button>
-        <div className="shrink-0" style={{ width: 26 }}>
+        <div className="shrink-0" style={{ width: 30 }}>
           <VerticalFader
             value={track.volume}
             height={faderHeight}
@@ -182,7 +184,7 @@ function ChannelStrip({
       {/* 音量数值：拖动时显示 dB，松手恢复百分比 */}
       <div
         className={cn(
-          'mono h-[13px] w-full truncate text-center text-[10px] tabular-nums',
+          'mono h-[14px] w-full truncate text-center text-[10.5px] tabular-nums',
           dragging ? 'text-accent-soft' : 'text-ink-2',
         )}
         data-volume-db={gainToDbText(track.volume)}
@@ -192,7 +194,7 @@ function ChannelStrip({
       </div>
 
       {/* M / S */}
-      <div className="flex h-[17px] w-full items-center gap-1">
+      <div className="flex h-[19px] w-full items-center gap-1">
         <button
           onClick={(event) => {
             event.stopPropagation()
@@ -203,7 +205,7 @@ function ChannelStrip({
           aria-pressed={track.mute}
           aria-label={`${track.name} 静音`}
           className={cn(
-            'flex h-[16px] flex-1 items-center justify-center rounded-[4px] border text-[9px] font-bold transition-colors',
+            'flex h-[19px] flex-1 items-center justify-center rounded-[5px] border text-[10px] font-bold transition-colors',
             track.mute
               ? 'border-danger/60 bg-danger/25 text-danger'
               : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
@@ -221,7 +223,7 @@ function ChannelStrip({
           aria-pressed={track.solo}
           aria-label={`${track.name} 独奏`}
           className={cn(
-            'flex h-[16px] flex-1 items-center justify-center rounded-[4px] border text-[9px] font-bold transition-colors',
+            'flex h-[19px] flex-1 items-center justify-center rounded-[5px] border text-[10px] font-bold transition-colors',
             track.solo
               ? 'border-accent/60 bg-accent/25 text-accent'
               : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
@@ -232,13 +234,13 @@ function ChannelStrip({
       </div>
 
       {/* 发送 */}
-      <div className="flex h-[15px] w-full items-center justify-between">
-        <span className="text-[8.5px] text-ink-4">REV</span>
+      <div className="flex h-4 w-full items-center justify-between">
+        <span className="text-[9.5px] text-ink-4">REV</span>
         <MiniKnob
           value={track.reverbSend}
           min={0}
           max={1}
-          size={13}
+          size={16}
           title="混响发送"
           center={0.18}
           accent="#8b7bff"
@@ -249,13 +251,13 @@ function ChannelStrip({
           formatValue={(value) => `${Math.round(value * 100)}`}
         />
       </div>
-      <div className="flex h-[15px] w-full items-center justify-between">
-        <span className="text-[8.5px] text-ink-4">DLY</span>
+      <div className="flex h-4 w-full items-center justify-between">
+        <span className="text-[9.5px] text-ink-4">DLY</span>
         <MiniKnob
           value={track.delaySend}
           min={0}
           max={1}
-          size={13}
+          size={16}
           title="延迟发送"
           center={0.06}
           accent="#4ea1ff"
@@ -268,7 +270,7 @@ function ChannelStrip({
       </div>
 
       {/* 乐器 */}
-      <div className="h-[12px] w-full truncate text-center text-[8.5px] text-ink-4" title={instrument.name}>
+      <div className="h-3 w-full truncate text-center text-[9.5px] text-ink-4" title={instrument.name}>
         {instrument.icon} {instrument.name}
       </div>
 
@@ -329,8 +331,13 @@ export function MixerPanel() {
   const viewportHeight = useViewportHeight()
   // 视口收缩：持久化的 mixerHeight 只在空间足够时生效
   const maxHeightByViewport = Math.max(180, Math.round(viewportHeight * MIXER_MAX_VIEWPORT_RATIO))
-  const effectiveHeight = Math.min(mixerHeight, maxHeightByViewport)
-  const faderHeight = clamp(effectiveHeight - MIXER_CHROME - STRIP_CHROME, 48, 260)
+  /* 固定 chrome + 最小推子 = 混音器能正常显示的最小高度；低于它宁可不缩，也不让通道条底部被裁掉 */
+  const minFeasibleHeight = MIXER_CHROME + STRIP_CHROME + MIN_FADER_HEIGHT
+  const effectiveHeight = Math.max(
+    Math.min(mixerHeight, maxHeightByViewport),
+    Math.min(minFeasibleHeight, maxHeightByViewport),
+  )
+  const faderHeight = clamp(effectiveHeight - MIXER_CHROME - STRIP_CHROME, MIN_FADER_HEIGHT, 260)
 
   /* 高度拖拽 */
   const resizeDrag = useRef<{ startY: number; startHeight: number } | null>(null)
@@ -555,19 +562,19 @@ export function MixerPanel() {
 
       {/* 标题栏 */}
       <header className="flex h-[34px] min-w-0 shrink-0 items-center gap-2 overflow-hidden border-b border-line px-3">
-        <Headphones size={13} className="shrink-0 text-accent" />
-        <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold">混音器</span>
-        <span className="shrink-0 whitespace-nowrap text-[10.5px] text-ink-4">
+        <Headphones size={14} className="shrink-0 text-accent" />
+        <span className="shrink-0 whitespace-nowrap text-[12.5px] font-semibold">混音器</span>
+        <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-4">
           {tracks.length} 条通道 · 真实每轨电平
         </span>
         <div className="flex-1" />
-        <span className="hidden min-w-0 truncate text-right text-[10px] text-ink-4 min-[1280px]:block">
+        <span className="hidden min-w-0 truncate text-right text-[10.5px] text-ink-4 min-[1280px]:block">
           右键通道条：复制/删除/静音/独奏 · 点击电平表重置峰值 · 拖动顶部边缘调整高度
         </span>
         <button
           type="button"
           data-ai-mix-trigger=""
-          className="btn btn-ghost h-6 shrink-0 gap-1 whitespace-nowrap px-2 text-[11px]"
+          className="btn btn-ghost h-7 shrink-0 gap-1 whitespace-nowrap px-2 text-[11.5px]"
           onClick={() => void requestAiMix()}
           disabled={aiMixLoading}
           aria-label="AI 混音：生成混音方案预览"
@@ -582,7 +589,7 @@ export function MixerPanel() {
           {aiMixLoading ? '生成中…' : 'AI 混音…'}
         </button>
         <button
-          className="btn btn-ghost h-6 shrink-0 whitespace-nowrap px-2 text-[11px]"
+          className="btn btn-ghost h-7 shrink-0 whitespace-nowrap px-2 text-[11.5px]"
           onClick={() => setShowMixer(false)}
           title="收起混音器（⌘⇧M）"
         >
@@ -640,24 +647,24 @@ export function MixerPanel() {
         {/* 主输出 */}
         <div
           data-master-strip=""
-          className="flex w-[128px] shrink-0 flex-col items-center border-l border-line-strong bg-surface/60 px-2 py-2"
+          className="flex w-[138px] shrink-0 flex-col items-center border-l border-line-strong bg-surface/60 px-2 py-2"
         >
-          <div className="flex items-center gap-1 text-[10px] font-semibold tracking-wide text-accent">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-accent">
+            <span className="h-2 w-2 rounded-full bg-accent" />
             MASTER
           </div>
-          <div className="mono mt-0.5 text-[10px] tabular-nums text-ink-2" data-master-gain-db="" title="主音量增益（dB）">
+          <div className="mono mt-1 text-[10.5px] tabular-nums text-ink-2" data-master-gain-db="" title="主音量增益（dB）">
             {gainToDbText(masterVolume)} dB
           </div>
 
           <div className="mt-1 flex items-end justify-center gap-1">
-            <DbRuler height={faderHeight} max={1.5} className="w-[20px]" />
+            <DbRuler height={faderHeight} max={1.5} className="w-[24px]" />
             <button
               type="button"
               onClick={resetMasterPeak}
               aria-label="主输出电平表（点击重置峰值）"
               title="主输出电平（真实）；点击重置峰值"
-              className="relative w-[7px] shrink-0 overflow-hidden rounded-[2px] bg-bg/90 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
+              className="relative w-2 shrink-0 overflow-hidden rounded-[2px] bg-bg/90 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
               style={{ height: faderHeight }}
             >
               <div
@@ -671,7 +678,7 @@ export function MixerPanel() {
                 style={{ bottom: '0%' }}
               />
             </button>
-            <div className="shrink-0" style={{ width: 26 }}>
+            <div className="shrink-0" style={{ width: 30 }}>
               <VerticalFader
                 value={masterVolume}
                 height={faderHeight}
@@ -692,25 +699,25 @@ export function MixerPanel() {
           {/* 峰值数值 + limiter 指示 */}
           <div className="mt-1 w-full rounded-md border border-line bg-bg-soft px-1.5 py-1 text-center">
             <div className="flex items-center justify-between">
-              <span className="text-[8.5px] text-ink-4">峰值</span>
-              <span className="mono text-[9.5px] tabular-nums text-ink-2">
+              <span className="text-[9.5px] text-ink-4">峰值</span>
+              <span className="mono text-[10.5px] tabular-nums text-ink-2">
                 <span ref={masterPeakDbRef} data-master-peak-db="" aria-label="主输出峰值（dB）">-∞</span>
-                <span className="ml-0.5 text-[8px] text-ink-4">dB</span>
+                <span className="ml-0.5 text-[9.5px] text-ink-4">dB</span>
               </span>
             </div>
             <div className="mt-0.5 flex items-center justify-center gap-1">
               <span
                 ref={masterLimRef}
-                className="mono rounded-[3px] border border-danger/50 bg-danger/15 px-1 text-[8px] font-bold tracking-wider text-danger opacity-[0.22] transition-opacity"
+                className="mono rounded-[3px] border border-danger/50 bg-danger/15 px-1 text-[9.5px] font-bold tracking-wider text-danger opacity-[0.22] transition-opacity"
                 title="limiter 指示：主输出接近 -1 dB 时点亮"
               >
                 LIM
               </span>
-              <span className="text-[8px] text-ink-4">-1 dB</span>
+              <span className="text-[9.5px] text-ink-4">-1 dB</span>
             </div>
           </div>
 
-          <div className="mt-auto text-center text-[8.5px] leading-tight text-ink-4">
+          <div className="mt-auto pb-0.5 text-center text-[9.5px] leading-tight text-ink-4">
             主输出电平
             <br />
             真实峰值保持

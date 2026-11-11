@@ -176,8 +176,8 @@ function ParamSlider({
       title={hint}
     >
       <div className="mb-1.5 flex items-center justify-between gap-2">
-        <span className="text-[11px] text-ink-2">{label}</span>
-        <span className="mono text-[10.5px] tabular-nums text-accent-soft">{display}</span>
+        <span className="text-[11.5px] text-ink-2">{label}</span>
+        <span className="mono text-[11px] tabular-nums text-accent-soft">{display}</span>
       </div>
       <Slider
         ariaLabel={label}
@@ -217,14 +217,14 @@ function KindGrid({
             title={`${meta.name} · ${meta.hint}`}
             className={cn(
               'flex flex-col items-center justify-center gap-0.5 rounded-lg border py-1.5 transition-all',
-              compact ? 'h-[42px]' : 'h-[46px]',
+              compact ? 'h-[46px]' : 'h-[50px]',
               active
                 ? 'border-accent/60 bg-accent/12 text-accent-soft'
                 : 'border-line bg-surface-2/60 text-ink-2 hover:border-line-strong hover:bg-surface-3 hover:text-ink',
             )}
           >
             <span className="text-[14px] leading-none">{meta.icon}</span>
-            <span className="text-[9.5px] font-medium leading-none">{meta.name}</span>
+            <span className="text-[10px] font-medium leading-none">{meta.name}</span>
           </button>
         )
       })}
@@ -244,7 +244,7 @@ function BarCountPicker({ value, onChange, showUnit = true }: { value: number; o
           key={bars}
           onClick={() => onChange(bars)}
           className={cn(
-            'h-6 min-w-[26px] rounded-[6px] px-1 text-[10px] transition-colors',
+            'h-7 min-w-[28px] rounded-[6px] px-1.5 text-[10.5px] transition-colors',
             value === bars ? 'bg-surface-3 text-ink shadow-sm' : 'text-ink-3 hover:text-ink-2',
           )}
           title={`${bars} 小节`}
@@ -252,7 +252,7 @@ function BarCountPicker({ value, onChange, showUnit = true }: { value: number; o
           {bars}
         </button>
       ))}
-      {showUnit && <span className="px-1 text-[9px] text-ink-4">小节</span>}
+      {showUnit && <span className="px-1 text-[10px] text-ink-4">小节</span>}
     </div>
   )
 }
@@ -352,7 +352,10 @@ export function SmartClipPanel() {
 
   /* 三栏在窄宽度会互相挤压：≥780 保持三栏，更窄时右栏移到参数下方，参数改单列 */
   const threeColumns = panelWidth >= 780
-  const singleColumnParams = panelWidth > 0 && panelWidth < 640
+  /* 参数区分单列的依据是「参数列自身宽度」，而不是整个面板宽度：
+     两栏回退布局下左栏固定 190px，若按面板宽度判断会把 8 个参数全部堆成单列（信息密度骤降、需要长滚动）。 */
+  const paramsColumnWidth = threeColumns ? panelWidth - 492 : panelWidth - 220
+  const singleColumnParams = panelWidth > 0 && paramsColumnWidth < 300
 
   useEffect(() => {
     const element = rootRef.current
@@ -693,7 +696,7 @@ export function SmartClipPanel() {
         <div className="mb-2 flex items-center justify-between">
           <span className="label">预览</span>
           {activeClip && (
-            <span className="mono text-[9.5px] text-ink-4">
+            <span className="mono text-[10px] text-ink-4">
               {activeClip.notes.length} 音符 · {Math.round(activeClip.lengthBeats / barBeats)} 小节
             </span>
           )}
@@ -707,16 +710,16 @@ export function SmartClipPanel() {
               barBeats={barBeats}
             />
             <div className="mt-2 grid grid-cols-2 gap-1.5">
-              <button className="btn h-7 px-1.5 text-[10.5px]" onClick={previewClipAudio} title="试听片段">
+              <button className="btn h-8 px-2 text-[11px]" onClick={previewClipAudio} title="试听片段">
                 <Play size={11} />
                 试听
               </button>
-              <button className="btn h-7 px-1.5 text-[10.5px]" onClick={stopPreview} title="停止试听">
+              <button className="btn h-8 px-2 text-[11px]" onClick={stopPreview} title="停止试听">
                 <Square size={10} />
                 停止
               </button>
               <button
-                className="btn h-7 px-1.5 text-[10.5px]"
+                className="btn h-8 px-2 text-[11px]"
                 onClick={regenerateVariant}
                 disabled={!smart}
                 title={smart ? '换一个变奏' : '仅智能片段支持变奏'}
@@ -725,7 +728,7 @@ export function SmartClipPanel() {
                 变奏
               </button>
               <button
-                className="btn h-7 px-1.5 text-[10.5px]"
+                className="btn h-8 px-2 text-[11px]"
                 onClick={() => {
                   if (!activeClip) return
                   useStore.getState().setView('pianoroll')
@@ -737,7 +740,7 @@ export function SmartClipPanel() {
               </button>
             </div>
             <button
-              className="btn btn-accent mt-1.5 h-7 w-full px-1.5 text-[10.5px]"
+              className="btn btn-accent mt-2 h-8 w-full px-2 text-[11px]"
               onClick={createAtPlayhead}
               title="用当前类型与参数，在播放头所在小节生成一个新片段"
             >
@@ -765,7 +768,7 @@ export function SmartClipPanel() {
       <section className="panel-flat rounded-xl p-2.5">
         <div className="mb-1.5 flex items-center justify-between">
           <span className="label">A/B 对比</span>
-          <span className="mono text-[9.5px] text-ink-4">
+          <span className="mono text-[10px] text-ink-4">
             {smart ? (activeSlot ? `当前 ${activeSlot}` : '未保存') : '仅智能片段'}
           </span>
         </div>
@@ -778,7 +781,7 @@ export function SmartClipPanel() {
                 key={`apply-${slot}`}
                 type="button"
                 className={cn(
-                  'flex h-7 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10.5px] transition-colors',
+                  'flex h-8 items-center justify-center gap-1 rounded-lg border px-2 text-[11px] transition-colors',
                   active
                     ? 'border-accent/60 bg-accent/12 text-accent-soft'
                     : 'border-line bg-surface-2/60 text-ink-2 hover:border-line-strong hover:bg-surface-3 hover:text-ink',
@@ -799,7 +802,7 @@ export function SmartClipPanel() {
             <button
               key={`save-${slot}`}
               type="button"
-              className="btn h-7 px-1.5 text-[10.5px]"
+              className="btn h-8 px-2 text-[11px]"
               onClick={() => saveSlot(slot)}
               disabled={!smart}
               aria-label={`保存 ${slot} 快照`}
@@ -811,7 +814,7 @@ export function SmartClipPanel() {
         </div>
         <button
           type="button"
-          className="btn mt-1.5 h-7 w-full px-1.5 text-[10.5px]"
+          className="btn mt-2 h-8 w-full px-2 text-[11px]"
           onClick={() => void copySeed()}
           disabled={!smart}
           aria-label="复制 seed"
@@ -820,7 +823,7 @@ export function SmartClipPanel() {
           <Copy size={11} />
           复制 seed
         </button>
-        <p className="mt-1.5 text-[9.5px] leading-relaxed text-ink-4">
+        <p className="mt-2 text-[10px] leading-relaxed text-ink-4">
           先把满意的版本存到 A，调参后再存 B；点「切到 A / B」即可原样还原 seed 与全部参数，方便对比。
         </p>
       </section>
@@ -830,7 +833,7 @@ export function SmartClipPanel() {
           <span className="label shrink-0">和弦进行</span>
           <button
             type="button"
-            className="btn h-5 shrink-0 gap-1 px-1.5 text-[9.5px]"
+            className="btn h-6 shrink-0 gap-1 px-2 text-[10px]"
             onClick={() => void fetchProgressionIdeas()}
             disabled={suggestingProgressions}
             data-suggest-progressions
@@ -841,13 +844,13 @@ export function SmartClipPanel() {
           </button>
         </div>
         <div className="mb-1 flex items-center justify-between gap-2">
-          <span className="mono shrink-0 text-[9.5px] text-ink-4">{project.chords.length} 个和弦</span>
-          <span className="min-w-0 truncate text-[9px] text-ink-4">
+          <span className="mono shrink-0 text-[10px] text-ink-4">{project.chords.length} 个和弦</span>
+          <span className="min-w-0 truncate text-[9.5px] text-ink-4">
             {suggestedStyleName} · {keyScaleLabel(project.key, project.scale)}
           </span>
         </div>
         {project.chords.length === 0 ? (
-          <p className="text-[10px] leading-relaxed text-ink-4">
+          <p className="text-[10.5px] leading-relaxed text-ink-4">
             工程还没有和弦进行。点上方「换一组进行」拿几条灵感，或在 AI 助手里说「配一套和弦」。
           </p>
         ) : (
@@ -855,7 +858,7 @@ export function SmartClipPanel() {
             {project.chords.slice(0, 24).map((chord, index) => (
               <span
                 key={`${chord.root}-${chord.quality}-${index}`}
-                className="rounded border border-line bg-surface-2/60 px-1.5 py-[2px] font-mono text-[9.5px] text-cyan/80"
+                className="rounded border border-line bg-surface-2/60 px-1.5 py-0.5 font-mono text-[10px] text-cyan/80"
                 title={`${chord.beats} 拍`}
               >
                 {chordLabel(chord)}
@@ -864,14 +867,14 @@ export function SmartClipPanel() {
           </div>
         )}
         {progressionError && (
-          <p className="mt-1.5 rounded border border-danger/30 bg-danger/8 px-1.5 py-1 text-[9px] leading-relaxed text-danger">
+          <p className="mt-1.5 rounded border border-danger/30 bg-danger/8 px-1.5 py-1 text-[9.5px] leading-relaxed text-danger">
             {progressionError}
           </p>
         )}
         {progressionIdeas.length > 0 && (
           <div className="mt-1.5 border-t border-line pt-1.5">
-            <div className="mb-1 flex items-center gap-1 text-[9px] text-ink-4">
-              <Lightbulb size={9} className="shrink-0 text-accent/70" />
+            <div className="mb-1 flex items-center gap-1 text-[10px] text-ink-4">
+              <Lightbulb size={10} className="shrink-0 text-accent/70" />
               灵感建议 · 点击应用到工程和弦
             </div>
             <div className="space-y-1">
@@ -885,43 +888,44 @@ export function SmartClipPanel() {
                   className="block w-full rounded-lg border border-line bg-surface-2/50 px-1.5 py-1 text-left transition-colors hover:border-accent/45 hover:bg-surface-3"
                 >
                   <span className="flex min-w-0 items-center gap-1">
-                    <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-ink-2">{idea.label}</span>
-                    <span className="mono shrink-0 text-[9px] text-accent-soft">{idea.roman.join(' · ')}</span>
+                    <span className="min-w-0 flex-1 truncate text-[10.5px] font-medium text-ink-2">{idea.label}</span>
+                    <span className="mono shrink-0 text-[9.5px] text-accent-soft">{idea.roman.join(' · ')}</span>
                   </span>
-                  <span className="mono mt-0.5 block truncate text-[9px] text-cyan/80">
+                  <span className="mono mt-0.5 block truncate text-[9.5px] text-cyan/80">
                     {toChordSpecs(idea.chords)
                       .map((chord) => chordLabel(chord))
                       .join(' · ')}
                   </span>
-                  <span className="mt-0.5 line-clamp-2 block text-[9px] leading-snug text-ink-4">{idea.description}</span>
+                  <span className="mt-0.5 line-clamp-2 block text-[9.5px] leading-snug text-ink-4">{idea.description}</span>
                 </button>
               ))}
             </div>
-            <p className="mt-1 text-[9px] leading-relaxed text-ink-4">应用后会自动重算「跟随工程和弦」的智能片段，⌘Z 可撤销。</p>
+            <p className="mt-1 text-[9.5px] leading-relaxed text-ink-4">应用后会自动重算「跟随工程和弦」的智能片段，⌘Z 可撤销。</p>
           </div>
         )}
 
         {/* P7-C：补全不完整进行 */}
         <div className="mt-1.5 border-t border-line pt-1.5" data-complete-progression-block>
-          <div className="mb-1 flex items-center gap-1 text-[9px] text-ink-4">
-            <Wand2 size={9} className="shrink-0 text-accent/70" />
+          <div className="mb-1 flex items-center gap-1 text-[10px] text-ink-4">
+            <Wand2 size={10} className="shrink-0 text-accent/70" />
             补全进行 · 给半截和声，AI 接后半段
           </div>
-          <div className="flex items-center gap-1">
+          {/* 窄列（右栏 248px）时自动换行：输入框不再被压到 120px 以下，select 也不再只有 56px */}
+          <div className="flex flex-wrap items-center gap-1.5">
             <input
               value={partialRoman}
               onChange={(event) => setPartialRoman(event.target.value)}
               placeholder="I V vi"
               aria-label="部分和弦进行（罗马数字）"
               data-complete-partial
-              className="field h-6 min-w-0 flex-1 text-[10px]"
+              className="field h-7 min-w-[120px] flex-1 text-[11px]"
             />
             <select
               value={String(completeLength)}
               onChange={(event) => setCompleteLength(Number(event.target.value))}
               aria-label="补全目标长度"
               data-complete-length
-              className="field h-6 w-14 shrink-0 text-[10px]"
+              className="field h-7 w-[88px] shrink-0 text-[11px]"
               title="补全后的总和弦数"
             >
               <option value="4">4 个</option>
@@ -933,17 +937,17 @@ export function SmartClipPanel() {
               data-complete-progression
               onClick={() => void fetchCompletion()}
               disabled={completing}
-              className="btn h-6 shrink-0 px-2 text-[9.5px]"
+              className="btn h-7 shrink-0 px-2.5 text-[10.5px]"
               title={`按当前调性 ${project.key} ${project.scale} 与风格补全`}
             >
-              {completing ? <LoaderCircle size={9} className="animate-spin" /> : '补全'}
+              {completing ? <LoaderCircle size={10} className="animate-spin" /> : '补全'}
             </button>
           </div>
-          {completionError && <p className="mt-1 text-[9px] leading-relaxed text-danger">{completionError}</p>}
+          {completionError && <p className="mt-1 text-[9.5px] leading-relaxed text-danger">{completionError}</p>}
           {completion && (
             <div data-complete-result className="mt-1 rounded border border-line bg-surface-2/50 px-1.5 py-1">
-              <div className="mono break-all text-[9.5px] text-cyan/85">{completion.full.join(' · ')}</div>
-              <div className="mt-0.5 text-[9px] leading-relaxed text-ink-4">
+              <div className="mono break-all text-[10px] text-cyan/85">{completion.full.join(' · ')}</div>
+              <div className="mt-0.5 text-[9.5px] leading-relaxed text-ink-4">
                 {completion.cadence} · {completion.reasons.slice(0, 2).join('；')}
               </div>
               <div className="mt-1 flex items-center gap-1">
@@ -951,11 +955,11 @@ export function SmartClipPanel() {
                   type="button"
                   data-complete-apply
                   onClick={() => applyCompletion(completion)}
-                  className="btn btn-secondary h-5 px-1.5 text-[9px]"
+                  className="btn btn-secondary h-6 px-2 text-[10px]"
                 >
                   写入工程和弦
                 </button>
-                <span className="text-[9px] text-ink-4">补全 {completion.completion.length} 个 · 总 {completion.full.length} 个</span>
+                <span className="text-[9.5px] text-ink-4">补全 {completion.completion.length} 个 · 总 {completion.full.length} 个</span>
               </div>
             </div>
           )}
@@ -967,7 +971,7 @@ export function SmartClipPanel() {
           <Plus size={11} className="text-ink-3" />
           <span className="label">小贴士</span>
         </div>
-        <ul className="space-y-1 text-[9.5px] leading-relaxed text-ink-4">
+        <ul className="space-y-1 text-[10px] leading-relaxed text-ink-4">
           <li>· 智能片段生成后是普通片段，可以在编曲视图拖到别的小节。</li>
           <li>· 想保留 A 段、换一个 B 段？先复制片段，再对新片段点「变奏」。</li>
           <li>· 密度与能量同时拉高会得到更饱满的律动。</li>
@@ -983,12 +987,12 @@ export function SmartClipPanel() {
         <Sparkles size={13} className="shrink-0 text-accent" />
         <span className="shrink-0 text-[12.5px] font-semibold">智能片段工作台</span>
         {panelWidth >= 900 && (
-          <span className="truncate text-[10.5px] text-ink-4">9 类生成器 · 参数实时重算 · 变奏不会覆盖原创意</span>
+          <span className="truncate text-[11px] text-ink-4">9 类生成器 · 参数实时重算 · 变奏不会覆盖原创意</span>
         )}
         <div className="flex-1" />
         {project.tracks.length > 0 && (
           <div className="flex shrink-0 items-center gap-1.5">
-            {panelWidth >= 760 && <span className="text-[10px] text-ink-4">当前轨道</span>}
+            {panelWidth >= 760 && <span className="text-[10.5px] text-ink-4">当前轨道</span>}
             <Select
               ariaLabel="当前轨道"
               value={selectedTrack?.id ?? ''}
@@ -996,7 +1000,7 @@ export function SmartClipPanel() {
                 selectTrack(value)
                 setSmartClipTarget(null)
               }}
-              className={cn('h-7 text-[11px]', panelWidth >= 760 ? 'w-[132px]' : 'w-[112px]')}
+              className={cn('h-8 text-[11.5px]', panelWidth >= 760 ? 'w-[140px]' : 'w-[118px]')}
               options={trackOptions}
             />
           </div>
@@ -1019,7 +1023,7 @@ export function SmartClipPanel() {
               <BarCountPicker value={newBars} onChange={setNewBars} showUnit={panelWidth >= 900} />
             </div>
             <KindGrid onPick={createFromKind} compact />
-            <p className="mt-1.5 text-[9.5px] leading-relaxed text-ink-4">
+            <p className="mt-2 text-[10px] leading-relaxed text-ink-4">
               点类型立即生成并选中；从播放头所在小节开始，长度 {newBars} 小节。
             </p>
           </section>
@@ -1027,7 +1031,7 @@ export function SmartClipPanel() {
           <section className="panel-flat flex min-h-0 flex-1 flex-col rounded-xl">
             <div className="flex shrink-0 items-center justify-between border-b border-line px-2.5 py-1.5">
               <span className="label">轨道片段</span>
-              <span className="mono text-[9.5px] text-ink-4">{activeTrack?.clips.length ?? 0}</span>
+              <span className="mono text-[10px] text-ink-4">{activeTrack?.clips.length ?? 0}</span>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
               {!activeTrack && <div className="px-2 py-6 text-center text-[11px] text-ink-4">还没有轨道</div>}
@@ -1063,7 +1067,7 @@ export function SmartClipPanel() {
                       >
                         {clip.name}
                       </span>
-                      <span className="block text-[9px] text-ink-4">
+                      <span className="block text-[9.5px] text-ink-4">
                         {Math.round(clip.lengthBeats / barBeats)} 小节 · {clip.notes.length} 音符
                       </span>
                     </span>
@@ -1086,12 +1090,12 @@ export function SmartClipPanel() {
                     <span className="shrink-0 whitespace-nowrap text-[12.5px] font-semibold">
                       {SMART_KIND_META[smart.kind].name}
                     </span>
-                    <span className="shrink-0 rounded border border-violet/40 bg-violet/10 px-1 py-[1px] text-[9px] text-violet">
+                    <span className="shrink-0 rounded border border-violet/40 bg-violet/10 px-1 py-[1px] text-[9.5px] text-violet">
                       智能
                     </span>
                     <button
                       type="button"
-                      className="mono flex shrink-0 items-center gap-1 rounded border border-line bg-surface-2 px-1 py-[1px] text-[9.5px] text-ink-4 transition-colors hover:border-accent/40 hover:text-accent-soft"
+                      className="mono flex shrink-0 items-center gap-1 rounded border border-line bg-surface-2 px-1.5 py-[2px] text-[10px] text-ink-4 transition-colors hover:border-accent/40 hover:text-accent-soft"
                       onClick={() => void copySeed()}
                       aria-label="复制 seed"
                       title="复制随机种子（seed），便于记录或分享这个版本"
@@ -1100,11 +1104,11 @@ export function SmartClipPanel() {
                       <Copy size={9} />
                     </button>
                   </div>
-                  <div className="truncate text-[10px] text-ink-3">{SMART_KIND_META[smart.kind].hint}</div>
+                  <div className="truncate text-[10.5px] text-ink-3">{SMART_KIND_META[smart.kind].hint}</div>
                 </div>
                 <div className="flex-1" />
                 <button
-                  className="btn btn-ghost h-7 shrink-0 px-2 text-[10.5px]"
+                  className="btn btn-ghost h-8 shrink-0 px-2.5 text-[11px]"
                   onClick={previewClipAudio}
                   title="试听当前片段"
                 >
@@ -1112,7 +1116,7 @@ export function SmartClipPanel() {
                   试听
                 </button>
                 <button
-                  className="btn btn-ghost h-7 shrink-0 px-2 text-[10.5px]"
+                  className="btn btn-ghost h-8 shrink-0 px-2.5 text-[11px]"
                   onClick={regenerateVariant}
                   title="用新种子重新生成（换一个变奏），不改变调好的参数"
                 >
@@ -1120,7 +1124,7 @@ export function SmartClipPanel() {
                   换一个变奏
                 </button>
                 <button
-                  className="btn btn-accent h-7 shrink-0 px-2 text-[10.5px]"
+                  className="btn btn-accent h-8 shrink-0 px-2.5 text-[11px]"
                   onClick={createAtPlayhead}
                   title="用当前类型与参数，在播放头所在小节生成一个新片段"
                 >
@@ -1131,7 +1135,7 @@ export function SmartClipPanel() {
 
               <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
                 <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                  <span className="text-[10px] text-ink-4">参数预设</span>
+                  <span className="text-[10.5px] text-ink-4">参数预设</span>
                   {PARAM_PRESETS.map((preset) => (
                     <button
                       key={preset.id}
@@ -1140,7 +1144,7 @@ export function SmartClipPanel() {
                       title={preset.hint}
                       aria-pressed={presetId === preset.id}
                       className={cn(
-                        'rounded-lg border px-2 py-1 text-[10.5px] transition-colors',
+                        'rounded-lg border px-2.5 py-1.5 text-[11px] transition-colors',
                         presetId === preset.id
                           ? 'border-accent/60 bg-accent/12 text-accent-soft'
                           : 'border-line bg-surface-2/60 text-ink-2 hover:border-line-strong hover:bg-surface-3 hover:text-ink',
@@ -1149,7 +1153,7 @@ export function SmartClipPanel() {
                       {preset.name}
                     </button>
                   ))}
-                  <span className="ml-1 hidden text-[9.5px] text-ink-4 sm:block">一次点击套用一组手感参数（可撤销）</span>
+                  <span className="ml-1 hidden text-[10px] text-ink-4 sm:block">一次点击套用一组手感参数（可撤销）</span>
                 </div>
                 <div className={cn('mb-2 grid gap-2', singleColumnParams ? 'grid-cols-1' : 'grid-cols-2')}>
                   <ParamSlider
@@ -1252,27 +1256,27 @@ export function SmartClipPanel() {
 
                 <div className={cn('grid gap-2', singleColumnParams ? 'grid-cols-1' : 'grid-cols-2')}>
                   <div className="rounded-lg border border-line bg-surface-2/50 px-2.5 py-2">
-                    <div className="mb-1.5 text-[11px] text-ink-2">图案（pattern）</div>
+                    <div className="mb-1.5 text-[11.5px] text-ink-2">图案（pattern）</div>
                     {patternOptions(smart.kind, smart.style).length > 0 ? (
                       <Select
                         ariaLabel="图案"
                         value={smart.params.patternId ?? ''}
                         onChange={(value) => applyParamOnce({ patternId: value || undefined })}
-                        className="h-7 text-[11px]"
+                        className="h-8 text-[11.5px]"
                         options={[
                           { value: '', label: '自动（按风格挑选）' },
                           ...patternOptions(smart.kind, smart.style).map((option) => ({ value: option.id, label: option.name })),
                         ]}
                       />
                     ) : (
-                      <div className="flex h-7 items-center text-[10px] text-ink-4">该类型由生成器自动决定图案</div>
+                      <div className="flex h-8 items-center text-[10.5px] text-ink-4">该类型由生成器自动决定图案</div>
                     )}
                   </div>
                   <div className="rounded-lg border border-line bg-surface-2/50 px-2.5 py-2">
                     <div className="flex items-center justify-between gap-2">
                       <div>
-                        <div className="text-[11px] text-ink-2">跟随工程和弦</div>
-                        <div className="mt-0.5 text-[9.5px] text-ink-4">关闭后使用生成时的和弦快照</div>
+                        <div className="text-[11.5px] text-ink-2">跟随工程和弦</div>
+                        <div className="mt-0.5 text-[10px] text-ink-4">关闭后使用生成时的和弦快照</div>
                       </div>
                       <Switch
                         label="跟随工程和弦"
@@ -1286,9 +1290,9 @@ export function SmartClipPanel() {
                 <div className="mt-2 rounded-lg border border-line bg-surface-2/40 px-2.5 py-2">
                   <div className="mb-1 flex items-center gap-1.5">
                     <Wand2 size={11} className="text-ink-3" />
-                    <span className="text-[10.5px] text-ink-2">参数说明</span>
+                    <span className="text-[11px] text-ink-2">参数说明</span>
                   </div>
-                  <p className="text-[9.5px] leading-relaxed text-ink-4">
+                  <p className="text-[10px] leading-relaxed text-ink-4">
                     所有参数会立即重新生成音符（撤销可逐步回退）。「换一个变奏」只更换随机种子，
                     不改变你调好的参数。生成结果保存在当前片段里，可直接在编曲视图拖动、在钢琴卷帘里微调。
                   </p>
@@ -1305,7 +1309,7 @@ export function SmartClipPanel() {
                   </div>
                   <div className="min-w-0">
                     <div className="text-[12.5px] font-medium">「{activeClip.name}」还不是智能片段</div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-ink-3">
+                    <p className="mt-1 text-[11.5px] leading-relaxed text-ink-3">
                       智能片段由生成器实时计算，可以调整密度、复杂度、能量等参数并「换一个变奏」。
                       转换会在这条轨道上、同一位置新建一个类型片段（原片段保留，可随时对比）。
                     </p>
@@ -1315,12 +1319,12 @@ export function SmartClipPanel() {
                   <div className="label mb-1.5">选择生成类型</div>
                   <KindGrid activeKind={convertKind} onPick={setConvertKind} compact />
                 </div>
-                <button className="btn btn-accent mt-3 h-8 w-full text-[12px]" onClick={convertToSmart}>
+                <button className="btn btn-accent mt-3 h-9 w-full text-[12.5px]" onClick={convertToSmart}>
                   <Wand2 size={12} />
                   生成{SMART_KIND_META[convertKind].name}智能片段
                 </button>
-                <div className="mt-2 flex items-center gap-1 text-[9.5px] text-ink-4">
-                  <ChevronRight size={10} />
+                <div className="mt-2 flex items-center gap-1 text-[10px] text-ink-4">
+                  <ChevronRight size={11} />
                   片段位置 {activeClip.startBeat} 拍 · 长度 {activeClip.lengthBeats} 拍 ·{' '}
                   {activeClip.notes.length} 音符
                 </div>
@@ -1328,9 +1332,9 @@ export function SmartClipPanel() {
               <div className="mt-3 rounded-xl border border-line bg-surface-2/40 p-3">
                 <div className="mb-1.5 flex items-center gap-1.5">
                   <Music4 size={11} className="text-ink-3" />
-                  <span className="text-[10.5px] text-ink-2">也可以直接在左侧新建</span>
+                  <span className="text-[11px] text-ink-2">也可以直接在左侧新建</span>
                 </div>
-                <p className="text-[9.5px] leading-relaxed text-ink-4">
+                <p className="text-[10px] leading-relaxed text-ink-4">
                   选择左侧任一类型即可在当前轨道生成一个全新的智能片段；从播放头所在小节开始。
                 </p>
               </div>
@@ -1343,7 +1347,7 @@ export function SmartClipPanel() {
                   title="选一个片段，开始用参数创作"
                   hint="在左侧点任意类型生成智能片段，或在编曲视图里选中一个片段。所有参数都可以边听边调。"
                 />
-                <ol className="mx-auto mt-2 max-w-xs space-y-1 text-[10.5px] leading-relaxed text-ink-4">
+                <ol className="mx-auto mt-2 max-w-xs space-y-1 text-[11px] leading-relaxed text-ink-4">
                   <li>1. 左侧选择「轨道」</li>
                   <li>2. 选一个智能类型（节奏/低音/和弦…）</li>
                   <li>3. 在这里拖动参数实时听变化</li>

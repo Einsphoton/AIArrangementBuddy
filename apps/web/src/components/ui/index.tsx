@@ -177,38 +177,97 @@ export function Modal({
   footer?: React.ReactNode
   width?: 'sm' | 'md' | 'lg' | 'xl'
 }) {
+  const titleId = useId()
+  const panelRef = useRef<HTMLDivElement>(null)
+  const restoreFocusRef = useRef<HTMLElement | null>(null)
+
   useEffect(() => {
     if (!open) return
     const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key !== 'Escape') return
+      /* 弹层（下拉 / 菜单）已经消化过的 Esc 不再关闭整个对话框 */
+      if (event.defaultPrevented) return
+      onClose()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
 
+  /* 打开时把焦点移到对话框容器：Esc / 滚动立刻可用，且不会误触第一个按钮；
+     关闭时把焦点还给打开它的控件。 */
+  useEffect(() => {
+    if (!open) return
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const timer = window.setTimeout(() => panelRef.current?.focus(), 30)
+    return () => {
+      window.clearTimeout(timer)
+      restoreFocusRef.current?.focus?.({ preventScroll: true })
+    }
+  }, [open])
+
   if (!open) return null
+  /** 焦点 trap：Tab 只在对话框内部循环，避免跑到被遮住的背景控件上 */
+  const trapFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') return
+    const panel = panelRef.current
+    if (!panel) return
+    const focusables = [...panel.querySelectorAll<HTMLElement>(
+      'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
+    )].filter((element) => element.offsetParent !== null || element === document.activeElement)
+    if (focusables.length === 0) return
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    const active = document.activeElement as HTMLElement | null
+    if (event.shiftKey) {
+      if (!active || active === panel || active === first) {
+        event.preventDefault()
+        last.focus()
+      }
+      return
+    }
+    if (!active || active === panel) {
+      event.preventDefault()
+      first.focus()
+      return
+    }
+    if (active === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
   const widths = { sm: 'max-w-md', md: 'max-w-2xl', lg: 'max-w-4xl', xl: 'max-w-6xl' }
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" role="dialog" aria-modal>
-      <div className="absolute inset-0 bg-black/65 backdrop-blur-sm" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+      <div className="absolute inset-0 bg-black/65 backdrop-blur-sm" onClick={onClose} role="presentation" />
       <div
+        ref={panelRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        style={{ outline: 'none' }}
+        onKeyDown={trapFocus}
         className={cn(
           'relative z-10 flex max-h-[86vh] w-full flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0_32px_80px_-24px_rgba(0,0,0,0.9)] animate-fade-up',
           widths[width],
         )}
       >
         <header className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
-          <div>
-            <h2 className="text-[15px] font-semibold tracking-tight">{title}</h2>
+          <div className="min-w-0">
+            <h2 id={titleId} className="text-[15px] font-semibold tracking-tight">
+              {title}
+            </h2>
             {subtitle && <p className="mt-1 text-[12px] leading-relaxed text-ink-2">{subtitle}</p>}
           </div>
-          <button className="btn btn-ghost btn-icon -mr-1 -mt-1" onClick={onClose} aria-label="关闭">
+          <button type="button" className="btn btn-ghost btn-icon -mr-1 -mt-1" onClick={onClose} aria-label="关闭">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2 2l10 10M12 2L2 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
           </button>
         </header>
-        <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        <div data-modal-body className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {children}
+        </div>
         {footer && <footer className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">{footer}</footer>}
       </div>
     </div>
@@ -270,7 +329,7 @@ export function Field({
 }) {
   return (
     <label className={cn('block', className)}>
-      <span className="label mb-1.5 block">{label}</span>
+      <span className="mb-1.5 block text-[11px] font-medium text-ink-2">{label}</span>
       {children}
       {hint && <span className="mt-1 block text-[11px] leading-relaxed text-ink-3">{hint}</span>}
     </label>
@@ -294,7 +353,11 @@ export function ToggleRow({
         <div className="text-[12.5px] font-medium">{label}</div>
         {hint && <div className="mt-0.5 text-[11px] leading-relaxed text-ink-3">{hint}</div>}
       </div>
-      <Switch checked={checked} onChange={onChange} />
+      <Switch
+        checked={checked}
+        onChange={onChange}
+        label={typeof label === 'string' ? label : typeof hint === 'string' ? hint : undefined}
+      />
     </div>
   )
 }

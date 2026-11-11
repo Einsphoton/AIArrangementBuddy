@@ -19,7 +19,7 @@ import { cn } from '../../lib/format'
 
 export function Kbd({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="inline-flex h-[17px] min-w-[17px] items-center justify-center rounded-[4px] border border-line-strong bg-surface-3 px-1 font-mono text-[9.5px] font-medium text-ink-3">
+    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[4px] border border-line-strong bg-surface-3 px-1 font-mono text-[10px] font-medium text-ink-3">
       {children}
     </kbd>
   )
@@ -75,7 +75,7 @@ export function MenuItem({
         if (!disabled) onClick?.()
       }}
       className={cn(
-        'flex h-[26px] w-full items-center gap-2 px-2 text-left text-[11.5px] transition-colors',
+        'flex h-7 w-full items-center gap-2 px-2 text-left text-[12px] transition-colors',
         disabled
           ? 'cursor-not-allowed text-ink-4/70'
           : danger
@@ -84,13 +84,13 @@ export function MenuItem({
         className,
       )}
     >
-      <span className={cn('flex w-3.5 shrink-0 items-center justify-center', danger ? 'text-danger' : 'text-ink-3')}>
+      <span className={cn('flex w-4 shrink-0 items-center justify-center', danger ? 'text-danger' : 'text-ink-3')}>
         {checked ? <Check size={11} /> : icon}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {hint != null && <span className="mono shrink-0 text-[9px] text-ink-4">{hint}</span>}
+      {hint != null && <span className="mono shrink-0 text-[10px] text-ink-4">{hint}</span>}
       {shortcut && (
-        <span className="mono shrink-0 rounded border border-line bg-surface-2 px-1 text-[9px] text-ink-4">
+        <span className="mono shrink-0 rounded border border-line bg-surface-2 px-1 text-[10px] text-ink-4">
           {shortcut}
         </span>
       )}
@@ -104,7 +104,7 @@ export function MenuDivider() {
 }
 
 export function MenuLabel({ children }: { children: React.ReactNode }) {
-  return <div className="truncate px-2 pb-1 pt-1.5 text-[9.5px] uppercase tracking-[0.08em] text-ink-4">{children}</div>
+  return <div className="truncate px-2 pb-1 pt-1.5 text-[10px] uppercase tracking-[0.08em] text-ink-4">{children}</div>
 }
 
 /* ------------------------------------------------------------------ */

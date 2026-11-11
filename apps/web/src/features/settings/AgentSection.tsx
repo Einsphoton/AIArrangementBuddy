@@ -128,9 +128,11 @@ export function AgentSection({
                       <Badge tone="neutral">探测中…</Badge>
                     ) : null}
                   </span>
-                  <span className="mt-0.5 block text-[10.5px] leading-relaxed text-ink-3">{item.description}</span>
+                  <span className="mt-0.5 block text-[11px] leading-relaxed text-ink-3">{item.description}</span>
                   {info?.path && (
-                    <span className="mono mt-0.5 block truncate text-[9.5px] text-ink-4">{info.path}</span>
+                    <span className="mono mt-0.5 block truncate text-[10.5px] text-ink-4" title={info.path}>
+                      {info.path}
+                    </span>
                   )}
                 </span>
               </button>
@@ -157,7 +159,7 @@ export function AgentSection({
               探测完成 · {new Date(probedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
             </StatusLine>
           ) : (
-            <span className="text-[10px] text-ink-4">探测结果来自 /api/agents，与后端启动环境有关</span>
+            <span className="text-[10.5px] text-ink-4">探测结果来自 /api/agents，与后端启动环境有关</span>
           )}
         </div>
       </Section>
@@ -238,9 +240,9 @@ export function AgentSection({
 
         <div className="space-y-1.5">
           <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-bg-soft/50 px-2.5 py-2">
-            <div>
+            <div className="min-w-0">
               <div className="text-[12px] text-ink-2">允许联网搜索</div>
-              <div className="mt-0.5 text-[10px] text-ink-4">关闭后 AI 无法调用 web_search / fetch_url</div>
+              <div className="mt-0.5 text-[10.5px] text-ink-4">关闭后 AI 无法调用 web_search / fetch_url</div>
             </div>
             <Switch
               checked={draft.agent.allowWebSearch}
@@ -253,9 +255,9 @@ export function AgentSection({
             />
           </div>
           <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-bg-soft/50 px-2.5 py-2">
-            <div>
+            <div className="min-w-0">
               <div className="text-[12px] text-ink-2">允许修改工程</div>
-              <div className="mt-0.5 text-[10px] text-ink-4">关闭后 AI 只能分析与回答问题，不会改动音符</div>
+              <div className="mt-0.5 text-[10.5px] text-ink-4">关闭后 AI 只能分析与回答问题，不会改动音符</div>
             </div>
             <Switch
               checked={draft.agent.allowProjectEdits}

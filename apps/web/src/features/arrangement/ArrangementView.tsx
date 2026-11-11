@@ -313,7 +313,7 @@ function Ruler({
             onPointerDown={(event) => startLoopDrag(event, 'right')}
           />
         </div>
-        <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[8px] font-semibold tracking-[0.14em] text-ink-4">
+        <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[9.5px] font-semibold tracking-[0.14em] text-ink-4">
           LOOP
         </span>
       </div>
@@ -352,11 +352,11 @@ function Ruler({
                     if (event.key === 'Enter') commitRename(section)
                     if (event.key === 'Escape') setRenamingSectionId(null)
                   }}
-                  className="w-full min-w-0 rounded bg-bg px-1 text-[9.5px] outline-none"
+                  className="h-[15px] w-full min-w-0 rounded border border-accent/50 bg-bg px-1 text-[10.5px] outline-none"
                   aria-label="段落名称"
                 />
               ) : (
-                <span className="min-w-0 flex-1 truncate text-[9.5px] font-medium" style={{ color }}>
+                <span className="min-w-0 flex-1 truncate text-[10.5px] font-medium" style={{ color }}>
                   {section.name}
                 </span>
               )}
@@ -366,7 +366,7 @@ function Ruler({
                 style={{ background: withAlpha(color, 0.25 + section.energy * 0.5) }}
               />
               <button
-                className="absolute right-1 top-1/2 hidden h-3 w-3 -translate-y-1/2 items-center justify-center rounded bg-black/40 text-ink-2 hover:text-danger group-hover/section:flex"
+                className="absolute right-1 top-1/2 hidden h-4 w-4 -translate-y-1/2 items-center justify-center rounded bg-black/40 text-ink-2 hover:text-danger group-hover/section:flex"
                 title="删除段落"
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
@@ -374,7 +374,7 @@ function Ruler({
                   useStore.getState().removeSection(section.id)
                 }}
               >
-                <Trash2 size={8} />
+                <Trash2 size={9} />
               </button>
               <div
                 className="absolute inset-y-0 right-0 w-[5px] cursor-ew-resize bg-transparent hover:bg-white/25"
@@ -387,14 +387,14 @@ function Ruler({
           )
         })}
         <button
-          className="absolute inset-y-[2px] flex w-[18px] items-center justify-center rounded-[4px] border border-dashed border-line-strong text-ink-4 transition-colors hover:border-accent/50 hover:text-accent"
+          className="absolute inset-y-[2px] flex w-5 items-center justify-center rounded-[4px] border border-dashed border-line-strong text-ink-4 transition-colors hover:border-accent/50 hover:text-accent"
           style={{ left: sections.reduce((end, section) => Math.max(end, section.startBar + section.bars), 0) * pxPerBar + 6 }}
           title="在末尾添加段落"
           onClick={addSection}
         >
-          <Plus size={10} />
+          <Plus size={11} />
         </button>
-        <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[8px] font-semibold tracking-[0.14em] text-ink-4">
+        <span className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[9.5px] font-semibold tracking-[0.14em] text-ink-4">
           SECT
         </span>
       </div>
@@ -414,7 +414,7 @@ function Ruler({
             <div key={index} className="absolute inset-y-0" style={{ left: x }}>
               <span className="absolute left-[3px] top-[2px] h-[5px] w-px bg-line-strong" />
               {showLabel && (
-                <span className="mono pointer-events-none absolute left-[5px] top-[2px] text-[9.5px] font-medium tabular-nums text-ink-3">
+                <span className="mono pointer-events-none absolute left-[5px] top-[2px] text-[10px] font-medium tabular-nums text-ink-3">
                   {index + 1}
                 </span>
               )}
@@ -434,13 +434,13 @@ function Ruler({
           chords.map((slot, index) => (
             <span
               key={`${slot.chord.root}-${slot.chord.quality}-${index}`}
-              className="pointer-events-none absolute bottom-[1px] truncate text-[8.5px] text-cyan/60"
+              className="pointer-events-none absolute bottom-0 truncate text-[9.5px] text-cyan/60"
               style={{ left: slot.startBeat * pxPerBeat + 4, maxWidth: Math.max(18, (slot.endBeat - slot.startBeat) * pxPerBeat - 6) }}
             >
               {chordLabelSafe(slot.chord)}
             </span>
           ))}
-        <span className="pointer-events-none absolute right-2 top-[2px] text-[8px] tracking-[0.16em] text-ink-4">BAR</span>
+        <span className="pointer-events-none absolute right-2 top-[2px] text-[9.5px] tracking-[0.16em] text-ink-4">BAR</span>
       </div>
     </div>
   )
@@ -1474,7 +1474,7 @@ export function ArrangementView() {
                     style={{ height: rowHeight }}
                   >
                     {track.clips.length === 0 && (track.audioClips?.length ?? 0) === 0 && (
-                      <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center gap-1.5 text-[10px] text-ink-4/70">
+                      <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center gap-1.5 text-[10.5px] text-ink-4/70">
                         <span className="h-[3px] w-[3px] rounded-full" style={{ background: withAlpha(color, 0.5) }} />
                         {track.kind === 'audio'
                           ? '音频轨道：用「文件 → 导入音频…」放置音频'

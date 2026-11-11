@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowRight,
+  AudioWaveform,
   Check,
   ChevronDown,
   CircleAlert,
@@ -9,6 +10,7 @@ import {
   CornerDownLeft,
   Globe,
   KeyRound,
+  Layers,
   ListMusic,
   LoaderCircle,
   MessageSquarePlus,
@@ -36,6 +38,12 @@ import { MessageItem } from './MessageItem'
 import { useChatStream } from './useChatStream'
 import { clearMessageMetrics } from './chatMetrics'
 import { parseSlashDraft, resolveSlashPrompt, type SlashCommand } from './slashCommands'
+import { AudioEngineMenu } from '../audio/AudioEngineMenu'
+import { AudioJobCard } from '../audio/AudioJobCard'
+import { GenerateAudioPanel } from '../audio/GenerateAudioPanel'
+import { TaskCenterPanel } from '../audio/TaskCenterPanel'
+import { useAudioJobStore } from '../audio/audioJobStore'
+import { detectAudioIntent } from '../audio/audioIntent'
 
 const BACKEND_LABEL: Record<string, string> = {
   builtin: '内置 Agent',
@@ -43,8 +51,14 @@ const BACKEND_LABEL: Record<string, string> = {
   dsh: 'DeepSeek Harness',
 }
 
-/** 输入框最多 6 行（与 textarea 的 leading-relaxed 12.5px 匹配） */
-const MAX_INPUT_HEIGHT = 132
+/** 输入框最多 8 行（与 textarea 的 leading-relaxed 13px 匹配） */
+const MAX_INPUT_HEIGHT = 240
+/** 输入框默认高度：至少 3 行，避免看起来像搜索框 */
+const MIN_INPUT_HEIGHT = 88
+/** 面板高度不足（例如混音器打开、笔记本小屏）时的紧凑输入框高度 */
+const COMPACT_INPUT_HEIGHT = 56
+/** 高度低于此值时进入紧凑模式：隐藏快捷动作、压缩输入区，保证输入框永远在可视区 */
+const COMPACT_PANEL_HEIGHT = 520
 
 interface BackendInfo {
   backend: string
@@ -69,10 +83,10 @@ const SAMPLE_PROMPTS: SamplePrompt[] = [
     intent: 'compose',
   },
   {
-    title: '分析并优化当前编排',
-    description: '和声、节奏、配器层次',
-    prompt: '分析当前工程的调性、和弦进行与节奏密度，直接给出并落实 3 条能明显提升编曲质量的改动。',
-    intent: 'optimize',
+    title: '直接生成一首音频',
+    description: '文本 → 成品音频 · 可直接播放',
+    prompt: '用音频生成模型做一首 30 秒的温暖 cinematic 成品（钢琴 + 弦乐 + 轻鼓，72 BPM），直接产出可播放音频并加入工程。',
+    intent: 'audio',
   },
   {
     title: '把旋律编成完整伴奏',
@@ -118,6 +132,24 @@ const QUICK_ACTIONS: SamplePrompt[] = [
     prompt: '把当前工程的整体情绪换一种：更温暖、更有空间感，但不要改变和弦与节奏。',
     intent: 'optimize',
   },
+  {
+    title: '生成整首音频',
+    description: '',
+    prompt: '用音频生成模型做一首成品：温暖 cinematic，钢琴 + 弦乐 + 轻鼓，72 BPM，30 秒，直接产出音频并加入工程。',
+    intent: 'audio',
+  },
+  {
+    title: 'MIDI → 音频',
+    description: '',
+    prompt: '把当前工程按现有编配渲染成音频并加入工程；如果工程还是空的，先补一段完整编曲再渲染。',
+    intent: 'audio',
+  },
+  {
+    title: '生成分轨',
+    description: '',
+    prompt: '生成一首成品音频并分轨：流行乐队编制，先出整曲，再分别生成吉他、贝斯、鼓组分轨，各自成轨。',
+    intent: 'audio',
+  },
 ]
 
 interface ContextChip {
@@ -159,12 +191,22 @@ export function ChatPanel() {
   const [showJump, setShowJump] = useState(false)
   const [menuSuppressed, setMenuSuppressed] = useState(false)
   const [highlight, setHighlight] = useState(0)
+  /** 旧版高级生成表单 / Companion 任务中心：收进音频引擎菜单，不再占用顶栏 */
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [taskCenterOpen, setTaskCenterOpen] = useState(false)
   /** 面板实际宽度（由 App 外壳决定）；窄于 360px 时收敛次要文案，避免文字被裁切 */
   const [panelWidth, setPanelWidth] = useState(0)
+  /** 面板实际高度：高度不足时进入紧凑模式（混音器打开 / 小屏 / 窄高窗口） */
+  const [panelHeight, setPanelHeight] = useState(0)
   const rootRef = useRef<HTMLElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
+
+  /** 窄面板：隐藏次要文字，只保留关键信息 */
+  const narrow = panelWidth > 0 && panelWidth < 360
+  /** 高度不足：收起快捷动作、压缩输入区，避免内容被混音器/底栏盖住 */
+  const compact = panelHeight > 0 && panelHeight < COMPACT_PANEL_HEIGHT
 
   /* ------------------------------ 后端状态 ------------------------------ */
   const refreshBackend = useCallback(async () => {
@@ -241,25 +283,33 @@ export function ChatPanel() {
     const element = textareaRef.current
     if (!element) return
     element.style.height = 'auto'
-    element.style.height = `${Math.min(MAX_INPUT_HEIGHT, Math.max(40, element.scrollHeight))}px`
-  }, [draft])
+    const min = compact ? COMPACT_INPUT_HEIGHT : MIN_INPUT_HEIGHT
+    const max = compact ? 120 : MAX_INPUT_HEIGHT
+    element.style.minHeight = `${min}px`
+    element.style.maxHeight = `${max}px`
+    const next = Math.min(max, Math.max(min, element.scrollHeight + 2))
+    element.style.height = `${next}px`
+  }, [draft, panelWidth, panelHeight, compact])
 
-  /* ------------------------------ 面板宽度 ------------------------------ */
+  /* ------------------------------ 面板尺寸 ------------------------------ */
   useEffect(() => {
     const element = rootRef.current
     if (!element) return
-    setPanelWidth(Math.round(element.getBoundingClientRect().width))
+    const measure = () => {
+      const rect = element.getBoundingClientRect()
+      setPanelWidth(Math.round(rect.width))
+      setPanelHeight(Math.round(rect.height))
+    }
+    measure()
     if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width ?? element.getBoundingClientRect().width
-      setPanelWidth(Math.round(width))
+      const rect = entries[0]?.contentRect
+      setPanelWidth(Math.round(rect?.width ?? element.getBoundingClientRect().width))
+      setPanelHeight(Math.round(rect?.height ?? element.getBoundingClientRect().height))
     })
     observer.observe(element)
     return () => observer.disconnect()
   }, [chatCollapsed])
-
-  /** 窄面板：隐藏次要文字，只保留关键信息 */
-  const narrow = panelWidth > 0 && panelWidth < 360
 
   /* ------------------------------ 上下文 chip ---------------------------- */
   const contextChips = useMemo<ContextChip[]>(() => {
@@ -352,7 +402,9 @@ export function ChatPanel() {
       if (!body) return
       const finalText = contextPrefix ? `${contextPrefix}\n\n${body}` : body
       if (!guardSend(finalText)) return
-      send(finalText, { intent: resolved?.intent ?? intent, attachments })
+      // 意图：命令/快捷动作显式指定 > 用户措辞里的音频意图（让 Agent 直接按 AUDIO_GUIDE 决策）
+      const detectedIntent = resolved?.intent ?? intent ?? (detectAudioIntent(body) ? 'audio' : undefined)
+      send(finalText, { intent: detectedIntent, attachments })
       setDraft('')
       setMenuSuppressed(true)
       stickToBottomRef.current = true
@@ -379,6 +431,8 @@ export function ChatPanel() {
     dismissInterrupted()
     setErrorBannerDismissed(false)
     setDraft('')
+    const audioJob = useAudioJobStore.getState().job
+    if (!audioJob || audioJob.status !== 'running') useAudioJobStore.getState().clear()
     pushToast('info', '已开始新对话')
     requestAnimationFrame(() => textareaRef.current?.focus())
   }
@@ -450,7 +504,6 @@ export function ChatPanel() {
     }
   }
 
-  const hasHistory = useMemo(() => messages.some((message) => message.role === 'user'), [messages])
   const lastAssistantId = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (messages[index].role === 'assistant') return messages[index].id
@@ -534,45 +587,52 @@ export function ChatPanel() {
   }
 
   return (
-    <aside ref={rootRef} className="flex h-full w-full min-w-0 flex-col border-l border-line bg-surface">
+    <aside ref={rootRef} className="flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-line bg-surface">
       {/* 顶部 */}
       <header className="flex h-[46px] shrink-0 items-center gap-2 border-b border-line px-3">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] border border-accent/35 bg-gradient-to-b from-accent/22 to-accent/5">
             <Sparkles size={12} className="text-accent" />
           </div>
-          <div className="min-w-0 leading-tight">
+          <div className="min-w-0 flex-1 overflow-hidden leading-tight">
             <div className="truncate text-[12.5px] font-semibold tracking-tight">AI 编曲助手</div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-1 text-[9.5px] text-ink-4" title={statusLabel}>
+            <button
+              type="button"
+              className="mt-0.5 flex w-full min-w-0 items-center gap-1 overflow-hidden text-left text-[9.5px] text-ink-4 hover:text-ink-2"
+              title={`${statusLabel}${backendInfo?.providerName ? ` · ${backendInfo.providerName}` : ''}（点击打开设置）`}
+              aria-label={`${statusLabel}，点击打开设置`}
+              onClick={() => setSettingsOpen(true)}
+            >
               {backendState === 'checking' ? (
                 <>
                   <Spinner size={8} />
-                  <span className="truncate">正在连接…</span>
+                  <span className="min-w-0 truncate">正在连接…</span>
                 </>
               ) : backendState === 'offline' ? (
                 <>
                   <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-danger" />
-                  <span className="truncate">后端未连接</span>
+                  <span className="min-w-0 truncate">后端未连接</span>
                 </>
               ) : (
                 <>
                   <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />
-                  <span className="truncate">{BACKEND_LABEL[backendInfo?.backend ?? 'builtin'] ?? '内置 Agent'}</span>
+                  <span className="min-w-0 truncate">{BACKEND_LABEL[backendInfo?.backend ?? 'builtin'] ?? '内置 Agent'}</span>
                   {backendInfo?.model && !narrow ? (
                     <>
                       <span className="shrink-0 text-ink-4/60">·</span>
-                      <span className="mono truncate" title={backendInfo.model}>
+                      <span className="mono min-w-0 truncate" title={backendInfo.model}>
                         {backendInfo.model}
                       </span>
                     </>
                   ) : null}
                 </>
               )}
-            </div>
+            </button>
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
+          <AudioEngineMenu onOpenAdvanced={() => setAdvancedOpen(true)} onOpenTasks={() => setTaskCenterOpen(true)} />
           <button className="btn btn-ghost btn-icon h-7 w-7" title="新对话" aria-label="新对话" onClick={handleNewChat}>
             <MessageSquarePlus size={13} />
           </button>
@@ -763,26 +823,41 @@ export function ChatPanel() {
         )}
       </div>
 
-      {/* 快捷动作 */}
-      <div className="shrink-0 border-t border-line/70 px-3 pb-1 pt-2">
-        <div className="mb-1.5 flex items-center gap-1 text-[10px] text-ink-4">
-          <WandSparkles size={10} className="text-accent/70" />
-          快捷动作
-          <span className="ml-auto truncate pl-2">点击直接发送</span>
-        </div>
-        <div className="flex flex-wrap gap-1.5 pb-0.5">
-          {QUICK_ACTIONS.map((action) => (
-            <button
-              key={action.title}
-              className={cn('chip shrink-0', aiBusy && 'pointer-events-none opacity-45')}
-              title={action.prompt}
-              onClick={() => handleQuickAction(action)}
-            >
-              {action.title}
-            </button>
-          ))}
-        </div>
+      {/* AI 自动执行的音频任务：进度 / 取消 / 失败后的下一步 */}
+      <div className="shrink-0 px-3 pt-2 empty:hidden">
+        <AudioJobCard />
       </div>
+
+      {/* 快捷动作（面板高度不足时隐藏，优先保证消息区与输入框可用） */}
+      {!compact && (
+        <div className="shrink-0 border-t border-line/70 px-3 pb-1 pt-2">
+          <div className="mb-1.5 flex items-center gap-1 text-[10px] text-ink-4">
+            <WandSparkles size={10} className="text-accent/70" />
+            快捷动作
+            <span className="ml-auto truncate pl-2">点击直接发送</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5 pb-0.5">
+            {QUICK_ACTIONS.map((action) => {
+              const audio = action.intent === 'audio'
+              return (
+                <button
+                  key={action.title}
+                  className={cn(
+                    'chip shrink-0',
+                    audio && 'border-accent/40 text-accent-soft hover:border-accent/70 hover:bg-accent/10',
+                    aiBusy && 'pointer-events-none opacity-45',
+                  )}
+                  title={action.prompt}
+                  onClick={() => handleQuickAction(action)}
+                >
+                  {audio ? <AudioWaveform size={10} className="shrink-0" /> : null}
+                  {action.title}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* 输入区 */}
       <div className="shrink-0 px-3 pb-3 pt-2">
@@ -815,7 +890,7 @@ export function ChatPanel() {
           {/* Slash 命令菜单 */}
           {menuOpen && (
             <div
-              className="absolute bottom-full left-0 right-0 z-30 mb-1.5 max-h-[260px] overflow-y-auto rounded-xl border border-line-strong bg-surface py-1 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.95)] animate-fade-up"
+              className="absolute bottom-full left-0 right-0 z-30 mb-1.5 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-surface py-1 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.95)] animate-fade-up"
               role="listbox"
               aria-label="Slash 命令"
             >
@@ -862,29 +937,30 @@ export function ChatPanel() {
             </div>
           )}
 
-          <div className="rounded-xl border border-line-strong bg-bg-soft transition-colors focus-within:border-accent/55 focus-within:shadow-[0_0_0_3px_rgba(240,180,41,0.08)]">
+          <div
+            data-chat-composer
+            className="rounded-xl border border-line-strong bg-bg-soft transition-colors focus-within:border-accent/55 focus-within:shadow-[0_0_0_3px_rgba(240,180,41,0.08)]"
+          >
             <textarea
               ref={textareaRef}
-              rows={1}
+              rows={3}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onKeyDown}
               placeholder={
                 canChat
-                  ? narrow
-                    ? '告诉 AI 你想怎么改…'
-                    : '告诉 AI 你想怎么改…输入 / 使用命令'
+                  ? '描述你想要的编曲或音频…例如「把这首编曲渲染成音频」「生成一首 cinematic 音频并分轨」'
                   : 'AI 暂不可用，先检查设置或启动后端'
               }
-              className="block max-h-[132px] w-full resize-none overflow-y-auto bg-transparent px-3 pb-1 pt-2.5 text-[12.5px] leading-relaxed text-ink outline-none placeholder:text-ink-4"
-              style={{ minHeight: 40 }}
+              className="block w-full resize-none overflow-y-auto bg-transparent px-3 pb-1 pt-3 text-[13px] leading-relaxed text-ink outline-none placeholder:text-ink-4"
+              style={{ minHeight: compact ? COMPACT_INPUT_HEIGHT : MIN_INPUT_HEIGHT, maxHeight: compact ? 120 : MAX_INPUT_HEIGHT }}
               aria-label="给 AI 的指令"
               spellCheck={false}
             />
-            <div className="flex items-center gap-1 px-2 pb-1.5">
+            <div className="flex items-center gap-1 px-2 pb-2">
               <button
-                className="flex h-5 shrink-0 items-center gap-1 rounded px-1 text-[10px] text-ink-4 hover:bg-surface-3 hover:text-ink-2"
-                title="插入 Slash 命令（/）"
+                className="flex h-6 shrink-0 items-center gap-1 rounded px-1.5 text-[10px] text-ink-4 hover:bg-surface-3 hover:text-ink-2"
+                title="插入 Slash 命令（/）：/audio 生成音频、/render MIDI→音频、/stems 分轨"
                 aria-label="插入 Slash 命令"
                 onClick={() => {
                   setDraft('/')
@@ -925,33 +1001,11 @@ export function ChatPanel() {
             </div>
           </div>
         </div>
-        <div className="mt-1.5 flex items-center justify-between gap-2 px-0.5 text-[10px] text-ink-4">
-          <span className="min-w-0 truncate">
-            {aiBusy
-              ? narrow
-                ? 'AI 正在处理…'
-                : 'AI 正在处理…可随时停止'
-              : hasHistory
-                ? narrow
-                  ? 'AI 会改写工程，可撤销'
-                  : 'AI 会直接改写工程，可随时撤销'
-                : narrow
-                  ? '试试描述一段音乐'
-                  : '试试描述一段音乐，或点上方示例'}
-          </span>
-          {backendState === 'online' && backendInfo ? (
-            <button
-              className="flex min-w-0 shrink-0 items-center gap-1 hover:text-ink-2"
-              onClick={() => setSettingsOpen(true)}
-              title={`当前服务商：${backendInfo.providerName}，点击打开设置`}
-              aria-label={`当前服务商：${backendInfo.providerName}，点击打开设置`}
-            >
-              {!narrow && <span className="max-w-[120px] truncate">{backendInfo.providerName}</span>}
-              <Settings2 size={9} className="shrink-0" />
-            </button>
-          ) : null}
-        </div>
       </div>
+
+      {/* 低频入口：旧版高级生成表单 / Companion 任务中心（从音频引擎菜单打开） */}
+      {advancedOpen && <GenerateAudioPanel onClose={() => setAdvancedOpen(false)} />}
+      {taskCenterOpen && <TaskCenterPanel onClose={() => setTaskCenterOpen(false)} />}
     </aside>
   )
 }
@@ -1028,6 +1082,8 @@ function EmptyState({
                 <Sparkles size={12} />
               ) : sample.intent === 'arrange' ? (
                 <ListMusic size={12} />
+              ) : sample.intent === 'audio' ? (
+                <AudioWaveform size={12} />
               ) : (
                 <Globe size={12} />
               )}
@@ -1045,7 +1101,7 @@ function EmptyState({
       </div>
 
       <div className="mt-4 flex flex-wrap justify-center gap-1.5">
-        {['读写工程', '流式回答', '思考过程可见', '工具调用透明'].map((tag) => (
+        {['读写工程', '生成音频', 'MIDI→音频', '分轨生成', '流式回答'].map((tag) => (
           <span key={tag} className="rounded-full border border-line bg-surface-2/60 px-2 py-[2px] text-[9.5px] text-ink-3">
             {tag}
           </span>

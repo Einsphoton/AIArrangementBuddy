@@ -97,6 +97,13 @@ export function SettingsModal() {
   const [probing, setProbing] = useState(false)
   const [probeError, setProbeError] = useState<string | null>(null)
   const [probedAt, setProbedAt] = useState<number | null>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  /** 切换分区 / 重新打开时把弹窗内容滚回顶部，避免停在上一页的中间位置 */
+  const scrollToTop = useCallback(() => {
+    const body = contentRef.current?.closest('[data-modal-body]')
+    if (body instanceof HTMLElement) body.scrollTop = 0
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -139,7 +146,16 @@ export function SettingsModal() {
     setResetArmed(false)
     void load()
     void probeAgents()
-  }, [open, load, probeAgents])
+    scrollToTop()
+  }, [open, load, probeAgents, scrollToTop])
+
+  const selectTab = useCallback(
+    (next: TabId) => {
+      setTab(next)
+      scrollToTop()
+    },
+    [scrollToTop],
+  )
 
   const update = useCallback((recipe: (next: AppSettings) => void) => {
     setDraft((prev) => {
@@ -196,6 +212,25 @@ export function SettingsModal() {
   }, [dirty, saving, doClose])
 
   /**
+   * Esc 关闭（捕获阶段）：App.tsx 的全局 Esc 会直接 setSettingsOpen(false)，
+   * 绕过「未保存修改」确认并丢掉草稿。这里在事件到达 window 之前先接管：
+   * - 有未保存修改 → 只显示放弃确认，不关闭；
+   * - 模型选择等嵌套弹层自己处理 Esc（target 在弹层里）→ 不拦截。
+   */
+  useEffect(() => {
+    if (!open) return
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      const target = event.target instanceof HTMLElement ? event.target : null
+      if (target && (target.closest('[data-model-picker-popup]') || target.closest('[role="listbox"]'))) return
+      event.stopPropagation()
+      requestClose()
+    }
+    document.addEventListener('keydown', handler, true)
+    return () => document.removeEventListener('keydown', handler, true)
+  }, [open, requestClose])
+
+  /**
    * App.tsx 的全局 Esc 会直接 `setSettingsOpen(false)`（绕过 Modal 的 onClose）。
    * 这里在「有未保存修改却被关掉」时把确认流程补回来：重新打开并显示放弃确认。
    */
@@ -221,8 +256,7 @@ export function SettingsModal() {
     void load()
   }
 
-  const handleSave = async () => {
-    if (!draft || !loaded) return
+  const handleSave = async () => {    if (!draft || !loaded) return
     setSaving(true)
     setSaveError(null)
     try {
@@ -323,9 +357,12 @@ export function SettingsModal() {
           >
             {resetArmed ? '确认恢复默认？' : '恢复默认'}
           </Button>
-          <Button size="sm" onClick={confirmClose ? () => setConfirmClose(false) : handleClose} disabled={saving}>
-            {confirmClose ? '继续编辑' : '取消'}
-          </Button>
+          {/* 放弃确认条里已经有「继续编辑 / 放弃修改」，这里不再重复同一组操作 */}
+          {!confirmClose && (
+            <Button size="sm" onClick={handleClose} disabled={saving}>
+              取消
+            </Button>
+          )}
           <Button
             variant="accent"
             size="sm"
@@ -341,14 +378,15 @@ export function SettingsModal() {
     >
       <div className="flex gap-4">
         {/* 左侧 tab */}
-        <aside className="sticky top-0 flex w-[148px] shrink-0 flex-col gap-0.5 self-start">
+        <aside className="sticky top-0 flex w-[148px] shrink-0 flex-col gap-0.5 self-start" aria-label="设置分区">
           {TABS.map((item) => {
             const Icon = item.icon
             const active = tab === item.id
             return (
               <button
                 key={item.id}
-                onClick={() => setTab(item.id)}
+                type="button"
+                onClick={() => selectTab(item.id)}
                 className={cn(
                   'flex items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors',
                   active
@@ -368,14 +406,15 @@ export function SettingsModal() {
                       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-label="有未保存的修改" />
                     )}
                   </span>
-                  <span className="block truncate text-[9.5px] text-ink-4">{item.description}</span>
+                  <span className="block truncate text-[10px] text-ink-4">{item.description}</span>
                 </span>
               </button>
             )
           })}
-          <div className="mt-2 flex items-center gap-1 px-2 text-[9.5px] text-ink-4">
-            <RefreshCw size={9} />
+          <div className="mt-2 flex items-center gap-1 px-2 text-[10.5px] text-ink-4">
+            <RefreshCw size={10} />
             <button
+              type="button"
               className={cn('hover:text-ink-2', reloadArmed && 'text-accent-soft')}
               onClick={requestReload}
               disabled={loading}
@@ -387,7 +426,7 @@ export function SettingsModal() {
         </aside>
 
         {/* 右侧内容 */}
-        <div className="min-h-[480px] min-w-0 flex-1 pb-8">
+        <div ref={contentRef} className="min-h-[480px] min-w-0 flex-1 pb-8">
           {/* 分区顶部：一句话说明 + 脏标记 */}
           <div className="mb-3 flex items-start gap-2 border-b border-line/70 pb-2.5">
             <span className="mt-[1px] shrink-0 text-accent/80">
@@ -402,7 +441,7 @@ export function SettingsModal() {
                   </span>
                 )}
               </div>
-              <p className="mt-0.5 text-[10.5px] leading-relaxed text-ink-3">{currentTab.summary}</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-ink-3">{currentTab.summary}</p>
             </div>
           </div>
 

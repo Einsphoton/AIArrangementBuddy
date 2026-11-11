@@ -33,6 +33,8 @@ screenshots/*.tmp.png
 .verify-ui-p4/
 .verify-ui-p5/
 .verify-ui-p6/
+.verify-ui-p7/
+.verify-ui-p8/
 
 # 布局审计 / 代码审查产物（本地生成，不入库）
 .audit/
@@ -42,10 +44,11 @@ screenshots/*.tmp.png
 .runtime/
 
 # 本地音乐生成模型实验区：venv / 权重 / 缓存 / 生成的音频（数十 GB，绝不入库）
-# 仅在本地做模型验证时使用，产品代码不依赖此目录
+# 仅在本机做模型验证时使用，产品代码不依赖此目录
 music-gen/
 
-# 模型运行期缓存（ACE-Step / HuggingFace 等落盘到仓库根时会出现在这里）
+# 模型运行期缓存（ACE-Step / HuggingFace 等落盘到仓库根时会出现这里）
 .cache/
-.verify-ui-p7/
-.verify-ui-p8/
+
+# AI 音频意图验收产物（本地生成）
+.verify-audio/

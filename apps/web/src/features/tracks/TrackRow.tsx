@@ -257,14 +257,15 @@ export function TrackRow({
         )}
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col justify-center gap-[3px] overflow-hidden px-1.5">
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1 overflow-hidden px-1.5">
         {/* 第一行：序号 / 名称 / R M S / 折叠 */}
         <div className="flex min-w-0 items-center gap-1">
           {/* 折叠态只保留「序号 + 名称 + 展开箭头」，避免 26px 行高下文字被裁 */}
-          <span className="mono w-3 shrink-0 text-[9px] text-ink-4">{index + 1}</span>
+          <span className="mono w-3.5 shrink-0 text-[9.5px] text-ink-4">{index + 1}</span>
           {renaming ? (
             <input
               autoFocus
+              onFocus={(event) => event.currentTarget.select()}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onBlur={commitRename}
@@ -277,7 +278,7 @@ export function TrackRow({
               }}
               onClick={(event) => event.stopPropagation()}
               aria-label="轨道名称"
-              className="h-[17px] min-w-0 flex-1 rounded border border-accent/60 bg-bg px-1 text-[11.5px] outline-none"
+              className="h-[22px] min-w-0 flex-1 rounded-[5px] border border-accent/60 bg-bg px-1.5 text-[12px] outline-none"
             />
           ) : (
             <button
@@ -291,11 +292,11 @@ export function TrackRow({
               }}
               title={`${track.name}（双击重命名，右键更多操作）`}
               className={cn(
-                'min-w-0 flex-1 truncate text-left text-[12px] font-medium leading-tight transition-colors',
+                'min-w-0 flex-1 truncate text-left text-[12.5px] font-medium leading-tight transition-colors',
                 track.mute ? 'text-ink-4 line-through' : selected ? 'text-ink' : 'text-ink-2 group-hover:text-ink',
               )}
             >
-              <span className="block min-w-0 truncate text-[12px]">{track.name}</span>
+              <span className="block min-w-0 truncate text-[12.5px]">{track.name}</span>
             </button>
           )}
           <div className={cn('flex shrink-0 items-center gap-[3px]', collapsed && 'hidden')}>
@@ -309,13 +310,13 @@ export function TrackRow({
               aria-pressed={armed}
               data-arm={armed ? 'true' : 'false'}
               className={cn(
-                'flex h-[16px] w-[16px] items-center justify-center rounded-[4px] border transition-colors',
+                'flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border transition-colors',
                 armed
                   ? 'animate-[pulse-dot_1.4s_ease-in-out_infinite] border-danger/70 bg-danger/30 text-danger'
                   : 'border-line-strong bg-surface-2 text-ink-4 hover:text-danger',
               )}
             >
-              <span className="text-[9px] font-bold leading-none">R</span>
+              <span className="text-[9.5px] font-bold leading-none">R</span>
             </button>
             <button
               onClick={(event) => {
@@ -327,13 +328,13 @@ export function TrackRow({
               aria-label={track.mute ? `取消静音 ${track.name}` : `静音 ${track.name}`}
               aria-pressed={track.mute}
               className={cn(
-                'flex h-[16px] w-[16px] items-center justify-center rounded-[4px] border text-[9px] font-bold leading-none transition-colors',
+                'flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border text-[9.5px] font-bold leading-none transition-colors',
                 track.mute
                   ? 'border-danger/60 bg-danger/25 text-danger'
                   : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
               )}
             >
-              <span className="text-[9px] font-bold leading-none">M</span>
+              <span className="text-[9.5px] font-bold leading-none">M</span>
             </button>
             <button
               onClick={(event) => {
@@ -345,13 +346,13 @@ export function TrackRow({
               aria-label={track.solo ? `取消独奏 ${track.name}` : `独奏 ${track.name}`}
               aria-pressed={track.solo}
               className={cn(
-                'flex h-[16px] w-[16px] items-center justify-center rounded-[4px] border text-[9px] font-bold leading-none transition-colors',
+                'flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border text-[9.5px] font-bold leading-none transition-colors',
                 track.solo
                   ? 'border-accent/60 bg-accent/25 text-accent'
                   : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
               )}
             >
-              <span className="text-[9px] font-bold leading-none">S</span>
+              <span className="text-[9.5px] font-bold leading-none">S</span>
             </button>
             <button
               onClick={(event) => {
@@ -361,11 +362,11 @@ export function TrackRow({
               title="试听音色"
               aria-label="试听音色"
               className={cn(
-                'hidden h-[16px] w-[16px] items-center justify-center rounded-[4px] border border-transparent text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-accent sm:flex',
+                'hidden h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-transparent text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-accent sm:flex',
                 previewing && 'animate-pulse text-accent',
               )}
             >
-              <Play size={9} />
+              <Play size={10} />
             </button>
             <button
               onClick={(event) => {
@@ -375,9 +376,9 @@ export function TrackRow({
               title="创作信息：风格 / 调式 / BPM / 段落 / 乐器 / 智能片段参数"
               aria-label={`查看 ${track.name} 的创作信息`}
               data-creative-info-trigger
-              className="flex h-[16px] w-[16px] items-center justify-center rounded-[4px] border border-transparent text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-accent"
+              className="flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-transparent text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-accent"
             >
-              <Info size={9} />
+              <Info size={10} />
             </button>
           </div>
           <button
@@ -385,9 +386,9 @@ export function TrackRow({
               title={collapsed ? '展开轨道' : '折叠轨道'}
               aria-label={collapsed ? `展开轨道 ${track.name}` : `折叠轨道 ${track.name}`}
               aria-expanded={!collapsed}
-              className="flex h-[16px] w-[14px] shrink-0 items-center justify-center rounded-[4px] text-ink-4 transition-colors hover:bg-surface-3 hover:text-ink-2"
+              className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] text-ink-4 transition-colors hover:bg-surface-3 hover:text-ink-2"
             >
-            {collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+            {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
           </button>
         </div>
 
@@ -397,11 +398,11 @@ export function TrackRow({
             {track.kind === 'audio' ? (
               /* 音频轨没有乐器/情绪：显示片段数与来源提示，避免误显示「三角钢琴」 */
               <span
-                className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden rounded px-0.5 text-[10.5px] text-ink-3"
+                className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden rounded px-0.5 text-[11px] text-ink-3"
                 title="音频轨道：片段来自「文件 → 导入音频…」或「AI 生成音频」（音量 / 声像 / 静音照常生效）"
               >
-                <Waves size={10} className="shrink-0 text-cyan/80" />
-                <span className="truncate text-[10.5px]">音频 · {track.audioClips?.length ?? 0} 个片段</span>
+                <Waves size={11} className="shrink-0 text-cyan/80" />
+                <span className="truncate text-[11px]">音频 · {track.audioClips?.length ?? 0} 个片段</span>
               </span>
             ) : (
               <button
@@ -410,10 +411,10 @@ export function TrackRow({
                   onOpenInstrument(event.currentTarget.getBoundingClientRect())
                 }}
                 title={`更换乐器（当前：${instrument.name}）`}
-                className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden rounded px-0.5 text-[10.5px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink-2"
+                className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden rounded px-0.5 text-[11px] text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink-2"
               >
-                <span className="shrink-0 text-[10px]">{instrument.icon}</span>
-                <span className="truncate text-[10.5px]">{instrument.name}</span>
+                <span className="shrink-0 text-[11px]">{instrument.icon}</span>
+                <span className="truncate text-[11px]">{instrument.name}</span>
               </button>
             )}
 
@@ -424,10 +425,10 @@ export function TrackRow({
                   onOpenEmotion(event.currentTarget.getBoundingClientRect())
                 }}
                 title={`情绪 / 演奏法（当前：${emotion.name} · ${emotion.hint}）`}
-                className="flex shrink-0 items-center gap-1 rounded-full border border-line-strong/80 bg-surface-2 px-1 py-[1px] text-[9.5px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink"
+                className="flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-line-strong/80 bg-surface-2 px-1.5 text-[10px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink"
               >
-                <span className="h-[5px] w-[5px] shrink-0 rounded-full" style={{ background: emotion.color }} />
-                <span className="max-w-[52px] shrink-0 whitespace-nowrap text-[9.5px]">{emotion.name}</span>
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: emotion.color }} />
+                <span className="max-w-[58px] shrink-0 whitespace-nowrap text-[10px]">{emotion.name}</span>
               </button>
             )}
 
@@ -436,7 +437,7 @@ export function TrackRow({
                 value={track.volume}
                 min={0}
                 max={1.5}
-                width={28}
+                width={40}
                 title="音量"
                 onGestureStart={beginEdit}
                 onChange={(value) => updateTrack(track.id, { volume: clamp(value, 0, 1.5) }, { history: false })}
@@ -445,7 +446,7 @@ export function TrackRow({
               />
               <MiniKnob
                 value={track.pan}
-                size={14}
+                size={17}
                 title="声像"
                 accent="#3ddbd9"
                 onGestureStart={beginEdit}
@@ -461,7 +462,7 @@ export function TrackRow({
         {/* 第三行：创作信息（只读摘要；完整信息点第一行的 i 按钮） */}
         {showCreativeLine && (
           <div
-            className="flex min-w-0 items-center gap-1 overflow-hidden text-[9px] leading-none text-ink-4"
+            className="flex min-w-0 items-center gap-1 overflow-hidden text-[9.5px] leading-none text-ink-4"
             title={creative.detailTitle}
             data-creative-line
           >

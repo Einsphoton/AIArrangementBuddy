@@ -286,6 +286,9 @@ export async function runBuiltinAgent(req: AgentRunRequest): Promise<void> {
         ok: toolResult.ok,
         result: toolResultForUi(toolResult),
         error: toolResult.ok ? undefined : toolResult.message,
+        // 音频类工具把执行计划放在 data.audioPlan：前端据此提交生成任务并落轨。
+        // 其它工具的 data 里可能只有 uiAction，前端会忽略不认识的字段。
+        data: toolResult.ok ? toolResult.data : undefined,
       })
       // ui_action：工具本身不改工程，只请求前端执行界面动作（播放/跳转/切视图…）。
       // 作为独立 SSE `ui` 事件下发，不占用也不影响正常 tool_end / done 协议。

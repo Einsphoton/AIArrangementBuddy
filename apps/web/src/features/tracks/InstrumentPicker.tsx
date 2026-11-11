@@ -100,22 +100,22 @@ export function InstrumentPicker({
       aria-label="选择乐器"
     >
       <header className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
-        <div className="text-[12px] font-semibold">选择乐器</div>
-        <button className="btn btn-ghost h-6 w-6 p-0" onClick={onClose} aria-label="关闭">
-          <X size={12} />
+        <div className="text-[12.5px] font-semibold">选择乐器</div>
+        <button className="btn btn-ghost h-7 w-7 p-0" onClick={onClose} aria-label="关闭">
+          <X size={13} />
         </button>
       </header>
 
-      <div className="border-b border-line px-2.5 py-2">
-        <div className="flex h-7 items-center gap-1.5 rounded-lg border border-line-strong bg-bg-soft px-2">
-          <Search size={12} className="shrink-0 text-ink-3" />
+      <div className="border-b border-line px-2.5 py-2.5">
+        <div className="flex h-8 items-center gap-2 rounded-lg border border-line-strong bg-bg-soft px-2.5 transition-colors focus-within:border-accent/50">
+          <Search size={13} className="shrink-0 text-ink-3" />
           <input
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索乐器（钢琴 / 弦乐 / 鼓…）"
             aria-label="搜索乐器"
-            className="w-full bg-transparent text-[12px] outline-none placeholder:text-ink-4"
+            className="h-full w-full bg-transparent text-[12.5px] outline-none placeholder:text-ink-4"
           />
         </div>
       </div>
@@ -139,18 +139,18 @@ export function InstrumentPicker({
                   key={instrument.id}
                   onClick={() => onPick(instrument.id)}
                   className={cn(
-                    'group flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors',
+                    'group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors',
                     active ? 'bg-accent/12' : 'hover:bg-surface-3',
                   )}
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-line bg-surface-2 text-[14px]">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-line bg-surface-2 text-[15px]">
                     {instrument.icon}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className={cn('block truncate text-[12px] font-medium', active ? 'text-accent-soft' : 'text-ink')}>
+                    <span className={cn('block truncate text-[12.5px] font-medium', active ? 'text-accent-soft' : 'text-ink')}>
                       {instrument.name}
                     </span>
-                    <span className="block truncate text-[10px] text-ink-3">
+                    <span className="block truncate text-[10.5px] text-ink-3">
                       {instrument.category} · {emotions} 种情绪{instrument.isDrumKit ? ' · 鼓组' : ''}
                     </span>
                   </span>
@@ -162,7 +162,7 @@ export function InstrumentPicker({
         ))}
       </div>
 
-      <footer className="flex items-center justify-between border-t border-line px-3 py-1.5 text-[10px] text-ink-4">
+      <footer className="flex items-center justify-between border-t border-line px-3 py-2 text-[10.5px] text-ink-4">
         <span>共 {total} 种乐器</span>
         <span>内置合成器 · 可按情绪切换演奏法</span>
       </footer>
@@ -200,13 +200,13 @@ export function EmotionPicker({
     >
       <header className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="min-w-0">
-          <div className="text-[12px] font-semibold">情绪 / 演奏法</div>
-          <div className="truncate text-[10px] text-ink-3">
+          <div className="text-[12.5px] font-semibold">情绪 / 演奏法</div>
+          <div className="truncate text-[10.5px] text-ink-3">
             {instrument.icon} {instrument.name}
           </div>
         </div>
-        <button className="btn btn-ghost h-6 w-6 p-0" onClick={onClose} aria-label="关闭">
-          <X size={12} />
+        <button className="btn btn-ghost h-7 w-7 p-0" onClick={onClose} aria-label="关闭">
+          <X size={13} />
         </button>
       </header>
       <div className="px-1.5 py-1.5">
@@ -217,7 +217,7 @@ export function EmotionPicker({
               key={emotion.id}
               onClick={() => onPick(emotion.id)}
               className={cn(
-                'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors',
+                'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors',
                 active ? 'bg-accent/12' : 'hover:bg-surface-3',
               )}
               title={emotion.hint}
@@ -227,10 +227,10 @@ export function EmotionPicker({
                 style={{ background: emotion.color }}
               />
               <span className="min-w-0 flex-1">
-                <span className={cn('block text-[12px] font-medium', active ? 'text-accent-soft' : 'text-ink')}>
+                <span className={cn('block text-[12.5px] font-medium', active ? 'text-accent-soft' : 'text-ink')}>
                   {emotion.name}
                 </span>
-                <span className="block truncate text-[10px] text-ink-3">{emotion.hint}</span>
+                <span className="block truncate text-[10.5px] text-ink-3">{emotion.hint}</span>
               </span>
               {active && <Check size={13} className="shrink-0 text-accent" />}
             </button>

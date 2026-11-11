@@ -38,8 +38,8 @@ export function AudioClipView({
   const color = trackColor(track.color)
 
   const width = Math.max(10, clip.lengthBeats * pxPerBeat)
-  const clipHeight = Math.max(18, rowHeight - 8)
-  const waveHeight = Math.max(10, clipHeight - 17)
+  const clipHeight = Math.max(20, rowHeight - 8)
+  const waveHeight = Math.max(10, clipHeight - 18)
 
   /* 波形点串按 (asset, 区间, 尺寸) 缓存，缩放 / 拖动只重算一次 */
   const points = useMemo(
@@ -93,22 +93,22 @@ export function AudioClipView({
       {/* 标题条：名称 + 时长 */}
       <div
         className="flex shrink-0 items-center gap-1 border-b px-1.5"
-        style={{ height: 17, background: withAlpha(color, 0.26), borderColor: withAlpha(color, 0.35) }}
+        style={{ height: 18, background: withAlpha(color, 0.26), borderColor: withAlpha(color, 0.35) }}
       >
-        <Waves size={9} className="shrink-0" style={{ color }} />
-        <span className="min-w-0 flex-1 truncate text-[10px] font-medium leading-none text-ink/95">{clip.name}</span>
-        {clip.muted && <EyeOff size={9} className="shrink-0 text-ink-2" />}
+        <Waves size={10} className="shrink-0" style={{ color }} />
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-none text-ink/95">{clip.name}</span>
+        {clip.muted && <EyeOff size={10} className="shrink-0 text-ink-2" />}
         {takeCount > 0 && width > 84 && (
           <span
-            className="mono flex shrink-0 items-center gap-[1px] text-[8.5px] leading-none text-ink-3"
+            className="mono flex shrink-0 items-center gap-[1px] text-[9.5px] leading-none text-ink-3"
             title={`${takeCount} 个版本（右键「切换版本」）`}
           >
-            <Layers size={8} />
+            <Layers size={9} />
             {activeTakeIndex >= 0 ? `${activeTakeIndex + 1}/${takeCount}` : takeCount}
           </span>
         )}
         {width > 74 && (
-          <span className="mono shrink-0 text-[8.5px] leading-none text-ink-3" title="音频时长">
+          <span className="mono shrink-0 text-[9.5px] leading-none text-ink-3" title="音频时长">
             {formatAudioDuration(duration)}
           </span>
         )}
@@ -138,7 +138,7 @@ export function AudioClipView({
       </div>
 
       {selected && width > 58 && (
-        <span className="pointer-events-none absolute right-1 top-[2px] hidden h-[12px] items-center rounded-[3px] bg-accent/25 px-1 text-[8px] font-semibold leading-none text-accent-soft group-hover/audio:flex">
+        <span className="pointer-events-none absolute right-1 top-[2px] hidden h-[13px] items-center rounded-[3px] bg-accent/25 px-1 text-[9px] font-semibold leading-none text-accent-soft group-hover/audio:flex">
           选中
         </span>
       )}

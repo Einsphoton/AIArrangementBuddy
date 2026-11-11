@@ -86,7 +86,13 @@ export function ModelPicker({
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [anchor, setAnchor] = useState<{ left: number; width: number; top?: number; bottom?: number } | null>(null)
+  const [anchor, setAnchor] = useState<{
+    left: number
+    width: number
+    top?: number
+    bottom?: number
+    maxHeight: number
+  } | null>(null)
   const [highlight, setHighlight] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -115,19 +121,24 @@ export function ModelPicker({
   const rows = models.length ? filtered : suggestions
   const exactExists = models.some((model) => model.id.toLowerCase() === query.trim().toLowerCase())
 
-  /* 定位：跟随触发按钮，空间不足时向上展开 */
+  /* 定位：跟随触发按钮；空间不足时向上展开，并按可用空间限制高度。
+     触发按钮可能被滚到弹窗可视区外（设置页很长），先滚进视野再测量。 */
   useEffect(() => {
     if (!open) return
+    rootRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
     const place = () => {
       const rect = rootRef.current?.getBoundingClientRect()
       if (!rect) return
-      const height = 344
-      const spaceBelow = window.innerHeight - rect.bottom
-      const spaceAbove = rect.top
-      const openUp = spaceBelow < height && spaceAbove > spaceBelow
+      const margin = 8
+      const preferredHeight = 344
+      const spaceBelow = window.innerHeight - rect.bottom - margin
+      const spaceAbove = rect.top - margin
+      const openUp = spaceBelow < preferredHeight && spaceAbove > spaceBelow
+      const maxHeight = Math.max(180, Math.min(preferredHeight, openUp ? spaceAbove : spaceBelow))
       setAnchor({
-        left: Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - rect.width - 8)),
+        left: Math.min(Math.max(margin, rect.left), Math.max(margin, window.innerWidth - rect.width - margin)),
         width: rect.width,
+        maxHeight,
         ...(openUp ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 }),
       })
     }
@@ -192,7 +203,9 @@ export function ModelPicker({
       if (target) select(target)
       else if (query.trim()) select(query)
     } else if (event.key === 'Escape') {
+      /* 只关闭这个下拉：阻止事件继续冒泡去关闭整个设置对话框 */
       event.preventDefault()
+      event.stopPropagation()
       setOpen(false)
     }
   }
@@ -203,18 +216,18 @@ export function ModelPicker({
     return (
       <span className="ml-auto flex shrink-0 items-center gap-1">
         {info.free && (
-          <span className="rounded border border-success/40 bg-success/10 px-1 text-[9px] font-medium text-success">免费</span>
+          <span className="rounded border border-success/40 bg-success/10 px-1 text-[9.5px] font-medium text-success">免费</span>
         )}
         {info.tools && (
           <span
-            className="flex items-center gap-0.5 rounded border border-violet/40 bg-violet/10 px-1 text-[9px] font-medium text-violet"
+            className="flex items-center gap-0.5 rounded border border-violet/40 bg-violet/10 px-1 text-[9.5px] font-medium text-violet"
             title="支持工具调用（AI 编曲需要）"
           >
             <Wrench size={8} />
             工具
           </span>
         )}
-        {ctx && <span className="hidden text-[9px] text-ink-4 sm:inline">{ctx}</span>}
+        {ctx && <span className="hidden text-[9.5px] text-ink-4 sm:inline">{ctx}</span>}
       </span>
     )
   }
@@ -235,7 +248,7 @@ export function ModelPicker({
           disabled && 'cursor-not-allowed opacity-50',
         )}
       >
-        <span className={cn('min-w-0 flex-1 truncate font-mono text-[11.5px]', !value && 'text-ink-4')}>
+        <span className={cn('min-w-0 flex-1 truncate font-mono text-[12px]', !value && 'text-ink-4')}>
           {value || placeholder}
         </span>
         {current && <span className="hidden items-center gap-1 sm:flex">{badge(current)}</span>}
@@ -251,16 +264,25 @@ export function ModelPicker({
         createPortal(
           <div
             ref={popupRef}
-            style={{ position: 'fixed', left: anchor.left, width: anchor.width, top: anchor.top, bottom: anchor.bottom }}
-            className="z-[80] overflow-hidden rounded-xl border border-line-strong bg-surface-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
+            data-model-picker-popup
+            style={{
+              position: 'fixed',
+              left: anchor.left,
+              width: anchor.width,
+              top: anchor.top,
+              bottom: anchor.bottom,
+              maxHeight: anchor.maxHeight,
+            }}
+            className="z-[80] flex flex-col overflow-hidden rounded-xl border border-line-strong bg-surface-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)]"
           >
           {/* 搜索框 */}
-          <div className="flex items-center gap-2 border-b border-line/80 px-2.5 py-1.5">
+          <div className="flex shrink-0 items-center gap-2 border-b border-line/80 px-2.5 py-1.5">
             <Search size={12} className="shrink-0 text-ink-4" />
             <input
               ref={inputRef}
               className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-ink-4"
               placeholder={models.length ? `在 ${models.length} 个模型中搜索…` : '搜索模型（可手动输入）'}
+              aria-label="搜索模型"
               value={query}
               onChange={(event) => {
                 setQuery(event.target.value)
@@ -297,7 +319,13 @@ export function ModelPicker({
           </div>
 
           {/* 列表 */}
-          <div ref={listRef} className="max-h-[268px] overflow-y-auto py-1" role="listbox">
+          <div
+            ref={listRef}
+            className="min-h-0 flex-1 overflow-y-auto py-1"
+            role="listbox"
+            aria-label="模型列表"
+            style={{ maxHeight: Math.max(120, anchor.maxHeight - 92) }}
+          >
             {loading && rows.length === 0 && (
               <div className="flex items-center gap-2 px-3 py-4 text-[11.5px] text-ink-3">
                 <LoaderCircle size={12} className="animate-spin text-accent" />
@@ -336,11 +364,11 @@ export function ModelPicker({
                     <Check size={11} />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate font-mono text-[11.5px] text-ink">
+                    <span className="block truncate font-mono text-[12px] text-ink">
                       <Highlight text={info.id} query={query} />
                     </span>
                     {(info.name || info.description) && (
-                      <span className="mt-0.5 block truncate text-[10px] text-ink-4">
+                      <span className="mt-0.5 block truncate text-[10.5px] text-ink-4">
                         {info.name && info.name !== info.id ? `${info.name} · ` : ''}
                         {info.description ?? ''}
                       </span>
@@ -387,7 +415,7 @@ export function ModelPicker({
           </div>
 
           {/* 底部状态 */}
-          <div className="flex items-center justify-between gap-2 border-t border-line/80 bg-bg-soft/60 px-2.5 py-1.5 text-[10px] text-ink-4">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-t border-line/80 bg-bg-soft/60 px-2.5 py-1.5 text-[10.5px] text-ink-4">
             <span>
               {models.length ? `共 ${models.length} 个模型${query.trim() ? ` · 匹配 ${rows.length}` : ''}` : '未读取模型列表'}
             </span>

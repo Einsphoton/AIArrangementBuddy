@@ -91,7 +91,7 @@ export function MiniHSlider({
       aria-valuenow={Number(value.toFixed(2))}
       title={formatValue ? `${title}：${formatValue(value)}` : title}
       className={cn(
-        'group/sl relative flex h-[14px] cursor-ew-resize items-center rounded-full border border-line-strong/80 bg-bg-soft px-[2px] transition-colors hover:border-[#3b4557]',
+        'group/sl relative flex h-4 cursor-ew-resize items-center rounded-full border border-line-strong/80 bg-bg-soft px-[2px] transition-colors hover:border-[#3b4557]',
         className,
       )}
       style={{ width }}
@@ -389,22 +389,38 @@ export function VerticalFader({
 /* dB 标尺                                                             */
 /* ------------------------------------------------------------------ */
 
-/** 竖向 dB 标尺：与 db 刻度推子严格对齐（0 / -6 / -12 / -24 / -48） */
+/** 竖向 dB 标尺：与 db 刻度推子严格对齐（0 / -6 / -12 / -24 / -36 / -48）。
+ *
+ *  混音器高度可拖拽，推子短到 48px 时标签会互相压住（实测 0 与 -6 重叠 4px）。
+ *  这里按可用高度做「刻度抽稀」：相邻标签垂直间距 < 11px 时就跳过，保证 8.5–9px 的字始终读得清。 */
 export function DbRuler({ height = 112, max = 1.5, className }: { height?: number; max?: number; className?: string }) {
-  const ticks = [0, -6, -12, -24, -48]
+  const candidates = [0, -6, -12, -24, -36, -48]
+  const kept: number[] = []
+  let lastRatio = Number.POSITIVE_INFINITY
+  for (const db of candidates) {
+    const ratio = dbToFaderRatio(db, max)
+    if (kept.length > 0) {
+      // 与上一个标签的垂直间距不足 11px：跳过，避免文字互相压住
+      if ((lastRatio - ratio) * height < 11) continue
+      // 太靠近底部「dB」文字：跳过（短推子时 -48 会压住 dB）
+      if (ratio * height - 4 < 14) continue
+    }
+    kept.push(db)
+    lastRatio = ratio
+  }
   return (
-    <div className={cn('relative w-[23px] shrink-0 select-none', className)} style={{ height }} aria-hidden="true">
-      {ticks.map((db) => (
+    <div className={cn('relative w-[24px] shrink-0 select-none', className)} style={{ height }} aria-hidden="true">
+      {kept.map((db) => (
         <div
           key={db}
           className="absolute inset-x-0 flex items-center gap-[3px]"
           style={{ bottom: `calc(${(dbToFaderRatio(db, max) * 100).toFixed(2)}% - 4px)` }}
         >
-          <span className="mono w-[13px] text-right text-[8.5px] leading-none tabular-nums text-ink-4">{db}</span>
+          <span className="mono w-[14px] text-right text-[9.5px] leading-none tabular-nums text-ink-4">{db}</span>
           <span className="h-px flex-1 bg-line-strong/60" />
         </div>
       ))}
-      <span className="mono absolute bottom-0 left-0 text-[8px] leading-none text-ink-4/80">dB</span>
+      <span className="mono absolute bottom-0 left-0 text-[9.5px] leading-none text-ink-4/80">dB</span>
     </div>
   )
 }

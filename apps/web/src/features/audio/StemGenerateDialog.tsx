@@ -382,7 +382,7 @@ export function StemGenerateDialog({
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {/* 产品红线说明 */}
           <div className="mb-3 rounded-lg border border-accent/30 bg-accent/[0.06] px-3 py-2.5">
-            <div className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-ink-2">
+            <div className="flex items-start gap-1.5 text-[11px] leading-relaxed text-ink-2">
               <TriangleAlert size={12} className="mt-[2px] shrink-0 text-accent" />
               <p>
                 stem 是按原曲上下文<strong className="font-semibold text-ink">独立生成</strong>的，
@@ -394,8 +394,8 @@ export function StemGenerateDialog({
 
           {/* 乐器多选 */}
           <div className="mb-1 flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-medium text-ink-2">选择乐器（可多选）</span>
-            <span className="text-[9.5px] text-ink-4">每个 arm 会单独生成一个任务 / 一条轨道</span>
+            <span className="text-[11.5px] font-medium text-ink-2">选择乐器（可多选）</span>
+            <span className="text-[10px] text-ink-4">每个 arm 会单独生成一个任务 / 一条轨道</span>
           </div>
           <div className="mb-3 flex flex-wrap gap-1.5">
             {STEM_ARMS.map((arm) => {
@@ -442,7 +442,7 @@ export function StemGenerateDialog({
                         className={cn('shrink-0 transition-transform', options.expanded ? '' : '-rotate-90')}
                       />
                       <span className="font-medium">{STEM_ARM_LABEL[arm]}</span>
-                      <span className="min-w-0 truncate text-[9.5px] text-ink-4">
+                      <span className="min-w-0 truncate text-[10px] text-ink-4">
                         {options.caption.trim() || '描述留空时使用 Companion 内置映射'}
                         {options.seed.trim() ? ` · seed ${options.seed.trim()}` : ''}
                       </span>
@@ -450,7 +450,7 @@ export function StemGenerateDialog({
                     {options.expanded && (
                       <div className="grid grid-cols-1 gap-2 border-t border-line/60 px-2.5 py-2 sm:grid-cols-[minmax(0,1fr)_120px]">
                         <label className="block">
-                          <span className="mb-1 block text-[9.5px] text-ink-3">单独描述（可选）</span>
+                          <span className="mb-1 block text-[10.5px] text-ink-3">单独描述（可选）</span>
                           <input
                             value={options.caption}
                             onChange={(event) => patchArm(arm, { caption: event.target.value })}
@@ -460,7 +460,7 @@ export function StemGenerateDialog({
                           />
                         </label>
                         <label className="block">
-                          <span className="mb-1 block text-[9.5px] text-ink-3">seed（可选）</span>
+                          <span className="mb-1 block text-[10.5px] text-ink-3">seed（可选）</span>
                           <input
                             value={options.seed}
                             onChange={(event) => patchArm(arm, { seed: event.target.value.replace(/[^\d]/g, '') })}
@@ -480,7 +480,7 @@ export function StemGenerateDialog({
 
           {/* 优先级 */}
           <label className="mb-3 block max-w-[200px]">
-            <span className="mb-1 block text-[10.5px] text-ink-3">任务优先级</span>
+            <span className="mb-1 block text-[11px] text-ink-3">任务优先级</span>
             <select
               value={String(priority)}
               onChange={(event) => setPriority(Number(event.target.value) as CompanionPriority)}
@@ -498,21 +498,21 @@ export function StemGenerateDialog({
           {/* 任务进度 */}
           {tasks.length > 0 && (
             <div className="rounded-lg border border-line bg-bg-soft px-3 py-2.5">
-              <div className="mb-1 flex items-center gap-2 text-[10.5px] text-ink-3">
+              <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-3">
                 <Waves size={11} />
                 分轨任务（{tasks.length} 个）
-                <span className="text-[9.5px] text-ink-4">关闭对话框会停止轮询，任务在服务端继续</span>
+                <span className="text-[10px] text-ink-4">关闭对话框会停止轮询，任务在服务端继续</span>
               </div>
               {tasks.map((entry) => {
                 const progress = entry.status === 'done' ? 1 : Math.min(1, Math.max(0, entry.progress))
                 const active = entry.status === 'queued' || entry.status === 'running'
                 return (
                   <div key={`${entry.arm}-${entry.taskId}`} className="mt-1.5">
-                    <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                    <div className="flex flex-wrap items-center gap-1.5 text-[10.5px]">
                       <span className="w-[52px] shrink-0 text-ink-2">{STEM_ARM_LABEL[entry.arm]}</span>
                       <span
                         className={cn(
-                          'shrink-0 rounded border px-1 py-[1px] text-[9px]',
+                          'shrink-0 rounded border px-1 py-[1px] text-[9.5px]',
                           entry.status === 'done'
                             ? 'border-success/45 bg-success/10 text-success'
                             : entry.status === 'failed'
@@ -524,14 +524,14 @@ export function StemGenerateDialog({
                       >
                         {STATUS_LABEL[entry.status]}
                       </span>
-                      {entry.finalized && <span className="text-[9px] text-success">已生成独立轨道</span>}
+                      {entry.finalized && <span className="text-[9.5px] text-success">已生成独立轨道</span>}
                       {entry.landError && (
-                        <span className="min-w-0 flex-1 truncate text-[9px] text-danger" title={entry.landError}>
+                        <span className="min-w-0 flex-1 truncate text-[9.5px] text-danger" title={entry.landError}>
                           落轨失败：{entry.landError}
                         </span>
                       )}
                       {entry.message && (
-                        <span className="min-w-0 flex-1 truncate text-[9px] text-ink-4" title={entry.message}>
+                        <span className="min-w-0 flex-1 truncate text-[9.5px] text-ink-4" title={entry.message}>
                           {entry.message}
                         </span>
                       )}
@@ -540,7 +540,7 @@ export function StemGenerateDialog({
                         <button
                           type="button"
                           data-stem-cancel={entry.arm}
-                          className="btn btn-ghost h-6 shrink-0 px-2 text-[9.5px]"
+                          className="btn btn-ghost h-6 shrink-0 px-2 text-[10px]"
                           onClick={() => void cancelTask(entry.taskId as string)}
                           disabled={canceling === entry.taskId}
                           title="取消该分轨任务"
@@ -559,7 +559,7 @@ export function StemGenerateDialog({
                       </div>
                     )}
                     {entry.error && (
-                      <p className="mt-0.5 truncate text-[9px] text-danger" title={entry.error}>
+                      <p className="mt-0.5 truncate text-[9.5px] text-danger" title={entry.error}>
                         {entry.error}
                       </p>
                     )}
@@ -578,7 +578,7 @@ export function StemGenerateDialog({
         </div>
 
         <footer className="flex shrink-0 items-center gap-2 border-t border-line px-5 py-3">
-          <span className="min-w-0 flex-1 truncate text-[10px] leading-tight text-ink-4">
+          <span className="min-w-0 flex-1 truncate text-[10.5px] leading-tight text-ink-4" title="完成后每个 stem 会按源片段位置新建独立音频轨（可逐步 ⌘Z 撤销）；产物不与源音频逐样本对齐">
             完成后每个 stem 会按源片段位置新建独立音频轨（可逐步 ⌘Z 撤销）；产物不与源音频逐样本对齐
           </span>
           <button className="btn btn-ghost h-8 px-3 text-[12px]" onClick={onClose}>
