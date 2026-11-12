@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ArrowLeft,
@@ -49,11 +49,42 @@ const EXAMPLES: ExampleItem[] = [
   { style: 'jrpg', name: 'JRPG · 战斗配乐', description: '管弦 + 失真吉他 · 144 BPM · 16 小节', accent: '#c9a227' },
 ]
 
+const MENU_WIDTH = 306
+const MENU_GAP = 8
+const VIEWPORT_MARGIN = 8
+
+interface MenuAnchor {
+  left: number
+  top: number
+  maxHeight: number
+}
+
+/** 菜单锚点：贴着「文件」按钮下方，并保证左右/下方不越出视口 */
+function measureAnchor(anchorRef: React.RefObject<HTMLButtonElement | null>): MenuAnchor {
+  const rect = anchorRef.current?.getBoundingClientRect()
+  const left = rect
+    ? Math.max(VIEWPORT_MARGIN, Math.min(rect.left, window.innerWidth - MENU_WIDTH - VIEWPORT_MARGIN))
+    : VIEWPORT_MARGIN
+  const top = rect ? rect.bottom + MENU_GAP : 52
+  return {
+    left,
+    top,
+    maxHeight: Math.max(240, window.innerHeight - top - VIEWPORT_MARGIN),
+  }
+}
+
 /** 文件菜单：新建 / 打开 / 保存 / 另存为 / 示例工程。 */
-export function ProjectMenu({ onClose }: { onClose: () => void }) {
+export function ProjectMenu({
+  onClose,
+  anchorRef,
+}: {
+  onClose: () => void
+  anchorRef: React.RefObject<HTMLButtonElement | null>
+}) {
   const ref = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const audioInputRef = useRef<HTMLInputElement>(null)
+  const [anchor, setAnchor] = useState<MenuAnchor>(() => measureAnchor(anchorRef))
   const project = useStore((s) => s.project)
   const setProject = useStore((s) => s.setProject)
   const setSaveStatus = useStore((s) => s.setSaveStatus)
@@ -106,6 +137,14 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
     window.addEventListener('keydown', escape)
     return () => window.removeEventListener('keydown', escape)
   }, [jianpuOpen])
+
+  /* 菜单是 portal 到 body 的 fixed 浮层：窗口尺寸变化时重新贴回「文件」按钮下方 */
+  useLayoutEffect(() => {
+    const update = () => setAnchor(measureAnchor(anchorRef))
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [anchorRef])
 
   const loadProjects = useCallback(async () => {
     setListLoading(true)
@@ -401,14 +440,21 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
           document.body,
         )}
 
-      <div
-        ref={ref}
-        className={cn(
-          'absolute left-0 top-9 z-50 w-[306px] overflow-hidden rounded-xl border border-line-strong bg-surface-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.85)]',
-          panel === 'new' && 'hidden',
-        )}
-        role="menu"
-      >
+      {/* 菜单本体必须 portal 到 body 并抬到内容层之上：
+          若留在顶栏里，会被顶栏 `relative z-30` 的堆叠上下文关住，而主编辑区的
+          时间轴工具条 / 播放头同样用 z-30 且 DOM 更靠后，就会画在菜单上面
+          （见 docs/UI_LAYERING.md 的层级标尺）。 */}
+      {createPortal(
+        <div
+          ref={ref}
+          data-project-menu
+          style={{ left: anchor.left, top: anchor.top, maxHeight: anchor.maxHeight }}
+          className={cn(
+            'fixed z-[45] w-[306px] overflow-y-auto rounded-xl border border-line-strong bg-surface-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.85)]',
+            panel === 'new' && 'hidden',
+          )}
+          role="menu"
+        >
         <input
           ref={fileInputRef}
           type="file"
@@ -624,7 +670,9 @@ export function ProjectMenu({ onClose }: { onClose: () => void }) {
           </div>
         </div>
       )}
-      </div>
+        </div>,
+        document.body,
+      )}
     </>
   )
 }

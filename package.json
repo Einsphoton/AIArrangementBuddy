@@ -21,6 +21,7 @@
     "e2e": "node scripts/e2e.mjs",
     "verify": "node scripts/build.mjs && node scripts/test.mjs && node scripts/test-ai.mjs && node scripts/e2e.mjs",
     "verify:ui": "node scripts/verify-ui.mjs",
+    "verify:layers": "node scripts/verify-layers.mjs",
     "verify:audio": "node scripts/verify-audio-intent.mjs",
     "verify:audio-agent": "node scripts/verify-audio-agent.mjs",
 "verify:provision": "node --import tsx scripts/verify-provision.mjs",

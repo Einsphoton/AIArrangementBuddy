@@ -195,6 +195,7 @@ pnpm test           # 后端接口冒烟测试（12 项）
 pnpm e2e            # 真实浏览器端到端验收（需先 pnpm build，会自动截图到 .verify/）
 pnpm verify         # 构建 + 接口冒烟 + 端到端，一条命令全量验收
 pnpm audit:ui       # 布局审计：1024/1120/1280/1440/1680 × 11 个界面状态，检测文字裁剪/遮挡/溢出（截图到 .audit/）
+pnpm verify:layers  # 层级验收：6 个宽度下检查「文件」菜单不被时间轴工具条/播放头遮挡、层级顺序正确（截图到 .verify-ui/layers/）
 pnpm soundfonts     # 下载开源音色库（可选，40MB）
 ```
 

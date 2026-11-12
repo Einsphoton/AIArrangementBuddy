@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ChevronDown,
   FolderOpen,
@@ -34,6 +34,7 @@ export function TopBar() {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen)
   const aiBusy = useStore((s) => s.aiBusy)
   const [menuOpen, setMenuOpen] = useState(false)
+  const fileButtonRef = useRef<HTMLButtonElement>(null)
   const [aiOnline, setAiOnline] = useState<boolean | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(project.name)
@@ -71,9 +72,10 @@ export function TopBar() {
 
       <span className="h-5 w-px shrink-0 bg-line" />
 
-      {/* 工程菜单 */}
+      {/* 工程菜单：菜单本体 portal 到 body（见 ProjectMenu 注释），这里只保留触发按钮和锚点 */}
       <div className="relative shrink-0">
         <button
+          ref={fileButtonRef}
           className="btn btn-ghost h-7 px-2 text-[12px]"
           onClick={() => setMenuOpen((v) => !v)}
           aria-haspopup="menu"
@@ -83,7 +85,7 @@ export function TopBar() {
           文件
           <ChevronDown size={12} className={cn('text-ink-3 transition-transform', menuOpen && 'rotate-180')} />
         </button>
-        {menuOpen && <ProjectMenu onClose={() => setMenuOpen(false)} />}
+        {menuOpen && <ProjectMenu anchorRef={fileButtonRef} onClose={() => setMenuOpen(false)} />}
       </div>
 
       <button className="btn btn-ghost btn-icon shrink-0" title="撤销（⌘Z）" disabled={!canUndo} onClick={undo}>
