@@ -425,6 +425,9 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
    * detail: { reason?: string; title?: string; profiles?: ProvisionProfileId[]; source?: string }
    */
   useEffect(() => {
+    /* 只有全局宿主实例响应唤起：TopBar 里还有一个 mode="trigger" 实例，
+       若两个实例都 setOpen(true) 会叠出两层一样的对话框（关闭只关掉一层）。 */
+    if (mode !== 'global') return
     const handler = (event: Event) => {
       const detail = (
         event as CustomEvent<{ reason?: string; title?: string; profiles?: ProvisionProfileId[] }>
@@ -441,7 +444,7 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
     }
     window.addEventListener('aiab:provision-open', handler)
     return () => window.removeEventListener('aiab:provision-open', handler)
-  }, [refresh])
+  }, [mode, refresh])
 
   const start = async () => {
     if (starting) return
@@ -524,7 +527,10 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
               ? `本机 AI 引擎正在安装：点击查看下载进度（平台 ${status?.platform ?? '检测中'}）`
               : `本机 AI 引擎未安装：点击自动下载（平台 ${status?.platform ?? '检测中'}，缺 ${humanBytes(status?.missingBytes ?? 0)}）`
           }
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            /* 打开动作统一走全局宿主（App 里的 mode="global" 实例），避免两个实例各开一层对话框 */
+            window.dispatchEvent(new CustomEvent('aiab:provision-open', { detail: { source: 'topbar' } }))
+          }}
         >
           {running ? (
             <LoaderCircle size={13} className="animate-spin text-accent" />
@@ -535,7 +541,8 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
         </button>
       )}
 
-      {open &&
+      {mode === 'global' &&
+        open &&
         createPortal(
           <div
             className="fixed inset-0 z-[210] flex items-start justify-center overflow-y-auto bg-black/65 p-4 pt-[8vh]"

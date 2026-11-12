@@ -17,6 +17,12 @@ export interface AudioJobStep {
   status: AudioStepStatus
   /** 0..1 */
   progress: number
+  /** 服务端排队位置（0-based：0 = 下一个被派）；仅在 queued 阶段有值 */
+  queuePosition?: number
+  /** 服务端给出的预计等待秒数；仅在 queued 阶段有值 */
+  etaSec?: number
+  /** 本步第一次进入 running 的时间戳（UI 用来估算剩余时间） */
+  startedAt?: number
   error?: string
 }
 
@@ -40,6 +46,8 @@ export interface AudioJob {
   hint?: string
   /** 已落轨的轨道名 */
   placed: string[]
+  /** 该任务是否可以用上一份计划重试（失败 / 生成节点未启动） */
+  retryable?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -102,8 +110,17 @@ export const useAudioJobStore = create<AudioJobState>((set, get) => ({
   updateStep: (key, patch) => {
     const current = get().job
     if (!current) return
-    const steps = current.steps.map((step) => (step.key === key ? { ...step, ...patch } : step))
-    set({ job: { ...current, steps, progress: aggregateProgress(steps), updatedAt: Date.now() } })
+    const now = Date.now()
+    const steps = current.steps.map((step) => {
+      if (step.key !== key) return step
+      const next: AudioJobStep = { ...step, ...patch }
+      // 第一次进入 running 时记下开始时间：任务卡据此估算剩余时间。
+      // 若调用方显式传入 startedAt（自动化注入 / 恢复任务），以传入值为准。
+      if (patch.status === 'running' && patch.startedAt == null && !step.startedAt) next.startedAt = now
+      if (patch.status === 'done') next.progress = 1
+      return next
+    })
+    set({ job: { ...current, steps, progress: aggregateProgress(steps), updatedAt: now } })
   },
 
   finish: (status, patch) => {

@@ -24,7 +24,8 @@ import { useProjectSession } from './lib/session'
 import { useMidiPerformance } from './features/midi/useMidiPerformance'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
 import { useUiStore, CHAT_WIDTH_LIMITS } from './lib/uiStore'
-import { detectAudioIntent, handleAudioPlanFromToolData, runAudioPlan } from './features/audio/audioIntent'
+import { detectAudioIntent, handleAudioPlanFromToolData, retryAudioJob, runAudioPlan } from './features/audio/audioIntent'
+import { useAudioJobStore } from './features/audio/audioJobStore'
 
 const VIEW_TABS = [
   { id: 'arrangement' as const, label: '编曲', icon: <Boxes size={13} />, shortcut: '1' },
@@ -152,7 +153,9 @@ export default function App() {
       useStore,
       useUiStore,
       engine,
-      audio: { detectAudioIntent, runAudioPlan, handleAudioPlanFromToolData },
+      /** 音频任务卡状态：自动化验收/截图用（可注入 running/blocked/done 等状态） */
+      useAudioJobStore,
+      audio: { detectAudioIntent, runAudioPlan, retryAudioJob, handleAudioPlanFromToolData },
     }
   }, [engine])
 

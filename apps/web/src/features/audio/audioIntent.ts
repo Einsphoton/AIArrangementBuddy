@@ -86,6 +86,12 @@ class JobCanceledError extends Error {
 /** 正在执行 / 刚被取消的任务（只用于阻止旧轮询继续写状态） */
 const canceledJobs = new Set<string>()
 
+/**
+ * 最近一次音频计划：失败 / 生成节点未启动时留着它，让任务卡可以
+ * 「重试」或在节点上线后自动继续（不需要用户重新说一遍）。
+ */
+let lastPlan: AudioPlan | null = null
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /* ------------------------------------------------------------------ */
@@ -266,7 +272,12 @@ function openProvisionDialog(input: { reason: string; profiles: ProvisionProfile
 function fail(jobId: string, message: string, extra: { blockReason?: 'provision' | 'start-companion' | 'empty-project'; hint?: string } = {}) {
   const state = useAudioJobStore.getState()
   if (state.job?.id !== jobId) return
-  state.finish('failed', { error: message, ...extra })
+  state.finish('failed', {
+    error: message,
+    ...extra,
+    // 空工程重试没有意义；其它失败保留计划，任务卡给出「重试」
+    retryable: extra.blockReason !== 'empty-project',
+  })
   useStore.getState().pushToast('error', message)
 }
 
@@ -288,10 +299,14 @@ async function waitCompanionTask(jobId: string, stepKey: string, taskId: string)
     assertActive(jobId)
     const { task } = await getCompanionTask(taskId)
     const stepStatus = STATUS_TO_STEP[task.status]
+    const queued = task.status === 'queued'
     useAudioJobStore.getState().updateStep(stepKey, {
       status: stepStatus,
       progress: task.status === 'done' ? 1 : clamp(task.progress ?? 0, 0, 1),
       error: task.error,
+      // 排队信息只在 queued 阶段有意义（服务端其它状态返回 0）
+      queuePosition: queued ? task.queuePosition : undefined,
+      etaSec: queued ? task.estimatedWaitSec : undefined,
     })
     if (TERMINAL.has(task.status)) {
       if (task.status !== 'done' || !task.assetId) {
@@ -498,6 +513,8 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
     useStore.getState().pushToast('info', `已有音频任务进行中：${running.title}，完成后再试`)
     return
   }
+  // 只记住真正开始执行的计划：被「已有任务进行中」拦下的计划不应覆盖当前任务的重试依据
+  lastPlan = plan
   const mode: AudioMode = plan.mode
   const project = useStore.getState().project
   const bpm = Number.isFinite(plan.bpm) ? Math.round(clamp(Number(plan.bpm), 20, 320)) : Math.round(project.tempo)
@@ -539,6 +556,7 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
         blockReason: 'provision',
         error: readiness.message,
         hint: '已为你打开「安装本机引擎」对话框，确认下载即可。',
+        retryable: true,
       })
       useStore.getState().pushToast('info', '需要先下载本机音频模型，已打开安装对话框')
       openProvisionDialog({ reason: readiness.message, profiles: readiness.profiles })
@@ -547,6 +565,7 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
         blockReason: 'start-companion',
         error: readiness.message,
         hint: readiness.hint,
+        retryable: true,
       })
       useStore.getState().pushToast('error', readiness.message)
     }
@@ -554,6 +573,29 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
   }
 
   await runCompanionFlow(jobId, plan, stems, bpm, durationSec)
+}
+
+/**
+ * 用上一份计划重试当前失败 / 被阻塞的任务。
+ *
+ * - 生成节点（Companion）未启动：任务卡会轮询节点状态，上线后自动调用这里继续；
+ * - 失败（引擎报错 / 断线）：任务卡给出「重试」；
+ * - `expectedJobId` 用于自动继续：只重试仍停留在卡上的那个阻塞任务，
+ *   避免用户已经关闭/换任务后又被旧轮询拉起。
+ */
+export function retryAudioJob(expectedJobId?: string): boolean {
+  const current = activeJob()
+  if (!current) return false
+  if (expectedJobId && current.id !== expectedJobId) return false
+  if (!current.retryable) return false
+  if (current.status !== 'failed' && current.status !== 'blocked') return false
+  const plan = lastPlan
+  if (!plan) return false
+  useAudioJobStore.getState().clear()
+  void runAudioPlan(plan).catch((error: unknown) => {
+    useStore.getState().pushToast('error', `重试音频任务失败：${error instanceof Error ? error.message : String(error)}`)
+  })
+  return true
 }
 
 /** 取消当前音频任务（Companion 任务会通知服务端取消；离线渲染忽略结果） */

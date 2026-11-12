@@ -825,7 +825,7 @@ export function ChatPanel() {
 
       {/* AI 自动执行的音频任务：进度 / 取消 / 失败后的下一步 */}
       <div className="shrink-0 px-3 pt-2 empty:hidden">
-        <AudioJobCard />
+        <AudioJobCard compact={compact} />
       </div>
 
       {/* 快捷动作（面板高度不足时隐藏，优先保证消息区与输入框可用） */}

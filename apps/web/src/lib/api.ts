@@ -656,7 +656,7 @@ export interface CompanionTaskState {
   progress: number
   /** 0 普通 / 1 高 / 2 紧急（旧服务端可能没有） */
   priority?: CompanionPriority | number
-  /** 排队位置（1-based，有值时） */
+  /** 排队位置（0-based：0 = 下一个被派；仅 queued 时有值） */
   queuePosition?: number
   /** 预计等待秒数（有值时） */
   estimatedWaitSec?: number
