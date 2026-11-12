@@ -16,6 +16,7 @@
  * - 缺少本机模型/运行时 → 自动弹出「安装本机引擎」对话框询问是否下载，并保留任务卡说明；
  * - 模型已安装但 Companion 没启动 → 给出可复制的启动命令，不伪造成功。
  */
+import { projectEndBeat } from '@aiab/core'
 import {
   cancelCompanionTask,
   createCompanionGenerateTask,
@@ -29,16 +30,19 @@ import {
   uploadAudioAsset,
   type CompanionEngine,
   type CompanionPriority,
+  type CompanionTaskState,
   type CompanionTaskStatus,
   type ProvisionProfileId,
   type StemArm,
 } from '../../lib/api'
 import { getAudioEngine } from '../../audio'
 import { useStore } from '../../store/store'
-import { useAudioJobStore } from './audioJobStore'
+import { useAudioJobStore, type AudioJobPhase, type AudioJobTelemetry } from './audioJobStore'
 import { assetRefFromPeaks, generatedAudioProvenance, placeAudioClip } from './audioTrack'
+import type { AudioJobTrackSpec } from './audioJobStore'
+import { TRACK_COLORS } from '../arrangement/timeline'
 import { primeAssetPeaks } from './peaks'
-import { COMPANION_START_HINT } from './CompanionBadge'
+import { resolveCompanionHint } from './CompanionBadge'
 
 export type AudioMode = 'text_to_audio' | 'midi_to_audio' | 'audio_with_stems' | 'midi_then_audio'
 
@@ -247,7 +251,7 @@ async function checkGenerationReady(needsStems: boolean): Promise<Readiness> {
       message: `生成音频需要本机 AI 引擎与模型（约 ${size}）。是否现在下载？下载完成后还差「启动生成节点」一步。`,
     }
   }
-  const hint = COMPANION_START_HINT
+  const hint = resolveCompanionHint()
   return {
     ok: false,
     reason: 'start-companion',
@@ -294,6 +298,49 @@ const STATUS_TO_STEP: Record<CompanionTaskStatus, 'running' | 'done' | 'failed' 
   canceled: 'canceled',
 }
 
+/** 去掉 undefined，避免旧服务端/旧 Companion 的缺字段把已有遥测覆盖空 */
+function compactObject<T extends object>(input: T): T {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) as T
+}
+
+function compactTelemetry(input: AudioJobTelemetry): AudioJobTelemetry {
+  return compactObject(input)
+}
+
+/** 服务端任务详情 → 任务卡 HUD 状态（P13；字段缺失就留空，由界面做降级） */
+export function telemetryFromTask(task: CompanionTaskState): AudioJobTelemetry {
+  const engine = task.worker?.status?.engine
+  const phase: AudioJobPhase | undefined =
+    (task.phase as AudioJobPhase | undefined) ?? (task.status === 'queued' ? 'queued' : undefined)
+  return compactTelemetry({
+    phase,
+    phaseLabel: task.phaseLabel,
+    step: task.step,
+    stepTotal: task.stepTotal,
+    speed: task.speed,
+    estimated: task.estimated,
+    cpuPct: task.telemetry?.cpuPct ?? engine?.cpuPct,
+    rssMb: task.telemetry?.rssMb ?? engine?.rssMb,
+    gpuName: task.telemetry?.gpuName ?? engine?.gpuName,
+    gpuUtilPct: task.telemetry?.gpuUtilPct ?? engine?.gpuUtilPct,
+    vramUsedMb: task.telemetry?.vramUsedMb ?? engine?.vramUsedMb,
+    vramTotalMb: task.telemetry?.vramTotalMb ?? engine?.vramTotalMb,
+    gpuTempC: task.telemetry?.gpuTempC ?? engine?.gpuTempC,
+    sampledAt: task.telemetry?.sampledAt ?? engine?.sampledAt,
+    engine: engine
+      ? compactObject({
+          state: engine.state,
+          variant: engine.variant,
+          device: engine.device,
+          warm: engine.warm,
+          pid: engine.pid,
+          lm: engine.lm,
+        })
+      : undefined,
+    workerName: task.worker?.name,
+  })
+}
+
 async function waitCompanionTask(jobId: string, stepKey: string, taskId: string): Promise<string> {
   for (;;) {
     assertActive(jobId)
@@ -304,10 +351,17 @@ async function waitCompanionTask(jobId: string, stepKey: string, taskId: string)
       status: stepStatus,
       progress: task.status === 'done' ? 1 : clamp(task.progress ?? 0, 0, 1),
       error: task.error,
+      message: task.message,
       // 排队信息只在 queued 阶段有意义（服务端其它状态返回 0）
       queuePosition: queued ? task.queuePosition : undefined,
       etaSec: queued ? task.estimatedWaitSec : undefined,
     })
+    const currentJob = useAudioJobStore.getState().job
+    if (currentJob) {
+      useAudioJobStore.getState().update({
+        telemetry: { ...currentJob.telemetry, ...telemetryFromTask(task) },
+      })
+    }
     if (TERMINAL.has(task.status)) {
       if (task.status !== 'done' || !task.assetId) {
         throw new Error(task.error || (task.status === 'canceled' ? '任务已取消' : '生成失败'))
@@ -324,11 +378,19 @@ async function placeGeneratedAsset(
   assetId: string,
   options: { name: string; trackName: string; startBeat: number; caption: string; bpm: number; durationSec?: number },
 ): Promise<void> {
+  const slot = useAudioJobStore.getState().slots.find((item) => item.key === stepKey)
+  // 生成完成 → 写入阶段：占位轨原地变成「正在写入」，不凭空消失
+  useAudioJobStore.getState().updateSlot(stepKey, {
+    status: 'running',
+    progress: 0.99,
+    message: '正在写入音频轨…',
+  })
   const peaks = await getAssetPeaks(assetId)
   assertActive(jobId)
   primeAssetPeaks(assetId, peaks)
   const asset = assetRefFromPeaks(assetId, peaks, { name: `${options.name}.wav` })
   const store = useStore.getState()
+  const trackName = slot?.name || options.trackName
   const placedRef: { value: { trackId: string; clipId: string } | null } = { value: null }
   store.mutate((draft) => {
     placedRef.value = placeAudioClip(draft, {
@@ -336,7 +398,8 @@ async function placeGeneratedAsset(
       durationSec: peaks.durationSec,
       name: options.name,
       startBeat: options.startBeat,
-      trackName: options.trackName,
+      trackName,
+      color: slot?.color,
       provenance: generatedAudioProvenance({
         caption: options.caption,
         bpm: options.bpm,
@@ -349,10 +412,13 @@ async function placeGeneratedAsset(
     useAudioJobStore.getState().updateStep(stepKey, { status: 'failed', error: '创建音频轨失败' })
     throw new Error('创建音频轨失败')
   }
+  // 真实轨已在同一位置出现：移除占位轨，选中并把视图滚到这条新轨
+  useAudioJobStore.getState().removeSlot(stepKey)
   useStore.getState().selectTrack(placed.trackId)
   useStore.getState().setView('arrangement')
+  useStore.getState().requestReveal(placed.trackId, options.startBeat)
   const job = activeJob()
-  if (job) useAudioJobStore.getState().update({ placed: [...job.placed, options.trackName] })
+  if (job) useAudioJobStore.getState().update({ placed: [...job.placed, trackName] })
 }
 
 /** MIDI → 音频：浏览器离线渲染当前工程，上传资产后落一条音频轨 */
@@ -366,6 +432,9 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
   }
   const stepKey = 'render'
   useAudioJobStore.getState().updateStep(stepKey, { status: 'running', progress: 0 })
+  useAudioJobStore.getState().update({
+    telemetry: { phase: 'prepare', phaseLabel: '准备离线渲染', engine: { state: 'ready', device: '浏览器离线渲染' } },
+  })
   try {
     const engine = getAudioEngine()
     const baseName = (plan.trackName || project.name || 'AI 渲染').slice(0, 40)
@@ -374,10 +443,16 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
       onProgress: (ratio) => {
         if (canceledJobs.has(jobId)) return
         useAudioJobStore.getState().updateStep(stepKey, { progress: clamp(ratio, 0, 0.9), status: 'running' })
+        useAudioJobStore.getState().update({
+          telemetry: { phase: 'render', phaseLabel: '离线渲染中', engine: { state: 'ready', device: '浏览器离线渲染' } },
+        })
       },
     })
     assertActive(jobId)
     useAudioJobStore.getState().updateStep(stepKey, { progress: 0.92, status: 'running' })
+    useAudioJobStore.getState().update({
+      telemetry: { phase: 'upload', phaseLabel: '编码并写入工程', engine: { state: 'ready', device: '浏览器离线渲染' } },
+    })
     const file = new File([blob], `${baseName}.wav`, { type: 'audio/wav' })
     const uploaded = await uploadAudioAsset(file)
     assertActive(jobId)
@@ -396,6 +471,8 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
       peaks: uploaded.peaks,
     })
     const startBeat = Math.max(0, plan.startBeat ?? store.playhead)
+    const slot = useAudioJobStore.getState().slots.find((item) => item.key === stepKey)
+    const trackName = slot?.name ?? `渲染 · ${baseName}`
     const current = useStore.getState()
     const placedRef: { value: { trackId: string; clipId: string } | null } = { value: null }
     current.mutate((draft) => {
@@ -404,7 +481,8 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
         durationSec: uploaded.durationSec,
         name: baseName,
         startBeat,
-        trackName: `渲染 · ${baseName}`,
+        trackName,
+        color: slot?.color,
         provenance: generatedAudioProvenance({
           caption: plan.caption ?? `MIDI render: ${project.name}`,
           bpm: plan.bpm ?? project.tempo,
@@ -414,10 +492,12 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
     })
     const placed = placedRef.value
     if (!placed) throw new Error('创建音频轨失败')
+    useAudioJobStore.getState().removeSlot(stepKey)
     useStore.getState().selectTrack(placed.trackId)
     useStore.getState().setView('arrangement')
+    useStore.getState().requestReveal(placed.trackId, startBeat)
     useAudioJobStore.getState().updateStep(stepKey, { status: 'done', progress: 1 })
-    useAudioJobStore.getState().update({ placed: [`渲染 · ${baseName}`] })
+    useAudioJobStore.getState().update({ placed: [trackName] })
     useAudioJobStore.getState().finish('done')
     useStore.getState().pushToast('success', `已渲染为音频并加入工程：${baseName}（⌘Z 可撤销）`)
   } catch (error) {
@@ -530,19 +610,82 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
       ? 45
       : 30
   const title = plan.trackName || MODE_TITLE[mode]
+  const isRenderMode = mode === 'midi_to_audio' || mode === 'midi_then_audio'
 
-  const stepDefs =
-    mode === 'midi_to_audio'
-      ? [{ key: 'render', label: '离线渲染当前工程 → WAV' }]
-      : [
-          { key: 'song', label: needsStems ? '生成整曲音频' : '生成音频' },
-          ...stems.map((arm) => ({ key: `stem:${arm}`, label: `分轨 · ${STEM_ARM_LABEL[arm]}` })),
-        ]
+  const stepDefs = isRenderMode
+    ? [{ key: 'render', label: '离线渲染当前工程 → WAV' }]
+    : [
+        { key: 'song', label: needsStems ? '生成整曲音频' : '生成音频' },
+        ...stems.map((arm) => ({ key: `stem:${arm}`, label: `分轨 · ${STEM_ARM_LABEL[arm]}` })),
+      ]
 
-  const jobId = useAudioJobStore.getState().start({ mode, title, caption: plan.caption ?? '', steps: stepDefs })
+  /* 任务一开始就在 DAW 里占好音频轨：不用等生成完才看到结果。
+     配色优先避开工程里已有的颜色，至少让整曲 / 每条分轨之间一眼可分。 */
+  const usedColors = new Set(project.tracks.map((track) => track.color))
+  const colorAt = (index: number) => {
+    const start = (project.tracks.length + index) % TRACK_COLORS.length
+    for (let step = 0; step < TRACK_COLORS.length; step += 1) {
+      const color = TRACK_COLORS[(start + step) % TRACK_COLORS.length]
+      if (!usedColors.has(color)) {
+        usedColors.add(color)
+        return color
+      }
+    }
+    return TRACK_COLORS[start]
+  }
+  const startBeat = Math.max(0, plan.startBeat ?? useStore.getState().playhead)
+  const caption = (plan.caption ?? '').trim() || `${plan.style ?? ''} instrumental, ${bpm} bpm`.trim()
+  const songName = plan.trackName || caption.slice(0, 32) || 'AI 生成音频'
+  const renderBaseName = (plan.trackName || project.name || 'AI 渲染').slice(0, 40)
+  const projectDurationSec = Math.max(
+    4,
+    Math.round((projectEndBeat(project) / Math.max(20, project.tempo)) * 60),
+  )
+  const slotSpecs: AudioJobTrackSpec[] = isRenderMode
+    ? [
+        {
+          key: 'render',
+          name: `渲染 · ${renderBaseName}`,
+          label: '工程',
+          role: 'render',
+          color: colorAt(0),
+          startBeat,
+          durationSec: projectDurationSec,
+        },
+      ]
+    : [
+        {
+          key: 'song',
+          name: `生成 · ${songName.slice(0, 20)}`,
+          label: '整曲',
+          role: 'song',
+          color: colorAt(0),
+          startBeat,
+          durationSec,
+        },
+        ...stems.map((arm, index) => ({
+          key: `stem:${arm}`,
+          name: `Stem · ${STEM_ARM_LABEL[arm]}`,
+          label: STEM_ARM_LABEL[arm],
+          role: 'stem' as const,
+          color: colorAt(index + 1),
+          startBeat,
+          durationSec,
+        })),
+      ]
+
+  const jobId = useAudioJobStore.getState().start({
+    mode,
+    title,
+    caption: plan.caption ?? '',
+    steps: stepDefs,
+    slots: slotSpecs,
+  })
+  // 立刻把视线带到编曲视图：用户能先看到「轨道已建好、AI 正在生成」
+  useStore.getState().setView('arrangement')
   useStore.getState().pushToast('info', `AI 已安排音频任务：${MODE_TITLE[mode]}`)
 
-  if (mode === 'midi_to_audio' || mode === 'midi_then_audio') {
+  if (isRenderMode) {
     await runMidiRender(jobId, plan)
     return
   }

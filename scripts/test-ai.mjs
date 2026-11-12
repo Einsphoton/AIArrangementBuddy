@@ -1806,6 +1806,46 @@ async function scenarioUiActionEvents(signal) {
   return `ui 事件 ${uiEvents.map((event) => `${event.action}${event.beat === undefined ? '' : `@${event.beat}`}`).join(' + ')} · project 快照 0 次`
 }
 
+/** 场景 25（I）：generate_audio 的 quality 是布尔开关（精修模式），不能被当成「和弦性质」枚举拒绝 */
+async function scenarioAudioQualityBoolean(signal) {
+  setMock(({ round }) =>
+    round === 0
+      ? {
+          toolCalls: [
+            {
+              id: 'call_audio_quality',
+              name: 'generate_audio',
+              args: {
+                mode: 'audio_with_stems',
+                caption: 'energetic japanese rock, guitar bass drums, 172 bpm',
+                quality: true,
+                reason: '用户要成品 + 分轨，并选择精修模式',
+              },
+            },
+          ],
+        }
+      : { text: '已安排整曲 + 分轨生成，使用精修模式。' },
+  )
+  const events = await chat(
+    {
+      messages: [{ role: 'user', content: '生成一首 J-Rock 成品，按乐器分轨，用精修模式' }],
+      project: fixtureProject(),
+      intent: 'audio',
+    },
+    signal,
+  )
+  assertNoError(events)
+  assertDone(events)
+  const ends = assertAllToolEndsOk(events, 1)
+  const plan = ends[0]?.data?.audioPlan
+  if (!plan) throw new Error('tool_end 没有返回 audioPlan')
+  if (plan.quality !== true) throw new Error(`audioPlan.quality 期望 true，实际 ${JSON.stringify(plan.quality)}`)
+  if (plan.mode !== 'audio_with_stems') throw new Error(`audioPlan.mode 期望 audio_with_stems，实际 ${plan.mode}`)
+  const stems = (plan.stems ?? []).join('/')
+  if (stems !== 'guitar/bass/drums') throw new Error(`默认分轨期望 guitar/bass/drums，实际 ${stems}`)
+  return `quality=true · mode=audio_with_stems · stems=${stems}`
+}
+
 /* ------------------------------------------------------------------ */
 /* 8. main / cleanup                                                   */
 /* ------------------------------------------------------------------ */
@@ -1895,6 +1935,7 @@ async function main() {
       ['22. 工具名别名 add_drum_groove → generate_smart_clip', scenarioToolAlias],
       ['23. 情绪兜底 emotionId:"swing" → brush（提示不精确）', scenarioEmotionFallback],
       ['24. ui_action play/seek 下发 SSE ui 事件且工程不变', scenarioUiActionEvents],
+      ['25. generate_audio quality 布尔开关不被当成和弦枚举拒绝', scenarioAudioQualityBoolean],
     ]
 
     for (const [name, fn] of scenarios) {

@@ -954,6 +954,9 @@ function normalizeProperty(
       return root
     }
     case 'quality': {
+      // 只有和弦性质语境（schema 声明为字符串）才按 quality 归一化；
+      // generate_audio 的 quality 是布尔开关（精修模式），true/false 必须原样交给类型校验。
+      if (schema.type !== 'string') break
       const quality = normalizeQuality(value)
       if (!quality) {
         state.errors.push(`参数 ${path}「${brief(value)}」不是合法和弦性质，可用：${QUALITY_IDS.join(' / ')}`)
@@ -962,6 +965,7 @@ function normalizeProperty(
       return quality
     }
     case 'key': {
+      if (schema.type !== 'string') break
       const keyName = normalizeKey(value)
       if (!keyName) {
         state.errors.push(`参数 ${path}「${brief(value)}」不是合法调性，可用：${KEY_VALUES.join(' / ')}（支持降号，如 Bb→A#）`)
@@ -970,6 +974,7 @@ function normalizeProperty(
       return keyName
     }
     case 'scale': {
+      if (schema.type !== 'string') break
       const scale = normalizeScale(value)
       if (!scale) {
         state.errors.push(`参数 ${path}「${brief(value)}」不是合法调式，可用：${SCALE_IDS.join(' / ')}`)

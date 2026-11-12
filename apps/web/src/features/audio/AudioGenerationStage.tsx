@@ -26,8 +26,15 @@ import {
   SlidersHorizontal,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { companionVariantLabel } from '../../lib/api'
 import { cn } from '../../lib/format'
-import type { AudioJobMode, AudioJobStatus, AudioJobStep } from './audioJobStore'
+import type {
+  AudioJobMode,
+  AudioJobPhase,
+  AudioJobStatus,
+  AudioJobStep,
+  AudioJobTelemetry,
+} from './audioJobStore'
 
 /* ------------------------------------------------------------------ */
 /* 模式 / 乐器映射                                                      */
@@ -250,6 +257,287 @@ export function TrackPipeline({ steps, className }: { steps: AudioJobStep[]; cla
           </Fragment>
         )
       })}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* 阶段轨道：让「现在到底在做哪一步」一眼可见                             */
+/* ------------------------------------------------------------------ */
+
+interface StageDef {
+  key: string
+  label: string
+}
+
+const COMPANION_STAGES: StageDef[] = [
+  { key: 'queued', label: '排队' },
+  { key: 'engine', label: '载入模型' },
+  { key: 'sampling', label: '扩散采样' },
+  { key: 'decoding', label: '解码封装' },
+  { key: 'upload', label: '写入轨道' },
+]
+
+const RENDER_STAGES: StageDef[] = [
+  { key: 'prepare', label: '准备' },
+  { key: 'render', label: '离线渲染' },
+  { key: 'upload', label: '写入轨道' },
+]
+
+const PHASE_STAGE_INDEX: Record<string, number> = {
+  queued: 0,
+  prepare: 0,
+  engine: 1,
+  prompt: 2,
+  sampling: 2,
+  decoding: 3,
+  upload: 4,
+  done: 5,
+  idle: 0,
+  render: 1,
+}
+
+/** 没有服务端阶段时的兜底：按进度推断（旧 Companion / 注入状态都能显示合理的阶段） */
+export function fallbackPhase(jobMode: AudioJobMode, progress: number, queued: boolean): AudioJobPhase {
+  if (queued) return 'queued'
+  if (jobMode === 'midi_to_audio') {
+    if (progress >= 0.92) return 'upload'
+    return progress <= 0.01 ? 'prepare' : 'render'
+  }
+  if (progress <= 0.04) return 'engine'
+  if (progress >= 0.94) return 'upload'
+  if (progress >= 0.9) return 'decoding'
+  return 'sampling'
+}
+
+export function GenerationStageRail({
+  mode,
+  phase,
+  progress,
+  queued,
+  done,
+  className,
+}: {
+  mode: AudioJobMode
+  phase?: AudioJobPhase
+  progress: number
+  queued: boolean
+  done: boolean
+  className?: string
+}) {
+  const stages = mode === 'midi_to_audio' ? RENDER_STAGES : COMPANION_STAGES
+  const resolved = phase ?? fallbackPhase(mode, progress, queued)
+  const activeIndex = done ? stages.length : Math.min(stages.length - 1, PHASE_STAGE_INDEX[resolved] ?? 0)
+  return (
+    <div
+      className={cn('gen-stages', className)}
+      data-gen-stages
+      data-phase={resolved}
+      role="list"
+      aria-label="生成阶段"
+    >
+      {stages.map((stage, index) => {
+        const state = done || index < activeIndex ? 'done' : index === activeIndex ? 'active' : 'pending'
+        return (
+          <span key={stage.key} className="gen-stage" data-state={state} role="listitem" aria-current={state === 'active' ? 'step' : undefined}>
+            <span className="gen-stage-dot" aria-hidden="true" />
+            <span className="gen-stage-label">{stage.label}</span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* 引擎遥测 HUD：引擎状态 + GPU / 显存 / CPU / 内存                       */
+/* ------------------------------------------------------------------ */
+
+const ENGINE_STATE_LABEL: Record<string, string> = {
+  stopped: '未启动',
+  starting: '启动中',
+  ready: '就绪',
+  busy: '生成中',
+  error: '异常',
+}
+
+const PHASE_ACTIVE_LABEL: Record<string, string> = {
+  prepare: '准备中',
+  engine: '载入中',
+  prompt: '理解中',
+  sampling: '采样中',
+  decoding: '解码中',
+  upload: '写入中',
+  queued: '排队中',
+  render: '渲染中',
+}
+
+function roundPercent(value: number): string {
+  return `${Math.round(value)}%`
+}
+
+/** MB → 「6.2G / 512M」；用于显存与内存 */
+export function formatMemory(mb: number | undefined): string | undefined {
+  if (typeof mb !== 'number' || !Number.isFinite(mb) || mb < 0) return undefined
+  if (mb >= 1024) {
+    const gb = mb / 1024
+    return `${gb >= 10 ? Math.round(gb) : gb.toFixed(1)}G`
+  }
+  return `${Math.round(mb)}M`
+}
+
+interface MetricItem {
+  key: string
+  label: string
+  value: string
+  ratio?: number
+}
+
+/** 从任务遥测里抽出 HUD 指标；没有 GPU 字段时如实只显示 CPU/内存 */
+export function telemetryMetrics(telemetry?: AudioJobTelemetry): MetricItem[] {
+  if (!telemetry) return []
+  const items: MetricItem[] = []
+  if (typeof telemetry.gpuUtilPct === 'number' && Number.isFinite(telemetry.gpuUtilPct)) {
+    items.push({
+      key: 'gpu',
+      label: 'GPU',
+      value: roundPercent(telemetry.gpuUtilPct),
+      ratio: Math.max(0, Math.min(1, telemetry.gpuUtilPct / 100)),
+    })
+  }
+  const used = formatMemory(telemetry.vramUsedMb)
+  const total = formatMemory(telemetry.vramTotalMb)
+  if (used && total) {
+    const ratio =
+      telemetry.vramUsedMb != null && telemetry.vramTotalMb
+        ? Math.max(0, Math.min(1, telemetry.vramUsedMb / telemetry.vramTotalMb))
+        : undefined
+    items.push({ key: 'vram', label: '显存', value: `${used}/${total}`, ratio })
+  }
+  if (typeof telemetry.cpuPct === 'number' && Number.isFinite(telemetry.cpuPct)) {
+    items.push({
+      key: 'cpu',
+      label: 'CPU',
+      value: roundPercent(telemetry.cpuPct),
+      ratio: Math.max(0, Math.min(1, telemetry.cpuPct / 100)),
+    })
+  }
+  const rss = formatMemory(telemetry.rssMb)
+  if (rss) items.push({ key: 'rss', label: '内存', value: rss })
+  return items
+}
+
+export function EngineTelemetryHud({
+  telemetry,
+  fallbackState,
+  mode,
+  className,
+}: {
+  telemetry?: AudioJobTelemetry
+  fallbackState?: 'running' | 'done'
+  mode?: AudioJobMode
+  className?: string
+}) {
+  const engine = telemetry?.engine
+  const phase = telemetry?.phase
+  const activeLabel = phase ? PHASE_ACTIVE_LABEL[phase] : undefined
+  const stateLabel =
+    activeLabel ??
+    ENGINE_STATE_LABEL[engine?.state ?? ''] ??
+    (fallbackState === 'running' ? '生成中' : '就绪')
+  const engineMeta = [
+    companionVariantLabel(engine?.variant),
+    engine?.device,
+    telemetry?.workerName,
+    engine?.pid ? `pid ${engine.pid}` : '',
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' · ')
+  const metrics = telemetryMetrics(telemetry)
+  const loading = engine?.state === 'starting' || phase === 'engine'
+  const active =
+    fallbackState === 'running' && phase !== 'queued' && phase !== 'prepare' && phase !== 'done' && phase !== 'idle'
+  const live = Boolean(engine?.state === 'busy' || active)
+  const placeholder =
+    mode === 'midi_to_audio'
+      ? '浏览器离线渲染 · 不使用 GPU'
+      : '资源遥测待接入（旧版节点或无 GPU 采样）'
+
+  return (
+    <div
+      className={cn('gen-hud', className)}
+      data-gen-telemetry
+      data-engine-state={engine?.state ?? (phase === 'queued' ? 'queued' : 'running')}
+      data-phase={phase ?? ''}
+    >
+      <div className="gen-hud-engine">
+        <span className="gen-hud-dot" data-live={live ? 'true' : 'false'} aria-hidden="true" />
+        <span className="gen-hud-key">引擎</span>
+        <span className="gen-hud-state" data-state={engine?.state ?? ''}>
+          {stateLabel}
+        </span>
+        {loading ? <span className="gen-hud-loading">冷启动可能需 30–60s</span> : null}
+        {engineMeta ? (
+          <span className="gen-hud-meta" title={engineMeta}>
+            {engineMeta}
+          </span>
+        ) : null}
+      </div>
+      {metrics.length > 0 ? (
+        <div className="gen-hud-metrics">
+          {metrics.map((item) => (
+            <span
+              key={item.key}
+              className="gen-metric"
+              data-metric={item.key}
+              title={
+                item.key === 'gpu' && telemetry?.gpuName
+                  ? `${telemetry.gpuName}${telemetry.gpuTempC != null ? ` · ${Math.round(telemetry.gpuTempC)}°C` : ''}`
+                  : undefined
+              }
+            >
+              <span className="gen-metric-label">{item.label}</span>
+              <span className="gen-metric-value mono">{item.value}</span>
+              {item.ratio != null ? (
+                <span className="gen-metric-track" aria-hidden="true">
+                  <span className="gen-metric-fill" style={{ transform: `scaleX(${Math.max(0.02, item.ratio)})` }} />
+                </span>
+              ) : null}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="gen-hud-metrics gen-hud-metrics--empty" data-metric="none">
+          <span className="gen-hud-placeholder">{placeholder}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* 阻塞态：启动检查清单（本地服务 / 节点 / 模型）                        */
+/* ------------------------------------------------------------------ */
+
+export type CheckState = 'ok' | 'warn' | 'pending' | 'bad'
+
+export interface CheckItem {
+  key: string
+  label: string
+  value: string
+  state: CheckState
+}
+
+export function StartChecklist({ items, className }: { items: CheckItem[]; className?: string }) {
+  return (
+    <div className={cn('gen-check', className)} data-gen-check>
+      {items.map((item) => (
+        <span key={item.key} className="gen-check-item" data-state={item.state} title={`${item.label}：${item.value}`}>
+          <span className="gen-check-dot" aria-hidden="true" />
+          <span className="gen-check-label">{item.label}</span>
+          <span className="gen-check-value">{item.value}</span>
+        </span>
+      ))}
     </div>
   )
 }

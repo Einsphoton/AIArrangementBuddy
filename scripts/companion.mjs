@@ -22,7 +22,7 @@
  * - 所有协议请求都走指数退避重试，服务端不可达时不崩；
  * - --once：处理完一个任务（成功或失败）就退出，用于验收。
  */
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
@@ -108,8 +108,12 @@ export const ACESTEP_BIN =
   path.join(ACESTEP_DIR, RUNTIME_BIN_NAMES[0])
 export const ACESTEP_MODELS_DIR =
   process.env.AIAB_ENGINE_MODELS_DIR || process.env.AIAB_ACESTEP_MODELS_DIR || path.join(ACESTEP_DIR, 'models')
-/** 计算后端：macOS 用 Metal，其它平台默认 CUDA0（可用 GGML_BACKEND 覆盖） */
-export const ACESTEP_BACKEND = process.env.GGML_BACKEND || (process.platform === 'darwin' ? 'METAL' : 'CUDA0')
+/**
+ * 计算后端：macOS 用 Metal 的 ggml 后端名 `MTL0`（不是 `METAL`！旧默认会导致
+ * ace-server 启动时报 `GGML_BACKEND=METAL not found. Available: MTL0 BLAS CPU` 后 exit=1）；
+ * 其它平台默认 CUDA0。可用同名环境变量 GGML_BACKEND 覆盖。
+ */
+export const ACESTEP_BACKEND = process.env.GGML_BACKEND || (process.platform === 'darwin' ? 'MTL0' : 'CUDA0')
 /** 缺引擎时给用户的自动安装提示 */
 export const PROVISION_HINT = 'node scripts/provision.mjs install --profile essential'
 /**
@@ -204,6 +208,22 @@ const ACESTEP_HEALTH_POLL_MS = 1200
 const ACESTEP_SYNTH_TIMEOUT_MS = 900_000
 const ACESTEP_LM_TIMEOUT_MS = 180_000
 const SYNTH_PROGRESS_INTERVAL_MS = 2000
+/** P13：资源遥测缓存（心跳 5s / 进度 2s 都会取一次，避免重复拉起 ps） */
+const TELEMETRY_CACHE_MS = 1500
+const GPU_TELEMETRY_CACHE_MS = 5000
+const TELEMETRY_CMD_TIMEOUT_MS = 1200
+/** P13：生成阶段 → 界面中性文案（服务端白名单透传，前端直接展示） */
+const PHASE_LABELS = Object.freeze({
+  queued: '排队中',
+  prepare: '准备任务',
+  engine: '载入音频引擎',
+  prompt: '理解你的描述',
+  sampling: '扩散采样',
+  decoding: '解码音频',
+  upload: '写入工程',
+  done: '完成',
+  idle: '待机',
+})
 const HEALTH_PROBE_TIMEOUT_MS = 3000
 const REQUEST_TIMEOUT_MS = 15_000
 const COMPLETE_TIMEOUT_MS = 120_000
@@ -920,6 +940,22 @@ export function estimateProgress({ elapsedMs = 0, estimatedMs = 0, from = 0.3, t
 }
 
 /**
+ * 把整体进度映射成「第 N/M 步」（纯函数）。
+ *
+ * 引擎只暴露任务级进度，不暴露采样步数；这里按已知的 inference_steps（快速 8 / 精修 50 /
+ * 分轨 50）线性推算，并标记 estimated=true，界面显示为「≈ N/M 步」，不冒充引擎精确值。
+ */
+export function estimateStepProgress({ progress = 0, totalSteps = 0, from = 0.3, to = 0.9 } = {}) {
+  const total = Math.max(0, Math.round(Number(totalSteps) || 0))
+  if (!total) return {}
+  const floor = clampProgress(from)
+  const ceiling = Math.max(floor + 0.001, clampProgress(to))
+  const ratio = clampProgress((clampProgress(progress) - floor) / (ceiling - floor))
+  const step = Math.min(total, Math.max(1, Math.ceil(ratio * total)))
+  return { step, stepTotal: total, estimated: true }
+}
+
+/**
  * 预计合成耗时（秒，纯函数，仅用于进度估算，不影响正确性）：
  * - repaint：sft 50 步，实测 20s 源音频重绘 6-12s 区间约 14.3s → 10 + 区间*0.8；
  * - generate：turbo 8 步 → 8 + 时长*0.3；
@@ -1146,6 +1182,137 @@ async function waitForAceHealth({
 }
 
 /* ------------------------------------------------------------------ */
+/* P13：本机资源遥测（CPU / 内存 / GPU）                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 这些采样只用于「让人看见正在发生什么」，不参与生成正确性：
+ * - CPU/内存：macOS/Linux 用 ps；Windows 用 PowerShell 读 CPU 时间与 WorkingSet；
+ * - GPU：只在 nvidia-smi 可用时采样（Windows/Linux NVIDIA）；macOS Metal 无免密接口，
+ *   如实缺省，不伪造数字；
+ * - 任何命令失败都静默返回空值，绝不因为遥测把生成任务拖垮。
+ */
+let processTelemetryCache = { pid: 0, at: 0, value: {} }
+let gpuTelemetryCache = { at: 0, value: null, failedAt: 0 }
+/** Windows 进程 CPU 是累计 CPU 秒数，需要两次采样求差 */
+const windowsCpuSamples = new Map()
+
+function execTelemetry(command, args) {
+  return execFileSync(command, args, {
+    encoding: 'utf8',
+    timeout: TELEMETRY_CMD_TIMEOUT_MS,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    windowsHide: true,
+  })
+}
+
+function cleanNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER, digits = 1 } = {}) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < min) return undefined
+  const clamped = Math.min(max, n)
+  return digits === 0 ? Math.round(clamped) : Math.round(clamped * 10 ** digits) / 10 ** digits
+}
+
+/** 采样引擎子进程 CPU% / RSS（MB）。失败或无权限时返回 {}。 */
+export function sampleProcessTelemetry(pid, now = Date.now()) {
+  const safePid = Number(pid)
+  if (!Number.isInteger(safePid) || safePid <= 0) return {}
+  try {
+    if (IS_WINDOWS) {
+      const output = execTelemetry('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$p = Get-Process -Id ${safePid} -ErrorAction SilentlyContinue; if ($p) { "$($p.CPU);$($p.WorkingSet64)" }`,
+      ])
+      const [cpuSecondsRaw, workingSetRaw] = String(output).trim().split(';')
+      const cpuSeconds = Number(cpuSecondsRaw)
+      const workingSet = Number(workingSetRaw)
+      const previous = windowsCpuSamples.get(safePid)
+      windowsCpuSamples.set(safePid, { cpuSeconds, at: now })
+      const rssMb = cleanNumber(workingSet / (1024 * 1024), { digits: 0 })
+      if (Number.isFinite(cpuSeconds) && previous && Number.isFinite(previous.cpuSeconds)) {
+        const wallMs = Math.max(1, now - previous.at)
+        const deltaCpuMs = Math.max(0, (cpuSeconds - previous.cpuSeconds) * 1000)
+        return { cpuPct: cleanNumber((deltaCpuMs / wallMs) * 100), rssMb }
+      }
+      return { rssMb }
+    }
+    const output = execTelemetry('ps', ['-p', String(safePid), '-o', '%cpu=,rss='])
+    const [cpuRaw, rssRaw] = String(output).trim().split(/\s+/)
+    const rssKb = Number(rssRaw)
+    return {
+      cpuPct: cleanNumber(cpuRaw),
+      rssMb: cleanNumber(rssKb / 1024, { digits: 0 }),
+    }
+  } catch {
+    windowsCpuSamples.delete(safePid)
+    return {}
+  }
+}
+
+/** 采样 NVIDIA GPU（利用率 / 显存 / 温度）。没有 nvidia-smi 时缓存 60s 避免反复失败。 */
+export function sampleGpuTelemetry(now = Date.now()) {
+  if (now - gpuTelemetryCache.at < GPU_TELEMETRY_CACHE_MS) return gpuTelemetryCache.value
+  if (gpuTelemetryCache.failedAt && now - gpuTelemetryCache.failedAt < 60_000) return null
+  let value = null
+  try {
+    const candidates = IS_WINDOWS
+      ? ['nvidia-smi', 'C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe']
+      : ['nvidia-smi']
+    let output = ''
+    let lastError
+    for (const candidate of candidates) {
+      try {
+        output = execTelemetry(candidate, [
+          '--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu',
+          '--format=csv,noheader,nounits',
+        ])
+        lastError = undefined
+        break
+      } catch (error) {
+        lastError = error
+      }
+    }
+    if (lastError) throw lastError
+    const firstLine = String(output).trim().split(/\r?\n/)[0]
+    if (firstLine) {
+      const parts = firstLine.split(',').map((part) => part.trim())
+      if (parts.length >= 5) {
+        const name = parts.slice(0, parts.length - 4).join(', ')
+        value = {
+          gpuName: name.slice(0, 80),
+          gpuUtilPct: cleanNumber(parts[parts.length - 4], { max: 100 }),
+          vramUsedMb: cleanNumber(parts[parts.length - 3], { digits: 0 }),
+          vramTotalMb: cleanNumber(parts[parts.length - 2], { digits: 0 }),
+          gpuTempC: cleanNumber(parts[parts.length - 1], { max: 200 }),
+        }
+      }
+    }
+    if (!value) gpuTelemetryCache.failedAt = now
+  } catch {
+    gpuTelemetryCache.failedAt = now
+  }
+  gpuTelemetryCache = { at: now, value, failedAt: gpuTelemetryCache.failedAt }
+  return value
+}
+
+/** 引擎进程 + GPU 的合并遥测（1.5s 缓存，心跳与进度上报共用）。 */
+export function sampleTelemetry(pid, now = Date.now()) {
+  if (!pid) return {}
+  if (processTelemetryCache.pid === pid && now - processTelemetryCache.at < TELEMETRY_CACHE_MS) {
+    return processTelemetryCache.value
+  }
+  const value = {
+    ...sampleProcessTelemetry(pid, now),
+    ...(sampleGpuTelemetry(now) ?? {}),
+    sampledAt: now,
+  }
+  processTelemetryCache = { pid, at: now, value }
+  return value
+}
+
+/* ------------------------------------------------------------------ */
 /* EngineManager：常驻引擎（懒启动 / 复用 / 切换 / 空闲退出 / 崩溃重启）  */
 /* ------------------------------------------------------------------ */
 
@@ -1185,6 +1352,13 @@ export class EngineManager {
     this.startedAt = 0
     this.lastUsedAt = 0
     this.busy = false
+    /** P13：当前生成阶段与采样步数（由执行器 / 合成轮询更新，心跳里上报） */
+    this.phase = 'idle'
+    this.phaseLabel = PHASE_LABELS.idle
+    this.step = undefined
+    this.stepTotal = undefined
+    this.speed = undefined
+    this.estimated = undefined
     this.logStream = null
     this.logPath = null
     this.logTail = ''
@@ -1203,13 +1377,49 @@ export class EngineManager {
       port: this.port,
       warm: this.state === 'ready',
       busy: this.busy,
+      phase: this.phase,
+      phaseLabel: this.phaseLabel,
+      step: this.step,
+      stepTotal: this.stepTotal,
+      speed: this.speed,
+      ...this.telemetry(),
     }
   }
 
-  /** 心跳里上报的引擎信息；没有引擎时返回 undefined（buildAuthBody 会丢弃）。 */
+  /** P13：当前引擎进程的资源快照（无进程时为空对象，不伪造）。 */
+  telemetry() {
+    if (!this.child?.pid) return {}
+    return sampleTelemetry(this.child.pid, this.now())
+  }
+
+  /** 更新当前阶段；执行器在每个阶段切换时调用（同时清掉上一步的采样步数）。 */
+  setPhase(phase, phaseLabel, detail = {}) {
+    this.phase = phase || 'idle'
+    this.phaseLabel = phaseLabel || PHASE_LABELS[this.phase] || ''
+    this.step = Number.isFinite(Number(detail.step)) ? Number(detail.step) : undefined
+    this.stepTotal = Number.isFinite(Number(detail.stepTotal)) ? Number(detail.stepTotal) : undefined
+    this.speed = Number.isFinite(Number(detail.speed)) ? Number(detail.speed) : undefined
+    this.estimated = typeof detail.estimated === 'boolean' ? detail.estimated : undefined
+  }
+
+  /** 心跳里上报的引擎信息；没有引擎时也上报 state=stopped（界面据此显示「引擎未启动」）。 */
   heartbeatInfo() {
-    if (!this.child) return undefined
-    const info = { variant: this.variant, pid: this.child.pid, warm: this.state === 'ready', lm: this.lm || null, api: this.api }
+    const info = {
+      state: this.state === 'crashed' ? 'error' : this.state,
+      api: this.api,
+      variant: this.variant ?? undefined,
+      pid: this.child?.pid ?? undefined,
+      warm: this.state === 'ready',
+      lm: this.lm || null,
+      device: ACESTEP_DEVICE,
+      phase: this.phase,
+      phaseLabel: this.phaseLabel,
+      step: this.step,
+      stepTotal: this.stepTotal,
+      speed: this.speed,
+      estimated: this.estimated,
+      ...this.telemetry(),
+    }
     if (this.adapterPath) info.adapter = path.basename(this.adapterPath)
     return info
   }
@@ -1420,6 +1630,7 @@ export class EngineManager {
       this.lm = ''
       this.port = null
       this.baseUrl = null
+      this.setPhase('idle', PHASE_LABELS.idle)
       this.closeLogStream()
     })
     try {
@@ -1455,6 +1666,7 @@ export class EngineManager {
     this.lm = ''
     this.port = null
     this.baseUrl = null
+    this.setPhase('idle', PHASE_LABELS.idle)
     if (child) {
       this.log(`停止引擎${variant ? `（${variant}）` : ''}：${reason}`)
       const disposal = await terminateChild(child, { graceMs, log: this.log })
@@ -1526,11 +1738,13 @@ export function resolveAdapterPath(params = {}) {
 /** 领取/复用引擎（引擎启动进度由 EngineManager 经 onProgress 上报 0.15）。 */
 async function acquireEngine({ ctx, engineManager, variant, adapterPath, lm = '' }) {
   const startedAt = Date.now()
+  engineManager.setPhase('engine', PHASE_LABELS.engine)
   const engine = await engineManager.ensure(variant, {
     adapterPath,
     lm,
     signal: ctx.signal,
-    onProgress: (progress, message) => ctx.progress(progress, message),
+    onProgress: (progress, message) =>
+      ctx.progress(progress, message, { phase: 'engine', phaseLabel: PHASE_LABELS.engine }),
   })
   const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1)
   const label = engineLabel(variant, adapterPath, lm)
@@ -1645,7 +1859,7 @@ async function postAceJob({ baseUrl, path: jobPath, body, contentType, timeoutMs
 }
 
 /** 轮询 job 直到 done/failed/cancelled；超时抛中文错误。 */
-async function waitAceJob({ baseUrl, jobId, timeoutMs, signal, label = '任务', logTail = () => '' }) {
+async function waitAceJob({ baseUrl, jobId, timeoutMs, signal, label = '任务', logTail = () => '', onStatus }) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
     throwIfAborted(signal)
@@ -1661,7 +1875,15 @@ async function waitAceJob({ baseUrl, jobId, timeoutMs, signal, label = '任务',
     if (!response.ok) throw new Error(`查询 AI 音频生成引擎 job 失败（HTTP ${response.status}）${aceLogTail(logTail())}`)
     let status = ''
     try {
-      status = String((await response.json())?.status ?? '')
+      const parsed = await response.json()
+      status = String(parsed?.status ?? '')
+      if (parsed && typeof parsed === 'object') {
+        try {
+          onStatus?.(parsed)
+        } catch {
+          /* 状态回调失败不影响任务 */
+        }
+      }
     } catch {
       status = ''
     }
@@ -1807,10 +2029,18 @@ async function postSynthWithProgress({
   timeoutMs,
   estimatedMs,
   label,
+  totalSteps = 0,
 }) {
   const startedAt = Date.now()
   const pollAbort = new AbortController()
   let canceled = false
+  /** 现代运行时 job 若暴露 progress，就用引擎真实比例覆盖估算（feature-detect） */
+  let engineRatio
+  engineManager.setPhase('sampling', PHASE_LABELS.sampling, {
+    step: 1,
+    stepTotal: totalSteps || undefined,
+    estimated: Boolean(totalSteps),
+  })
   const pollTask = (async () => {
     while (!pollAbort.signal.aborted) {
       try {
@@ -1819,9 +2049,29 @@ async function postSynthWithProgress({
         return
       }
       if (pollAbort.signal.aborted) return
-      const progress = estimateProgress({ elapsedMs: Date.now() - startedAt, estimatedMs })
+      const elapsedMs = Date.now() - startedAt
+      const progress =
+        engineRatio == null
+          ? estimateProgress({ elapsedMs, estimatedMs })
+          : 0.3 + Math.min(1, Math.max(0, engineRatio)) * 0.6
+      const stepInfo =
+        engineRatio == null
+          ? estimateStepProgress({ progress, totalSteps })
+          : { step: Math.max(1, Math.ceil(engineRatio * Math.max(1, totalSteps))), stepTotal: totalSteps, estimated: false }
+      const speed =
+        totalSteps > 0 && stepInfo.step
+          ? Math.round((stepInfo.step / Math.max(0.5, elapsedMs / 1000)) * 10) / 10
+          : undefined
+      const stepText = totalSteps > 0 ? ` · ${stepInfo.estimated ? '≈' : ''}第 ${stepInfo.step}/${totalSteps} 步` : ''
       try {
-        await ctx.progress(progress, `${label} ${Math.round(progress * 100)}%（估算）`)
+        await ctx.progress(progress, `${label}${stepText}${engineRatio == null ? '（估算）' : ''}`, {
+          phase: 'sampling',
+          phaseLabel: PHASE_LABELS.sampling,
+          step: stepInfo.step,
+          stepTotal: totalSteps || undefined,
+          speed,
+          estimated: stepInfo.estimated,
+        })
       } catch (error) {
         if (error instanceof CancelledError) {
           canceled = true
@@ -1846,6 +2096,12 @@ async function postSynthWithProgress({
         signal: jobSignal,
         label: '合成',
         logTail: () => engineManager?.logTail,
+        onStatus: (status) => {
+          const raw = Number(status?.progress)
+          if (!Number.isFinite(raw)) return
+          const ratio = raw > 1 ? raw / 100 : raw
+          if (ratio >= 0 && ratio <= 1) engineRatio = ratio
+        },
       })
       const resultResponse = await fetchAceJobResult({ baseUrl, jobId: currentJobId, timeoutMs: 300_000, signal: jobSignal })
       const buffer = Buffer.from(await resultResponse.arrayBuffer())
@@ -1870,6 +2126,11 @@ async function postSynthWithProgress({
     } catch {
       throw new Error(`AI 音频生成引擎 返回的不是有效 WAV（${file.length} 字节）`)
     }
+    await ctx.progress(0.94, '正在解码音频…', {
+      phase: 'decoding',
+      phaseLabel: PHASE_LABELS.decoding,
+      estimated: false,
+    })
     return file
   } catch (error) {
     if (canceled || ctx.isCanceled()) {
@@ -1894,7 +2155,11 @@ async function postSynthWithProgress({
 /** 合成完成 → progress(1)；此刻若服务端要求取消，同样杀引擎并按取消处理。 */
 async function reportCompletionProgress({ ctx, engineManager }) {
   try {
-    await ctx.progress(1, '完成')
+    await ctx.progress(0.98, '正在写入工程…', {
+      phase: 'upload',
+      phaseLabel: PHASE_LABELS.upload,
+      estimated: false,
+    })
   } catch (error) {
     if (error instanceof CancelledError) {
       await engineManager.kill(ctx.cancelReason())
@@ -1982,12 +2247,16 @@ async function runGenerate(task, ctx, { engineManager }) {
   ctx.log(
     `执行 generate_audio（${engineLabel(variant, adapterPath, lmTier)}，${basePayload.duration}s / ${basePayload.bpm ?? params.bpm ?? '?'} BPM / ${basePayload.keyscale ?? params.keyscale ?? '?'}${quality ? `，质量模式：提示词增强(${lmTier})→${VARIANT_DISPLAY_NAMES[variant] ?? '精修生成模型'} ${QUALITY_STEPS} 步` : ''}）`,
   )
-  await ctx.progress(0.05, '准备任务')
+  await ctx.progress(0.05, '准备任务', { phase: 'prepare', phaseLabel: PHASE_LABELS.prepare })
   const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath, lm: lmTier })
   try {
+    const totalSteps = quality ? QUALITY_STEPS : Number(basePayload.inference_steps) || 8
     if (quality) {
       const engineHint = `（${VARIANT_DISPLAY_NAMES[variant] ?? '精修生成模型'} + 提示词增强 ${lmTier}）`
-      await ctx.progress(0.3, engine.warm ? `复用常驻引擎${engineHint}` : `开始质量合成${engineHint}`)
+      await ctx.progress(0.3, engine.warm ? `复用常驻引擎${engineHint}` : `开始质量合成${engineHint}`, {
+        phase: 'prompt',
+        phaseLabel: PHASE_LABELS.prompt,
+      })
       const lmStartedAt = Date.now()
       const lmResult = await postLm({ ctx, baseUrl: engine.baseUrl, body: JSON.stringify(lmPayload) })
       const codeLen = typeof lmResult.audio_codes === 'string' ? lmResult.audio_codes.length : 0
@@ -1996,7 +2265,13 @@ async function runGenerate(task, ctx, { engineManager }) {
       ctx.log(
         `LM 完成（${((Date.now() - lmStartedAt) / 1000).toFixed(1)}s）：bpm=${synthRequest.bpm ?? '?'} key=${synthRequest.keyscale ?? '?'} → ${VARIANT_DISPLAY_NAMES[variant] ?? '精修生成模型'} ${QUALITY_STEPS} 步合成`,
       )
-      await ctx.progress(0.4, `合成中（质量模式 ${QUALITY_STEPS} 步）`)
+      await ctx.progress(0.4, `合成中（质量模式 ${QUALITY_STEPS} 步）`, {
+        phase: 'sampling',
+        phaseLabel: PHASE_LABELS.sampling,
+        step: 1,
+        stepTotal: totalSteps,
+        estimated: true,
+      })
       const estimatedMs = Math.max(20_000, estimateGenerationSeconds({ type: TASK_TYPE_GENERATE, params }) * 1000)
       const file = await postSynthWithProgress({
         ctx,
@@ -2007,6 +2282,7 @@ async function runGenerate(task, ctx, { engineManager }) {
         timeoutMs: ACESTEP_SYNTH_TIMEOUT_MS,
         estimatedMs,
         label: '质量合成中',
+        totalSteps,
       })
       await reportCompletionProgress({ ctx, engineManager })
       return { file, fileName: `${sanitizeFileName(task.id)}.wav` }
@@ -2015,7 +2291,11 @@ async function runGenerate(task, ctx, { engineManager }) {
     const fastPayload = { ...basePayload }
     if (variant === 'xl_turbo') fastPayload.shift = 3.0
     const payload = applyModelSelection(fastPayload, { variant })
-    await ctx.progress(0.3, engine.warm ? `复用常驻引擎（${engineLabel(variant, adapterPath)}）` : `开始生成音频（${VARIANT_DISPLAY_NAMES[variant] ?? '快速生成模型'}）`)
+    await ctx.progress(
+      0.3,
+      engine.warm ? `复用常驻引擎（${engineLabel(variant, adapterPath)}）` : `开始生成音频（${VARIANT_DISPLAY_NAMES[variant] ?? '快速生成模型'}）`,
+      { phase: 'sampling', phaseLabel: PHASE_LABELS.sampling, step: 1, stepTotal: totalSteps, estimated: true },
+    )
     const estimatedMs = estimateGenerationSeconds({ type: TASK_TYPE_GENERATE, params }) * 1000
     const file = await postSynthWithProgress({
       ctx,
@@ -2026,6 +2306,7 @@ async function runGenerate(task, ctx, { engineManager }) {
       timeoutMs: ACESTEP_SYNTH_TIMEOUT_MS,
       estimatedMs,
       label: '生成中',
+      totalSteps,
     })
     await reportCompletionProgress({ ctx, engineManager })
     return { file, fileName: `${sanitizeFileName(task.id)}.wav` }
@@ -2052,7 +2333,7 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
   const basic = validateRepaintParams(params, basicOptions)
   if (basic.style) ctx.log(`style=${basic.style}（仅记录，未参与引擎参数）`)
   ctx.log(`执行 repaint_audio（${engineLabel(variant, adapterPath)}）：source=${basic.sourceAssetId} ${basic.startSec}-${basic.endSec}s`)
-  await ctx.progress(0.05, '下载源音频')
+  await ctx.progress(0.05, '下载源音频', { phase: 'prepare', phaseLabel: PHASE_LABELS.prepare })
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: basic.sourceAssetId, ctx })
   try {
     const info = readWavInfo(source.bytes)
@@ -2065,6 +2346,7 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
       await ctx.progress(
         0.3,
         `开始重绘 ${validated.startSec}-${validated.endSec}s（${engineLabel(variant, validated.adapterPath)}，${regionSec}s）`,
+        { phase: 'sampling', phaseLabel: PHASE_LABELS.sampling, step: 1, stepTotal: 50, estimated: true },
       )
       const request = applyModelSelection(buildRepaintRequest(validated), { variant })
       const sourceAudio = readFileSync(source.tempFile)
@@ -2083,6 +2365,7 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
         timeoutMs: ACESTEP_SYNTH_TIMEOUT_MS,
         estimatedMs,
         label: '重绘中',
+        totalSteps: Number(request.inference_steps) || 50,
       })
       await reportCompletionProgress({ ctx, engineManager })
       return { file, fileName: `repaint-${sanitizeFileName(task.id)}.wav` }
@@ -2116,14 +2399,20 @@ async function runCover(task, ctx, { engineManager, serverUrl }) {
   ctx.log(
     `执行 cover_audio（${engineLabel(variant)}）：source=${validated.sourceAssetId} strength=${validated.strength.toFixed(2)}`,
   )
-  await ctx.progress(0.05, '下载源音频')
+  await ctx.progress(0.05, '下载源音频', { phase: 'prepare', phaseLabel: PHASE_LABELS.prepare })
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: validated.sourceAssetId, ctx })
   try {
     const info = readWavInfo(source.bytes)
     ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
     const engine = await acquireEngine({ ctx, engineManager, variant })
     try {
-      await ctx.progress(0.15, engine.warm ? `复用常驻引擎（${variant}）` : `开始重编（cover，${variant}）`)
+      await ctx.progress(0.15, engine.warm ? `复用常驻引擎（${variant}）` : `开始重编（cover，${variant}）`, {
+        phase: 'sampling',
+        phaseLabel: PHASE_LABELS.sampling,
+        step: 1,
+        stepTotal: 8,
+        estimated: true,
+      })
       const request = applyModelSelection(
         buildCoverRequest({
           ...validated,
@@ -2146,6 +2435,7 @@ async function runCover(task, ctx, { engineManager, serverUrl }) {
         timeoutMs: ACESTEP_SYNTH_TIMEOUT_MS,
         estimatedMs,
         label: '重编中（cover）',
+        totalSteps: Number(request.inference_steps) || 8,
       })
       await reportCompletionProgress({ ctx, engineManager })
       ctx.log(`cover_audio 完成：${(file.length / 1024 / 1024).toFixed(2)}MB（保结构换编制，原旋律走向可调 strength）`)
@@ -2179,14 +2469,20 @@ async function runStem(task, ctx, { engineManager, serverUrl }) {
   const lmTier = lmTierForTask(TASK_TYPE_STEM, params)
   ctx.log(`执行 generate_stem（${engineLabel(variant, adapterPath)}，arm=${validated.arm}）：source=${validated.sourceAssetId}`)
   ctx.log('说明：输出是该 arm 独立生成的 stem（不是源音频+stem 混音），不保证与源音频逐样本对齐')
-  await ctx.progress(0.05, '下载源音频')
+  await ctx.progress(0.05, '下载源音频', { phase: 'prepare', phaseLabel: PHASE_LABELS.prepare })
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: validated.sourceAssetId, ctx })
   try {
     const info = readWavInfo(source.bytes)
     ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
     const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath, lm: lmTier })
     try {
-      await ctx.progress(0.3, `开始拆分 ${validated.arm}（${engineLabel(variant, adapterPath)}）`)
+      await ctx.progress(0.3, `开始拆分 ${validated.arm}（${engineLabel(variant, adapterPath)}）`, {
+        phase: 'sampling',
+        phaseLabel: PHASE_LABELS.sampling,
+        step: 1,
+        stepTotal: 50,
+        estimated: true,
+      })
       const request = applyModelSelection(buildLegoRequest(validated), { variant, lmTier })
       const sourceAudio = readFileSync(source.tempFile)
       const multipart = buildSynthMultipart({
@@ -2209,6 +2505,7 @@ async function runStem(task, ctx, { engineManager, serverUrl }) {
         timeoutMs: ACESTEP_SYNTH_TIMEOUT_MS,
         estimatedMs,
         label: `拆分 ${validated.arm}`,
+        totalSteps: Number(request.inference_steps) || 50,
       })
       const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1)
       await reportCompletionProgress({ ctx, engineManager })
@@ -2379,12 +2676,17 @@ export class CompanionClient {
     }
   }
 
-  async progress(taskId, progress, message) {
+  async progress(taskId, progress, message, extra = {}) {
     try {
       const json = await withRetry(
         () =>
           this.requestJson('/api/companion/progress', {
-            body: this.authBody({ taskId, progress: clampProgress(progress), message: message || undefined }),
+            body: this.authBody({
+              taskId,
+              progress: clampProgress(progress),
+              message: message || undefined,
+              ...extra,
+            }),
           }),
         { label: 'progress', attempts: 3, baseMs: 300, maxMs: 3000, shouldStop: this.shouldStop, log: this.log },
       )
@@ -2475,7 +2777,7 @@ export class CompanionClient {
 /* 任务执行                                                             */
 /* ------------------------------------------------------------------ */
 
-async function handleTask(task, executor, client, state, log) {
+async function handleTask(task, executor, client, state, log, engineManager = null) {
   const priority = normalizePriority(task.priority)
   const requiredVariant = task.requiredVariant ?? inferRequiredVariant(task.type, task.params)
   const arm = typeof task.params?.arm === 'string' && task.params.arm.trim() ? task.params.arm.trim() : null
@@ -2496,17 +2798,24 @@ async function handleTask(task, executor, client, state, log) {
   state.cancelRequested = false
   state.cancelReason = null
   state.activeAbort = controller
+  engineManager?.setPhase('prepare', PHASE_LABELS.prepare)
   const runCtx = {
     signal: controller.signal,
     isCanceled: () => state.cancelRequested || controller.signal.aborted,
     cancelReason: () => state.cancelReason || '用户取消',
     log: (message) => log(message, { taskId: task.id }),
-    progress: async (value, message) => {
+    progress: async (value, message, extra = {}) => {
       const progress = clampProgress(value)
+      if (extra.phase || extra.stepTotal) {
+        engineManager?.setPhase(extra.phase ?? engineManager.phase, extra.phaseLabel, extra)
+      }
       log(`进度 ${Math.round(progress * 100)}%${message ? ` · ${message}` : ''}`, { taskId: task.id })
       let response
       try {
-        response = await client.progress(task.id, progress, message)
+        response = await client.progress(task.id, progress, message, {
+          ...extra,
+          telemetry: engineManager?.telemetry(),
+        })
       } catch (error) {
         if (error instanceof SessionExpiredError) throw error
         log(`progress 上报失败（不影响生成）：${readableError(error)}`, { taskId: task.id })
@@ -2544,6 +2853,7 @@ async function handleTask(task, executor, client, state, log) {
     state.currentTaskId = null
     state.activeAbort = null
     state.cancelRequested = false
+    engineManager?.setPhase('idle', PHASE_LABELS.idle)
   }
   return succeeded
 }
@@ -2690,7 +3000,7 @@ export async function runCompanion(options, { log = createLogger(), executor } =
         await sleep(client.pollMs)
         continue
       }
-      const succeeded = await handleTask(task, activeExecutor, client, state, log)
+      const succeeded = await handleTask(task, activeExecutor, client, state, log, engineManager)
       if (options.once) {
         log(`--once：已处理 1 个任务（${succeeded ? '成功' : '失败'}），退出`)
         return succeeded ? 0 : 1

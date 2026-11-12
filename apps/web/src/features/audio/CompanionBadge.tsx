@@ -16,6 +16,23 @@ const POLL_MS = 30_000
 export const COMPANION_START_HINT =
   '没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --engine'
 
+/**
+ * 直接把「本服务地址」填成当前页面 origin：用户复制后就能跑，
+ * 不用再猜 <本服务地址> 是 5183 还是 8787（开发时 Vite 会把 /api 代理到后端）。
+ */
+export function companionStartHint(origin?: string): string {
+  const base = (origin ?? (typeof window !== 'undefined' ? window.location.origin : '')).replace(/\/$/, '')
+  if (!base) return COMPANION_START_HINT
+  return `没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server ${base} --engine`
+}
+
+/** 服务端 hint 若是带 <本服务地址> 的模板，就用当前 origin 填好；否则保留服务端原文 */
+export function resolveCompanionHint(serverHint?: string, origin?: string): string {
+  const hint = serverHint?.trim()
+  if (hint && !hint.includes('<')) return hint
+  return companionStartHint(origin)
+}
+
 export function CompanionBadge({ onOpenPanel }: { onOpenPanel?: () => void }) {
   const [status, setStatus] = useState<CompanionStatus | null>(null)
   const [failed, setFailed] = useState(false)
@@ -44,7 +61,7 @@ export function CompanionBadge({ onOpenPanel }: { onOpenPanel?: () => void }) {
 
   const online = !failed && status?.online === true
   const summary = status?.summary
-  const hint = status?.hint ?? COMPANION_START_HINT
+  const hint = resolveCompanionHint(status?.hint)
   const title = online
     ? `Companion 在线：${summary?.workers ?? 0} 个节点 · 运行 ${summary?.running ?? 0} / 排队 ${summary?.queued ?? 0}（点击打开「AI 生成音频」）`
     : failed

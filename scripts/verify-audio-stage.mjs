@@ -73,7 +73,9 @@ const STATES = [
     expectStatus: 'running',
     requireAnimation: true,
     expectEta: true,
-    maxHeight: 240,
+    maxHeight: 300,
+    requireHud: true,
+    requireStages: true,
     textIncludes: ['热血 J-ROCK 分轨'],
     setup: `
       const s = window.AIAB.useAudioJobStore.getState()
@@ -85,6 +87,49 @@ const STATES = [
       })
       s.updateStep('song', { status: 'done', progress: 1, startedAt: Date.now() - 42000 })
       s.updateStep('stem:drums', { status: 'running', progress: 0.62, startedAt: Date.now() - 24000 })
+      return true
+    `,
+  },
+  {
+    id: 'stems-running-live',
+    label: '分轨运行中 + 引擎遥测（GPU/显存/CPU/内存 + 采样步数）',
+    expectStatus: 'running',
+    requireAnimation: true,
+    expectEta: true,
+    maxHeight: 330,
+    requireHud: true,
+    requireStages: true,
+    textIncludes: ['热血 J-ROCK 分轨', 'GPU', '显存', 'CPU', '内存'],
+    softTextIncludes: ['扩散采样', '31/50', 'CUDA0', '快速生成模型'],
+    setup: `
+      const s = window.AIAB.useAudioJobStore.getState()
+      s.start({
+        mode: 'audio_with_stems',
+        title: '热血 J-ROCK 分轨',
+        caption: 'j-rock, 168 bpm',
+        steps: ${STEMS_STEPS},
+      })
+      s.updateStep('song', { status: 'done', progress: 1, startedAt: Date.now() - 42000 })
+      s.updateStep('stem:drums', { status: 'running', progress: 0.62, startedAt: Date.now() - 24000 })
+      s.update({
+        taskId: 'stage_demo_task_live',
+        telemetry: {
+          phase: 'sampling',
+          phaseLabel: '扩散采样',
+          step: 31,
+          stepTotal: 50,
+          speed: 2.4,
+          estimated: true,
+          cpuPct: 138,
+          rssMb: 2380,
+          gpuName: 'NVIDIA GeForce RTX 4090',
+          gpuUtilPct: 87,
+          vramUsedMb: 7214,
+          vramTotalMb: 24564,
+          gpuTempC: 68,
+          engine: { state: 'busy', variant: 'turbo', device: 'CUDA0', warm: true, pid: 4213 },
+        },
+      })
       return true
     `,
   },
@@ -136,6 +181,7 @@ const STATES = [
     expectStatus: 'blocked',
     requireAnimation: true,
     requireAnimationProbes: [['[data-gen-radar] .gen-radar-ring', '.gen-detect-dot']],
+    requireCheck: true,
     textIncludes: ['Companion'],
     softTextIncludes: ['node scripts/companion.mjs'],
     softButtonTexts: ['复制'],
@@ -398,6 +444,9 @@ const MEASURE = String.raw`(() => {
     cancel: Boolean(card.querySelector('[data-audio-job-cancel]')),
     install: Boolean(card.querySelector('[data-audio-job-install]')),
     retry: Array.from(card.querySelectorAll('button')).some((b) => (b.textContent || '').includes('重试')),
+    telemetry: Boolean(card.querySelector('[data-gen-telemetry]')),
+    stages: Boolean(card.querySelector('[data-gen-stages]')),
+    check: Boolean(card.querySelector('[data-gen-check]')),
   }
 
   /* <10px 文本：遍历卡内直接文本节点，检查父元素 computed font-size */
@@ -572,6 +621,15 @@ function assertRun(state, run) {
     add('关闭钩子 aria-label="关闭音频任务卡"', m.hooks.close, m.hooks.close ? '' : '缺失（硬约束）')
     if (state.expectStatus === 'running') {
       add('运行态取消钩子 data-audio-job-cancel', m.hooks.cancel, m.hooks.cancel ? '' : '缺失（硬约束）')
+    }
+    if (state.requireStages) {
+      add('阶段轨道 [data-gen-stages]', m.hooks.stages, m.hooks.stages ? '' : '缺失（P13）')
+    }
+    if (state.requireHud) {
+      add('引擎遥测 HUD [data-gen-telemetry]', m.hooks.telemetry, m.hooks.telemetry ? '' : '缺失（P13）')
+    }
+    if (state.requireCheck) {
+      add('启动检查清单 [data-gen-check]', m.hooks.check, m.hooks.check ? '' : '缺失（P13）')
     }
     if ((state.requiredSelectors || []).includes('[data-audio-job-install]')) {
       add('阻塞态安装钩子 data-audio-job-install', m.hooks.install, m.hooks.install ? '' : '缺失（硬约束）')

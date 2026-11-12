@@ -8,6 +8,7 @@
  * - 这样 Codex / DSH 等外部 Agent 后端也能共用同一套执行逻辑；
  * - 参数校验失败时返回结构化的中文提示，让模型自己修正后重试。
  */
+import { listWorkers } from '../companion/store.js'
 import type { ToolContext, ToolDef, ToolResult } from './schema.js'
 import { arr, bool, enm, int, num, str, toolSchema } from './schema.js'
 
@@ -155,12 +156,21 @@ export const AUDIO_TOOLS: ToolDef[] = [
       }
       const stemText = stems.length ? `，分轨：${stems.map((arm) => STEM_LABEL[arm] ?? arm).join(' / ')}` : ''
       const engineText = engine ? `，引擎：${ENGINE_LABEL[engine]}` : ''
+      // 工具只安排计划，真正执行在前端；先看一眼节点是否在线，避免 AI 回复「已生成」误导用户。
+      // 离线不是错误：计划照常下发，界面会先建好占位轨并在节点上线后自动继续。
+      const needsCompanion = mode !== 'midi_to_audio' && mode !== 'midi_then_audio'
+      const workerOnline = !needsCompanion || listWorkers().length > 0
+      const offlineHint = workerOnline
+        ? ''
+        : '注意：当前没有在线的生成节点（Companion），任务会先在界面中建好轨道并等待节点接入，启动后自动继续。' +
+          '请如实告诉用户「任务已安排、正在等待生成节点」，不要声称已经生成完成。'
       return {
         ok: true,
         message:
           `已安排音频任务：${MODE_LABEL[mode]}（BPM ${bpm}${mode === 'midi_to_audio' ? '' : `，约 ${durationSec}s`}${stemText}${engineText}）。` +
-          '生成在界面中异步执行，完成后自动加入音频轨；你不需要轮询，用一两句话告诉用户选择了哪种模式即可。',
-        data: { audioPlan },
+          '生成在界面中异步执行，完成后自动加入音频轨；你不需要轮询，用一两句话告诉用户选择了哪种模式即可。' +
+          offlineHint,
+        data: { audioPlan, workerOnline },
       }
     },
   },

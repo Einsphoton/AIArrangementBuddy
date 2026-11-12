@@ -1,4 +1,4 @@
-# Companion 工作节点（P5-A / P9）
+# Companion 工作节点（P5-A / P9 / P13）
 
 > 状态：P5-A（常驻引擎 + 真取消 + repaint + 真实能力上报/优先级 + generate_stem lego 分轨/base 变体）；**P9 起支持两种运行时形态（legacy / modern）与「引擎量级」参数（2B / XL 4B）**，详见 [P9_XL_ENGINE.md](./P9_XL_ENGINE.md)。Companion 是「数据面」进程：跑在用户自己的电脑/GPU 上，向服务端（NAS 控制面或本机服务）拉取音频生成任务并回传结果。
 > 设计背景见 [STUDIO_ARCHITECTURE.md](./STUDIO_ARCHITECTURE.md) §4；P1 用「HTTP 轮询」落地 §4 的 Worker 协议（WSS 推到后续）。
@@ -13,7 +13,10 @@ Companion（本机）                               服务端（NAS / 本机 878
      │  POST /api/companion/heartbeat   （每 heartbeatMs）
      │  { workerId, token,
      │    status: { busy, currentTaskId,
-     │              engine: { variant, pid, warm } } } ─▶ cancelTaskIds?（取消指令）
+     │              engine: { variant, pid, warm, state, device,
+     │                        phase, step, stepTotal, speed,
+     │                        cpuPct, rssMb, gpuUtilPct, vramUsedMb, ... } } }
+     │                                              ─▶ cancelTaskIds?（取消指令）
      │                                              │
      │  POST /api/companion/claim       （每 pollMs，无任务时 204）
      │  { workerId, token } ──────────────────────▶ │ { task: { id, type, params, projectId?,
@@ -30,7 +33,10 @@ Companion（本机）                               服务端（NAS / 本机 878
      │    本机缺该变体 → 节流提示（不刷屏）           │
      │                                              │
      │  POST /api/companion/progress    （0..1）
-     │  { workerId, token, taskId, progress, message } ─▶ { ok, cancel? }
+     │  { workerId, token, taskId, progress, message,
+     │    phase, phaseLabel, step, stepTotal, speed, estimated,
+     │    telemetry: { cpuPct, rssMb, gpuUtilPct, vramUsedMb, ... } }
+     │                                              ─▶ { ok, cancel? }
      │   cancel:true → 中止 HTTP + 杀引擎进程         │
      │                                              │
      │  POST /api/companion/complete    （multipart）
@@ -133,7 +139,7 @@ node scripts/companion.mjs --server http://127.0.0.1:8787 --name "本机 GPU" --
 8. **崩溃重启**：子进程意外退出会记录「引擎进程意外退出」，下一任务自动重启；进行中的任务按失败处理（会尝试 `complete(failed)`）。
 9. **SIGINT/SIGTERM**：中止在途 HTTP、按取消处理任务、`finally` 里 terminate→（超时）SIGKILL，确保不残留 `ace-server.exe`。
 
-心跳 status 会带上引擎信息（服务端忽略未知字段亦可）：`{ busy, currentTaskId, engine: { variant, pid, warm, adapter? } }`；没有引擎时省略 `engine`，`adapter` 仅在加载 LoRA 时出现。
+心跳 status 会带上引擎信息（服务端忽略未知字段亦可）：`{ busy, currentTaskId, engine: { variant, pid, warm, state, device, phase, step, stepTotal, speed, cpuPct, rssMb, gpuUtilPct, vramUsedMb, gpuTempC, adapter? } }`；P13 起即使没有引擎也会上报 `state: 'stopped'`（界面显示「引擎未启动」而不是空白），`adapter` 仅在加载 LoRA 时出现。GPU 指标只在本机 `nvidia-smi` 可用时上报；macOS Metal 无免密接口时如实缺省，由 UI 降级显示 CPU/内存。
 
 ### 4.2 generate_audio（turbo）
 
@@ -207,14 +213,22 @@ node scripts/companion.mjs --server http://127.0.0.1:8787 --name "本机 GPU" --
 - 排队阶段取消（服务端把 queued 直接置 canceled）无需 Companion 处理；claim 后才可能看到 cancel。
 - `--mock` 生成很快，取消通常发生在第一/第二次 progress（同样会走 complete(failed, error=用户取消)）。
 
-### 4.6 进度
+### 4.6 进度与实时遥测（P13）
 
-| 阶段 | progress | message 示例 |
-|---|---|---|
-| 引擎启动（冷启动） | ≈0.15 | `引擎启动中（turbo）` / `引擎启动中（sft）` |
-| 引擎复用/就绪 | 0.3 | `复用常驻引擎（turbo）` |
-| 合成中（每 ~2s 估算，封顶 0.9） | 0.3→0.9 | `生成中 47%（估算）` / `重绘中 61%（估算）` |
-| 完成 | 1 | `完成` |
+| 阶段 | phase | progress | message / step 示例 |
+|---|---|---|---|
+| 准备 / 下载源音频 | `prepare` | 0.05 | `准备任务` |
+| 引擎启动（冷启动） | `engine` | ≈0.15 | `引擎启动中（快速生成模型）` |
+| 引擎复用/就绪 | `engine` | 0.3 | `复用常驻引擎（快速生成模型）` |
+| 质量档提示词增强 | `prompt` | 0.3–0.4 | `理解你的描述` |
+| 扩散采样（每 ~2s 上报） | `sampling` | 0.3→0.9 | `生成中 · ≈第 23/50 步（估算）` |
+| 解码 / 封装 | `decoding` | 0.94 | `正在解码音频…` |
+| 写入工程 / 上传 | `upload` | 0.98 | `正在写入工程…` |
+| 完成 | — | 1（服务端 complete 时写入） | `完成` |
+
+- **步数来源**：引擎只暴露任务级进度，不暴露采样步数；Companion 按请求里的 `inference_steps`（快速 8 / 精修 50 / 分轨 50）线性推算，并带 `estimated: true`。界面显示为 `≈第 N/M 步`，不冒充引擎精确值；若未来现代运行时的 job 状态返回 `progress`，会优先采用真实比例（`estimated: false`）。
+- **资源遥测**：每次 `progress`（约 2s）与心跳（5s）附带 `telemetry`：`cpuPct`（`ps` / Windows PowerShell 采样引擎进程）、`rssMb`、`gpuUtilPct`/`vramUsedMb`/`vramTotalMb`/`gpuTempC`（`nvidia-smi`，5s 缓存）、`sampledAt`。采样失败只返回空字段，绝不影响生成。
+- **服务端**：`GET /api/companion/tasks/:id` 同时返回 `phase/step/telemetry` 与执行节点快照 `worker.status.engine`，前端任务卡无需额外轮询 `/status`；`GET /api/companion/status` 的 workers 也带同一份引擎遥测。
 
 ## 5. CLI 参考
 
@@ -236,7 +250,7 @@ node scripts/companion.mjs --server http://127.0.0.1:8899 --name "本机 GPU" [-
 
 | 变量 | 说明 |
 |---|---|
-| `GGML_BACKEND` | ACE-Step 后端，默认 `CUDA0`；同时作为注册能力里的 `gpu` 上报 |
+| `GGML_BACKEND` | ACE-Step 后端：Windows/Linux 默认 `CUDA0`，macOS 默认 `MTL0`（不是 `METAL`）；同时作为注册能力里的 `gpu` 上报 |
 | `TEMP` / `TMP` | ACE-Step 引擎日志、repaint/stem 源音频临时文件目录（系统临时目录） |
 
 心跳/轮询周期不由 CLI 指定：以 `register` 响应里的 `heartbeatMs`（1000–60000，默认 5000）和 `pollMs`（500–30000，默认 3000）为准，并做上下界保护。
@@ -339,6 +353,7 @@ node music-gen/tools/verify_companion.mjs
 | repaint 失败：`下载源音频失败（HTTP 404）` | `sourceAssetId` 不存在或服务端没存该资产；先确认 `/api/assets/:id/file` 可访问 |
 | 取消后下一任务明显变慢 | 预期行为：取消会杀引擎（推理无法安全中断），下一任务重新冷启动 |
 | 引擎频繁「意外退出」 | 显存不足/驱动崩溃；看引擎日志与 `nvidia-smi`；先用 `--mock` 排除协议问题 |
+| macOS 引擎启动即 exit=1，日志 `GGML_BACKEND=METAL not found. Available: MTL0 BLAS CPU` | 旧版 Companion 把 macOS 后端默认值写成了 `METAL`；ggml 的 Metal 后端名是 `MTL0`。P14 已改默认值；若环境变量显式设了 `GGML_BACKEND=METAL`，清掉或改为 `MTL0` 后重启 |
 | 带 LoRA 的任务引擎启动失败 | `adapterPath` 目录不存在/不完整或与基座不匹配（服务端已校验基座）；看 `%TEMP%\aiab-companion-ace-*.log`；先用无 `adapterId` 任务验证链路 |
 | 换 `adapterId` 后首个任务变慢 | 预期行为：引擎身份含适配器，换适配器要重启引擎（日志「切换模型：… → …+LoRA(…)」） |
 | `generate_stem` 立即 failed：`arm 非法` | arm 必须是 guitar/bass/drums/strings/keys/synth/vocals 之一（大小写不敏感）；服务端入队时也应校验 |

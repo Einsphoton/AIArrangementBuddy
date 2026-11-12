@@ -104,6 +104,8 @@ export interface AppState {
   helpOpen: boolean
   /** 智能片段编辑器聚焦的片段 */
   smartClipTarget: { trackId: string; clipId: string } | null
+  /** 编曲视图的「滚进视野」请求（只用于 UI，不持久化） */
+  revealRequest: { trackId: string; beat?: number; token: number } | null
 
   /* 走带 */
   isPlaying: boolean
@@ -209,6 +211,8 @@ export interface AppActions {
   setZoom: (zoomX?: number, zoomY?: number) => void
   setScrollBeat: (beat: number) => void
   setShowMixer: (show: boolean) => void
+  /** 请求编曲视图把某条轨 / 某个拍位置滚进视野（AI 落轨后自动定位） */
+  requestReveal: (trackId: string, beat?: number) => void
 
   /* 走带 */
   setPlaying: (playing: boolean) => void
@@ -299,6 +303,7 @@ export const useStore = create<Store>((set, get) => ({
   exportOpen: false,
   helpOpen: false,
   smartClipTarget: null,
+  revealRequest: null,
 
   isPlaying: false,
   playhead: 0,
@@ -800,6 +805,10 @@ export const useStore = create<Store>((set, get) => ({
   setZoom: (zoomX, zoomY) => set((state) => ({ zoomX: zoomX ?? state.zoomX, zoomY: zoomY ?? state.zoomY })),
   setScrollBeat: (beat) => set({ scrollBeat: Math.max(0, beat) }),
   setShowMixer: (show) => set({ showMixer: show }),
+  requestReveal: (trackId, beat) =>
+    set((state) => ({
+      revealRequest: { trackId, beat, token: (state.revealRequest?.token ?? 0) + 1 },
+    })),
 
   /* ---------------- 走带 ---------------- */
   setPlaying: (isPlaying) => set({ isPlaying }),

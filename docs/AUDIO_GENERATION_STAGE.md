@@ -75,7 +75,7 @@
 ```bash
 node scripts/build.mjs                                  # 前端/后端构建
 node node_modules/typescript/bin/tsc -p apps/web/tsconfig.json --noEmit
-STAGE_SKIP_BUILD=1 node scripts/verify-audio-stage.mjs  # 19 状态×宽度组合
+STAGE_SKIP_BUILD=1 node scripts/verify-audio-stage.mjs  # 21 状态×宽度组合
 node scripts/verify-audio-intent.mjs                    # 音频意图回归
 ```
 
@@ -83,7 +83,7 @@ node scripts/verify-audio-intent.mjs                    # 音频意图回归
 
 | 验收 | 结果 |
 | --- | --- |
-| `verify-audio-stage.mjs` | **19/19 PASS**：stems-running / text-running / queued / blocked-companion / blocked-provision / done / failed / midi-running × 1440/1280，compact（1440x640）、reduced-motion、auto-resume（真实 `runAudioPlan` → blocked → mock 节点上线 → 2.1s 内自动 running） |
+| `verify-audio-stage.mjs` | **21/21 PASS（P13 后）**：stems-running / stems-running-live / text-running / queued / blocked-companion / blocked-provision / done / failed / midi-running × 1440/1280，compact（1440x640）、reduced-motion、auto-resume（真实 `runAudioPlan` → blocked → mock 节点上线 → 2.1s 内自动 running） |
 | `verify-audio-intent.mjs` | **8/8 PASS**（含分轨模式预选 stems、MIDI→音频落轨） |
 | tsc / build | 通过（core / server / web） |
 
@@ -93,7 +93,56 @@ node scripts/verify-audio-intent.mjs                    # 音频意图回归
 
 产物：`.verify-ui-audio-stage/<state>-<width>.png`、`<state>-card@2x.png`、`report.json`。
 
-## 5. 已知边界
+## 5. P13：引擎实时遥测（让用户看见「正在生成 / 到哪一步 / 占用多少资源」）
+
+> 用户反馈：P12 的运行卡仍只有百分比、频谱和分轨 chip——无法确认音频引擎是否真的在生成、
+> 当前处在「载入模型 / 采样 / 解码 / 写盘」哪一段、采样到第几步、GPU/CPU/内存占用如何。
+
+### 5.1 运行态新增的「信息层」
+
+在原有叙事行 / 频谱 / 进度条 / 分轨管道之间插入两行，不挤掉既有信息：
+
+| 元素 | 内容 | 数据来源 |
+| --- | --- | --- |
+| 阶段轨道 `[data-gen-stages]` | 排队 → 载入模型 → 扩散采样 → 解码封装 → 写入轨道；完成绿点、当前琥珀脉冲点、未到低对比 | Companion 上报 `phase`；缺失时按整体进度/是否排队兜底 |
+| 引擎遥测 HUD `[data-gen-telemetry]` | 第一行：引擎状态（启动中/就绪/采样中/解码中/写入中）+ 冷启动提示 + 模型档位 / 计算设备 / pid；第二行：GPU 利用率、显存、CPU、内存（带细进度条） | `progress.telemetry`（~2s）与心跳 `engine`（5s）合并；任务侧遥测优先 |
+| 叙事行升级 | `正在扩散采样 · ≈第 31/50 步 · 2.4 步/s`；引擎阶段提示冷启动 30–60s；质量档提示「理解你的描述」 | `phase/phaseLabel/step/stepTotal/speed/estimated` |
+| ETA 升级 | 有步数/速度时用 `(总步数-当前步)/速度`，否则回退原来的整体进度外推 | 同上 |
+
+HUD 只显示真实存在的字段：macOS Metal 没有 GPU 采样时只显示 CPU/内存；旧 Companion 没有遥测时显示
+「资源遥测待接入（旧版节点或无 GPU 采样）」，不伪造数字；MIDI 离线渲染显示「浏览器离线渲染 · 不使用 GPU」。
+
+### 5.2 阻塞态新增「启动检查清单」
+
+等待节点接入时，标题与说明下方增加三格 `[data-gen-check]`：`本地服务`（在线/未连接/检测中）、
+`生成节点`（N 在线/未连接）、`音频模型`（已就绪/未安装）。用户一眼能判断是「后端没起」「节点没起」
+还是「模型没装」，而不是只看到一句「等待节点接入」。节点上线后仍自动续跑（逻辑不变）。
+
+### 5.3 数据链路
+
+```
+Companion 执行器（phase / step / speed）
+   → POST /api/companion/progress（+ telemetry：ps / PowerShell / nvidia-smi 采样）
+   → 服务端 task.phase / task.step / task.telemetry + worker.status.engine
+   → GET /api/companion/tasks/:id（附带 worker 快照）
+   → audioIntent.telemetryFromTask → audioJobStore.telemetry
+   → AudioJobCard（阶段轨道 / HUD / 叙事 / ETA）
+```
+
+服务端对遥测做白名单与数值裁剪（CPU% 可 >100，GPU/显存/温度限定范围），进度接口仍向后兼容：
+不带新字段的旧 Companion 只表现为 HUD 降级，不影响生成。
+
+### 5.4 验收
+
+- `scripts/verify-audio-stage.mjs` 新增 `stems-running-live`（注入 GPU/显存/CPU/内存/步数遥测），
+  以及 `requireStages` / `requireHud` / `requireCheck` 钩子断言；全部状态继续通过「无 <10px 文本、
+  无横向溢出、按钮不换行、卡片完整在 AI 面板内」。
+- 实测（2026-11-12，headless Chrome）：运行卡 371×271 → 371×275（有遥测），1280 宽 319×275；
+  阻塞卡 371×185 → 371×209；compact 仍为 371×110（compact 不显示 HUD，优先保证输入框空间）。
+- 协议侧用真实服务端 + 假 worker 验证：heartbeat/progress 的 `phase/step/telemetry` 能写入任务，
+  `GET /tasks/:id` 同时返回 worker 引擎快照与任务遥测。
+
+## 6. 已知边界
 
 - 阻塞态命令块是单行省略（`scrollWidth 572 / clientWidth 331`），点击「复制启动命令」复制完整命令。
 - 1280 宽度下面板 319px 时 5 步管道有 ~5px 内部横向滚动（无滚动条，当前 step 自动滚入视野），卡本身无溢出。
@@ -102,3 +151,10 @@ node scripts/verify-audio-intent.mjs                    # 音频意图回归
 - 运行中 ETA 是「按当前进度的线性外推」，只是体验参考；排队 ETA 来自服务端历史均值。
 - 节点上线自动续跑依赖 `/api/companion/status` 变为 `online && workers > 0`；若后端本身不可达，
   卡片保持「正在自动检测」并给出本地服务提示，不会伪造成功。
+
+---
+
+## 6. 后续：把等待做进 DAW
+
+任务卡之外，生成一开始就会在编曲视图 / 轨道面板创建「AI 生成轨」并盖上动效片段，
+完成后原地替换成真实音频轨并自动定位。详见 [`AUDIO_GENERATION_TRACKS.md`](./AUDIO_GENERATION_TRACKS.md)。

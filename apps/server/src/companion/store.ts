@@ -27,8 +27,32 @@ export type DiTVariant = 'turbo' | 'sft' | 'base' | 'xl_turbo' | 'xl_sft' | 'xl_
 /** 变体顺序（与 Companion 上报顺序一致：2B 三档 → XL 三档） */
 export const VARIANT_ORDER: readonly DiTVariant[] = ['turbo', 'sft', 'base', 'xl_turbo', 'xl_sft', 'xl_base']
 
+/**
+ * 引擎实时资源遥测（P13）。
+ *
+ * Companion 本机采样后随心跳 / 进度上报；服务端只做白名单透传，不主动探测机器。
+ * 字段全部可选：macOS Metal 没有可用的 GPU 占用接口时只上报 CPU/内存。
+ */
+export interface CompanionTelemetry {
+  /** 引擎子进程 CPU 占用（%，多核可 >100） */
+  cpuPct?: number
+  /** 引擎子进程常驻内存（MB） */
+  rssMb?: number
+  /** GPU 名称（NVIDIA 通过 nvidia-smi 读取；其它平台可缺省） */
+  gpuName?: string
+  /** GPU 利用率（%） */
+  gpuUtilPct?: number
+  /** 显存已用 / 总量（MB） */
+  vramUsedMb?: number
+  vramTotalMb?: number
+  /** GPU 温度（摄氏度） */
+  gpuTempC?: number
+  /** 采样时间戳（Companion 本地时钟） */
+  sampledAt?: number
+}
+
 /** 常驻引擎心跳信息（P2/P9）：变体 / 进程号 / 是否已预热 / LM 档位 / 运行时形态 */
-export interface CompanionEngineStatus {
+export interface CompanionEngineStatus extends CompanionTelemetry {
   /** 当前常驻的 DiT 变体（新值域见 DiTVariant；保持 string 以兼容旧 Companion） */
   variant?: string
   pid?: number
@@ -37,6 +61,21 @@ export interface CompanionEngineStatus {
   lm?: string | null
   /** 运行时形态：legacy（v0.1.0 归档）/ modern（acestep.cpp 2026-11+，支持 XL 4B） */
   api?: 'legacy' | 'modern'
+  /** 引擎生命周期：stopped / starting（进程拉起）/ ready（已常驻）/ busy（任务执行中）/ error */
+  state?: 'stopped' | 'starting' | 'ready' | 'busy' | 'error'
+  /** 计算设备（CUDA0 / MTL0 等） */
+  device?: string
+  /** 当前生成阶段（queued/prepare/engine/prompt/sampling/decoding/upload/done） */
+  phase?: string
+  /** 阶段的中性中文说明（Companion 下发，界面直接展示） */
+  phaseLabel?: string
+  /** 扩散采样当前步 / 总步数（Companion 推算，estimated=true 表示非引擎精确值） */
+  step?: number
+  stepTotal?: number
+  /** 采样速度（步/秒，估算或引擎实测） */
+  speed?: number
+  /** 步数是否为估算值 */
+  estimated?: boolean
 }
 
 export interface CompanionWorker {
@@ -122,6 +161,16 @@ export interface CompanionTask {
   status: CompanionTaskStatus
   progress: number
   message?: string
+  /** P13：当前生成阶段与采样步数（Companion 随 progress 上报；旧 Companion 不带） */
+  phase?: string
+  phaseLabel?: string
+  step?: number
+  stepTotal?: number
+  speed?: number
+  /** 步数是否为估算值（旧引擎只有进度估算时 true） */
+  estimated?: boolean
+  /** P13：任务执行期间的资源遥测快照 */
+  telemetry?: CompanionTelemetry
   workerId?: string
   error?: string
   assetId?: string
@@ -172,6 +221,13 @@ function normalizeTask(raw: Partial<CompanionTask> & { id: string; type: string 
     status: raw.status ?? 'queued',
     progress: raw.progress ?? 0,
     message: raw.message,
+    phase: raw.phase,
+    phaseLabel: raw.phaseLabel,
+    step: raw.step,
+    stepTotal: raw.stepTotal,
+    speed: raw.speed,
+    estimated: raw.estimated,
+    telemetry: raw.telemetry,
     workerId: raw.workerId,
     error: raw.error,
     assetId: raw.assetId,
@@ -384,6 +440,13 @@ export function reportProgress(input: {
   taskId: string
   progress: number
   message?: string
+  phase?: string
+  phaseLabel?: string
+  step?: number
+  stepTotal?: number
+  speed?: number
+  estimated?: boolean
+  telemetry?: CompanionTelemetry
 }): { ok: boolean; cancel: boolean } | null {
   const worker = authWorker(input.workerId, input.token)
   if (!worker) return null
@@ -392,6 +455,13 @@ export function reportProgress(input: {
   if (task.status !== 'running' && task.status !== 'claimed') return { ok: false, cancel: task.cancelRequested }
   task.progress = Math.max(0, Math.min(1, input.progress))
   task.message = input.message
+  task.phase = input.phase
+  task.phaseLabel = input.phaseLabel
+  task.step = input.step
+  task.stepTotal = input.stepTotal
+  task.speed = input.speed
+  task.estimated = input.estimated
+  if (input.telemetry) task.telemetry = input.telemetry
   task.updatedAt = Date.now()
   persist()
   return { ok: true, cancel: task.cancelRequested }

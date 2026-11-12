@@ -45,7 +45,9 @@ import { InstrumentPicker, popoverPosition } from '../tracks/InstrumentPicker'
 import { RepaintAudioDialog } from '../audio/RepaintAudioDialog'
 import { StemGenerateDialog } from '../audio/StemGenerateDialog'
 import { primeAssetPeaks } from '../audio/peaks'
-import { switchActiveTake } from '../audio/audioTrack'
+import { audioSecondsToBeats, switchActiveTake } from '../audio/audioTrack'
+import { GenerationTrackClip } from '../audio/GenerationTrack'
+import { useAudioJobStore } from '../audio/audioJobStore'
 import { AudioClipView } from './AudioClipView'
 import { ClipView, type ClipDragMode } from './ClipView'
 import { TimelineToolbar } from './TimelineToolbar'
@@ -531,6 +533,10 @@ export function ArrangementView() {
   const pushToast = useStore((s) => s.pushToast)
   const trackHeights = useUiStore((s) => s.trackHeights)
   const toolMode = useUiStore((s) => s.toolMode)
+  /* 生成中的占位轨：任务一开始就出现在车道里，落轨后逐条消失 */
+  const generationSlots = useAudioJobStore((s) => s.slots)
+  const audioJob = useAudioJobStore((s) => s.job)
+  const revealRequest = useStore((s) => s.revealRequest)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -567,10 +573,22 @@ export function ArrangementView() {
     () => project.tracks.map((track) => resolveTrackHeight(trackHeights, track.id, fallbackRowHeight)),
     [project.tracks, trackHeights, fallbackRowHeight],
   )
-  const rowsHeight = rowHeights.reduce((sum, height) => sum + height, 0)
+  /* 占位轨与真实轨共用同一套行高公式，左右两侧才能严格对齐 */
+  const generationRowHeights = useMemo(
+    () => generationSlots.map((slot) => resolveTrackHeight(trackHeights, slot.id, fallbackRowHeight)),
+    [generationSlots, trackHeights, fallbackRowHeight],
+  )
+  const rowsHeight =
+    rowHeights.reduce((sum, height) => sum + height, 0) +
+    generationRowHeights.reduce((sum, height) => sum + height, 0)
   const endBar = projectEndBar(project)
+  /* 占位片段按预估时长画，可能比当前工程更长：时间轴宽度也要容纳它 */
+  const generationEndBeat = generationSlots.reduce(
+    (max, slot) => Math.max(max, slot.startBeat + audioSecondsToBeats(slot.durationSec, project.tempo)),
+    0,
+  )
   /* 至少画出 10 小节：短工程也有可双击的空白；与「适合窗口」使用同一公式 */
-  const totalBars = Math.max(endBar + 2, 10)
+  const totalBars = Math.max(endBar + 2, 10, Math.ceil(generationEndBeat / barBeats) + 1)
   const totalBeats = totalBars * barBeats
   /* 内容宽度至少比视口宽 24px：保证横向滚动条始终存在（固定 10px 高），
      这样 TrackPanel 列表与编曲视图的可滚动范围才能完全一致，滚到底也不跑偏 */
@@ -674,6 +692,85 @@ export function ArrangementView() {
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
     publishVerticalScroll(event.currentTarget.scrollTop, 'arrangement')
   }
+
+  /* ---------- 生成 / 落轨后的自动定位 ---------- */
+
+  /** 把某条真实轨（及可选拍位置）滚进视野；已经可见时不动，避免打断用户 */
+  const scrollTrackIntoView = useCallback((trackId: string, beat?: number) => {
+    const container = scrollRef.current
+    if (!container) return
+    const state = useStore.getState()
+    const index = state.project.tracks.findIndex((track) => track.id === trackId)
+    if (index < 0) return
+    const ui = useUiStore.getState()
+    const fallback = rowHeightForZoom(state.zoomY)
+    let top = RULER_HEIGHT
+    for (let cursor = 0; cursor < index; cursor += 1) {
+      top += resolveTrackHeight(ui.trackHeights, state.project.tracks[cursor].id, fallback)
+    }
+    const height = resolveTrackHeight(ui.trackHeights, trackId, fallback)
+    const viewTop = container.scrollTop
+    const viewBottom = viewTop + container.clientHeight
+    let nextTop = viewTop
+    if (top < viewTop + 24) nextTop = Math.max(0, top - 48)
+    else if (top + height > viewBottom - 24) nextTop = Math.max(0, top + height - container.clientHeight + 48)
+    if (nextTop !== viewTop) {
+      container.scrollTop = nextTop
+      publishVerticalScroll(nextTop, 'arrangement')
+    }
+    if (beat == null) return
+    const px = arrangementPxPerBeat(useStore.getState().zoomX)
+    const left = beat * px
+    const viewLeft = container.scrollLeft
+    const viewRight = viewLeft + container.clientWidth
+    if (left < viewLeft + 48 || left > viewRight - 120) {
+      container.scrollLeft = Math.max(0, left - Math.min(180, container.clientWidth * 0.22))
+    }
+  }, [])
+
+  /* 生成开始：视线自动带到新出现的「AI 生成轨」；同一任务只自动定位一次 */
+  const revealedGenerationJobRef = useRef<string | null>(null)
+  useEffect(() => {
+    const jobId = audioJob?.id
+    if (!jobId || generationSlots.length === 0) {
+      if (!jobId) revealedGenerationJobRef.current = null
+      return
+    }
+    if (revealedGenerationJobRef.current === jobId) return
+    revealedGenerationJobRef.current = jobId
+    const first = generationSlots[0]
+    const state = useStore.getState()
+    const ui = useUiStore.getState()
+    const fallback = rowHeightForZoom(state.zoomY)
+    const top = RULER_HEIGHT + state.project.tracks.reduce(
+      (sum, track) => sum + resolveTrackHeight(ui.trackHeights, track.id, fallback),
+      0,
+    )
+    requestAnimationFrame(() => {
+      const container = scrollRef.current
+      if (!container) return
+      const viewTop = container.scrollTop
+      const viewBottom = viewTop + container.clientHeight
+      if (top < viewTop + 24 || top > viewBottom - 96) {
+        const nextTop = Math.max(0, top - 72)
+        container.scrollTop = nextTop
+        publishVerticalScroll(nextTop, 'arrangement')
+      }
+      const px = arrangementPxPerBeat(useStore.getState().zoomX)
+      const left = first.startBeat * px
+      const viewLeft = container.scrollLeft
+      if (left < viewLeft + 40 || left > viewLeft + container.clientWidth - 120) {
+        container.scrollLeft = Math.max(0, left - Math.min(180, container.clientWidth * 0.22))
+      }
+    })
+  }, [audioJob?.id, generationSlots])
+
+  /* AI 落轨后：自动定位到新音频轨与片段起点 */
+  useEffect(() => {
+    if (!revealRequest) return
+    const frame = requestAnimationFrame(() => scrollTrackIntoView(revealRequest.trackId, revealRequest.beat))
+    return () => cancelAnimationFrame(frame)
+  }, [revealRequest, scrollTrackIntoView])
 
   /* ---------- 缩放：⌘/Ctrl + 滚轮横向，Shift + 滚轮纵向 ---------- */
 
@@ -1439,7 +1536,7 @@ export function ArrangementView() {
 
             {/* 轨道行 */}
             <div onPointerDown={onRowsPointerDown} onDoubleClick={onRowsDoubleClick} onContextMenu={onRowsContextMenu}>
-              {project.tracks.length === 0 && (
+              {project.tracks.length === 0 && generationSlots.length === 0 && (
                 <div className="flex h-[260px] flex-col items-center justify-center gap-3 px-6 text-center">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-line-strong bg-surface-2 text-ink-3">
                     <Boxes size={18} />
@@ -1524,6 +1621,32 @@ export function ArrangementView() {
                         }}
                       />
                     ))}
+                  </div>
+                )
+              })}
+              {/* 生成中的占位轨：任务一开始就出现在 DAW 里，完成一条就替换成真实音频轨 */}
+              {generationSlots.map((slot, index) => {
+                const rowHeight = generationRowHeights[index] ?? fallbackRowHeight
+                return (
+                  <div
+                    key={slot.id}
+                    data-gen-track-lane
+                    data-gen-slot-key={slot.key}
+                    data-gen-track-index={project.tracks.length + index}
+                    className="relative border-b border-line/60"
+                    style={{
+                      height: rowHeight,
+                      background: `linear-gradient(90deg, ${withAlpha(slot.color, 0.045)}, transparent 56%)`,
+                    }}
+                  >
+                    <div className="pointer-events-none absolute inset-y-0 left-0 w-[2px]" style={{ background: withAlpha(slot.color, 0.55) }} />
+                    <GenerationTrackClip
+                      slot={slot}
+                      job={audioJob}
+                      pxPerBeat={pxPerBeat}
+                      rowHeight={rowHeight}
+                      tempo={project.tempo}
+                    />
                   </div>
                 )
               })}

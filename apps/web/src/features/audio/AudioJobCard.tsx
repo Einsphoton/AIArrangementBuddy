@@ -26,17 +26,33 @@ import {
 } from 'lucide-react'
 import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
-import { getCompanionStatus } from '../../lib/api'
+import {
+  companionVariantLabel,
+  getCompanionStatus,
+  type CompanionEngineLive,
+  type CompanionStatus,
+} from '../../lib/api'
 import { cancelAudioJob, retryAudioJob } from './audioIntent'
-import { useAudioJobStore, type AudioJob, type AudioJobStep } from './audioJobStore'
+import {
+  useAudioJobStore,
+  type AudioJob,
+  type AudioJobPhase,
+  type AudioJobStep,
+  type AudioJobTelemetry,
+} from './audioJobStore'
 import {
   BlockedRadar,
+  EngineTelemetryHud,
   GenerationOrb,
   GenerationSpectrum,
+  GenerationStageRail,
   MODE_SHORT,
+  StartChecklist,
   TrackPipeline,
+  fallbackPhase,
   pipelineSummary,
   stepMeta,
+  type CheckItem,
 } from './AudioGenerationStage'
 
 /** 阻塞态自动检测 Companion 的轮询间隔（页面隐藏时跳过） */
@@ -70,7 +86,11 @@ interface Narration {
 }
 
 /** 叙事行：让等待有「AI 正在做什么」的代入感；key 变化触发 fade-up */
-function buildNarration(job: AudioJob, step: AudioJob['steps'][number] | undefined): Narration {
+function buildNarration(
+  job: AudioJob,
+  step: AudioJob['steps'][number] | undefined,
+  telemetry: AudioJobTelemetry | undefined,
+): Narration {
   if (job.status === 'done') return { key: 'done', text: '生成完成 · 已写入工程' }
   if (job.status === 'failed') return { key: 'failed', text: '音频生成中断 · 可重试或关闭' }
   if (!step) return { key: 'prep', text: '正在准备音频生成…' }
@@ -80,6 +100,31 @@ function buildNarration(job: AudioJob, step: AudioJob['steps'][number] | undefin
     return { key: `queue-${step.key}-${step.queuePosition}`, text: `排队中 · 第 ${step.queuePosition + 1} 位${wait}` }
   }
   const progress = Math.max(0, Math.min(1, step.progress))
+  const phase = telemetry?.phase
+  const stepCount =
+    telemetry?.stepTotal != null && telemetry.step != null
+      ? `${telemetry.estimated ? '≈' : ''}第 ${telemetry.step}/${telemetry.stepTotal} 步`
+      : ''
+  const speed = telemetry?.speed != null && telemetry.speed > 0 ? `${telemetry.speed.toFixed(1)} 步/s` : ''
+  // 引擎阶段优先：服务端给出阶段时直接说明「在哪一步」，不再只靠进度猜
+  if (phase === 'engine') {
+    const variant = telemetry?.engine?.variant ? companionVariantLabel(telemetry.engine.variant) : ''
+    return {
+      key: 'phase-engine',
+      text: `${telemetry?.phaseLabel ?? '正在载入音频引擎'}${variant ? ` · ${variant}` : ''}（冷启动可能需 30–60s）`,
+    }
+  }
+  if (phase === 'prompt') {
+    return { key: 'phase-prompt', text: telemetry?.phaseLabel ?? '正在理解你的描述，整理编曲结构…' }
+  }
+  if (phase === 'sampling') {
+    return {
+      key: `phase-sampling-${telemetry?.step ?? 0}`,
+      text: `正在扩散采样${stepCount ? ` · ${stepCount}` : ''}${speed ? ` · ${speed}` : ''}`,
+    }
+  }
+  if (phase === 'decoding') return { key: 'phase-decoding', text: '正在解码音频波形…' }
+  if (phase === 'upload') return { key: 'phase-upload', text: '正在写入轨道…' }
   if (step.key === 'render') {
     return progress >= 0.9
       ? { key: 'render-write', text: '正在写入轨道…' }
@@ -97,6 +142,7 @@ function buildNarration(job: AudioJob, step: AudioJob['steps'][number] | undefin
   }
   return { key: `${step.key}-run`, text: `正在生成「${meta.label}」分轨…` }
 }
+
 
 interface BlockedCopy {
   title: string
@@ -123,12 +169,59 @@ function blockedCopy(job: AudioJob): BlockedCopy {
   }
 }
 
+/**
+ * 合并两路遥测：任务轮询（更贴近当前任务）优先，心跳 worker 快照补足资源字段。
+ * 只保留有值的字段，避免把任务里已有的阶段/步数覆盖成 undefined。
+ */
+function mergeTelemetry(
+  task: AudioJobTelemetry | undefined,
+  engine: CompanionEngineLive | undefined,
+  workerName?: string,
+): AudioJobTelemetry | undefined {
+  if (!task && !engine) return undefined
+  const merged: AudioJobTelemetry = { ...task }
+  if (engine) {
+    // 任务轮询（~1s）里的遥测比心跳（5s）新，已有值不覆盖
+    if (engine.cpuPct != null && merged.cpuPct == null) merged.cpuPct = engine.cpuPct
+    if (engine.rssMb != null && merged.rssMb == null) merged.rssMb = engine.rssMb
+    if (engine.gpuName && merged.gpuName == null) merged.gpuName = engine.gpuName
+    if (engine.gpuUtilPct != null && merged.gpuUtilPct == null) merged.gpuUtilPct = engine.gpuUtilPct
+    if (engine.vramUsedMb != null && merged.vramUsedMb == null) merged.vramUsedMb = engine.vramUsedMb
+    if (engine.vramTotalMb != null && merged.vramTotalMb == null) merged.vramTotalMb = engine.vramTotalMb
+    if (engine.gpuTempC != null && merged.gpuTempC == null) merged.gpuTempC = engine.gpuTempC
+    if (engine.sampledAt != null && merged.sampledAt == null) merged.sampledAt = engine.sampledAt
+    if (engine.phase && !merged.phase) merged.phase = engine.phase as AudioJobPhase
+    if (engine.phaseLabel && !merged.phaseLabel) merged.phaseLabel = engine.phaseLabel
+    if (engine.step != null && merged.step == null) merged.step = engine.step
+    if (engine.stepTotal != null && merged.stepTotal == null) merged.stepTotal = engine.stepTotal
+    if (engine.speed != null && merged.speed == null) merged.speed = engine.speed
+    if (engine.estimated != null && merged.estimated == null) merged.estimated = engine.estimated
+    merged.engine = {
+      ...(merged.engine ?? {}),
+      ...(engine.state ? { state: engine.state } : {}),
+      ...(engine.variant ? { variant: engine.variant } : {}),
+      ...(engine.device ? { device: engine.device } : {}),
+      ...(engine.warm != null ? { warm: engine.warm } : {}),
+      ...(engine.pid != null ? { pid: engine.pid } : {}),
+      ...(engine.lm !== undefined ? { lm: engine.lm } : {}),
+    }
+  }
+  if (workerName) merged.workerName = workerName
+  return merged
+}
+
 export function AudioJobCard({ compact = false }: { compact?: boolean }) {
   const job = useAudioJobStore((s) => s.job)
+  const slots = useAudioJobStore((s) => s.slots)
+  const hidden = useAudioJobStore((s) => s.hidden)
   const clear = useAudioJobStore((s) => s.clear)
+  const setHidden = useAudioJobStore((s) => s.setHidden)
   const pushToast = useStore((s) => s.pushToast)
   const [canceling, setCanceling] = useState(false)
   const [now, setNow] = useState(() => Date.now())
+  /** P13：节点/引擎快照（运行中 5s 轮询、阻塞时 2.5s 轮询；任务详情里的遥测更实时） */
+  const [companion, setCompanion] = useState<CompanionStatus | null>(null)
+  const [companionFailed, setCompanionFailed] = useState(false)
   /** 同一阻塞任务只自动继续一次，避免节点状态抖动时重复拉起 */
   const autoResumedRef = useRef<string | null>(null)
 
@@ -140,10 +233,14 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
     return () => window.clearInterval(timer)
   }, [job?.id, job?.status])
 
-  /* 生成节点未启动：每 2.5s 自动检测，上线后自动用上一份计划继续 */
+  /* 节点/引擎状态：阻塞时 2.5s 检测并自动续跑；运行中 5s 刷新引擎遥测 */
   useEffect(() => {
-    if (!job || job.status !== 'blocked' || job.blockReason !== 'start-companion') return
+    if (!job) return
+    const waiting = job.status === 'blocked' && job.blockReason === 'start-companion'
+    const runningJob = job.status === 'running'
+    if (!waiting && !runningJob) return
     const jobId = job.id
+    const blockedJob = waiting
     let cancelled = false
 
     const probe = async () => {
@@ -151,8 +248,10 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
       try {
         const status = await getCompanionStatus()
         if (cancelled) return
+        setCompanion(status)
+        setCompanionFailed(false)
         const online = status.online && (status.summary?.workers ?? 0) > 0
-        if (!online || autoResumedRef.current === jobId) return
+        if (!blockedJob || !online || autoResumedRef.current === jobId) return
         autoResumedRef.current = jobId
         if (retryAudioJob(jobId)) {
           pushToast('success', '生成节点已上线，继续生成音频…')
@@ -160,19 +259,20 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
           autoResumedRef.current = null
         }
       } catch {
+        if (!cancelled) setCompanionFailed(true)
         /* 后端未就绪：保持等待提示，下个周期再试 */
       }
     }
 
     void probe()
-    const timer = window.setInterval(() => void probe(), DETECT_POLL_MS)
+    const timer = window.setInterval(() => void probe(), blockedJob ? DETECT_POLL_MS : 5000)
     return () => {
       cancelled = true
       window.clearInterval(timer)
     }
   }, [job?.id, job?.status, job?.blockReason, pushToast])
 
-  if (!job || job.status === 'canceled') return null
+  if (!job || job.status === 'canceled' || hidden) return null
 
   const running = job.status === 'running'
   const blocked = job.status === 'blocked'
@@ -192,15 +292,65 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
   const queued = Boolean(runningStep && runningStep.queuePosition != null)
   const percent = done ? 100 : Math.max(0, Math.min(100, Math.round(job.progress * 100)))
   const etaSec = estimateEta(job, runningStep, now)
-  const etaText = etaSec != null ? `预计 ${formatElapsed(etaSec * 1000)}` : `已用 ${formatElapsed(elapsedMs)}`
   const waitSec = Math.max(0, Math.floor(elapsedMs / 1000))
 
-  const narration = buildNarration(job, runningStep)
+  const companionWorkers = companion?.workers ?? []
+  const worker =
+    companionWorkers.find((item) => job.taskId && item.status?.currentTaskId === job.taskId) ??
+    companionWorkers.find((item) => item.status?.busy) ??
+    companionWorkers[0]
+  const engineLive = worker?.status?.engine ?? worker?.engine
+  const telemetry = mergeTelemetry(job.telemetry, engineLive, worker?.name)
+  const phase: AudioJobPhase | undefined = runningStep
+    ? telemetry?.phase ?? fallbackPhase(job.mode, job.progress, queued)
+    : undefined
+  const hudTelemetry: AudioJobTelemetry | undefined = runningStep
+    ? { ...(telemetry ?? {}), phase, phaseLabel: telemetry?.phaseLabel ?? runningStep.message }
+    : telemetry
+  // 有采样步数/速度时用「剩余步数 ÷ 速度」估 ETA，比整体进度外推更贴近当前阶段
+  const stepEtaSec =
+    runningStep &&
+    telemetry?.step != null &&
+    telemetry.stepTotal != null &&
+    telemetry.speed != null &&
+    telemetry.speed > 0.05
+      ? Math.max(0, Math.round((telemetry.stepTotal - telemetry.step) / telemetry.speed / 5) * 5)
+      : undefined
+  const displayEtaSec = stepEtaSec ?? etaSec
+  const displayEtaText =
+    displayEtaSec != null ? `预计 ${formatElapsed(displayEtaSec * 1000)}` : `已用 ${formatElapsed(elapsedMs)}`
+  const narration = buildNarration(job, runningStep, hudTelemetry)
   const compactSummary = done
     ? job.placed.length > 0
       ? `已写入 ${job.placed.length} 条轨`
       : '已写入工程'
     : pipelineSummary(job.steps)
+  const checkItems: CheckItem[] = [
+    {
+      key: 'service',
+      label: '本地服务',
+      state: companionFailed ? 'bad' : companion ? 'ok' : 'pending',
+      value: companionFailed ? '未连接' : companion ? '在线' : '检测中',
+    },
+    {
+      key: 'worker',
+      label: '生成节点',
+      state: companion?.online === true && (companion.summary?.workers ?? 0) > 0 ? 'ok' : 'bad',
+      value:
+        companion?.online === true
+          ? `${companion.summary?.workers ?? 0} 在线`
+          : companion
+            ? '未连接'
+            : '待检测',
+    },
+    {
+      key: 'model',
+      label: '音频模型',
+      state: job.blockReason === 'start-companion' ? 'ok' : job.blockReason === 'provision' ? 'bad' : 'pending',
+      value:
+        job.blockReason === 'start-companion' ? '已就绪' : job.blockReason === 'provision' ? '未安装' : '未知',
+    },
+  ]
 
   const copyHint = async () => {
     const hint = job.hint
@@ -222,6 +372,16 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
     if (canceling) return
     setCanceling(true)
     void cancelAudioJob().finally(() => setCanceling(false))
+  }
+
+  /** 运行中关闭 = 收起，不中断生成（避免「生成完了却没有结果」）；终态才真正关闭 */
+  const handleClose = () => {
+    if (job.status === 'running' || job.status === 'blocked') {
+      setHidden(true)
+      pushToast('info', '任务卡已收起，音频生成会继续；可在轨道头点「查看」恢复')
+      return
+    }
+    clear()
   }
 
   const openProvision = () => {
@@ -275,9 +435,9 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
         <button
           type="button"
           className="gen-icon-btn"
-          title={running ? '关闭任务卡（任务会继续）' : '关闭'}
+          title={running || blocked ? '收起任务卡（任务会继续）' : '关闭'}
           aria-label="关闭音频任务卡"
-          onClick={clear}
+          onClick={handleClose}
         >
           <X size={11} />
         </button>
@@ -312,7 +472,9 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
             <>
               <div className="gen-progress-row mt-2">
                 <span className="gen-percent mono tabular-nums">{percent}%</span>
-                <span className="mono min-w-0 truncate text-[10px] tabular-nums text-ink-3">{done ? `已用 ${formatElapsed(elapsedMs)}` : etaText}</span>
+                <span className="mono min-w-0 truncate text-[10px] tabular-nums text-ink-3">
+                  {done ? `已用 ${formatElapsed(elapsedMs)}` : displayEtaText}
+                </span>
               </div>
               <div className="gen-progress mt-1">
                 <span className="gen-progress-fill" style={{ transform: `scaleX(${progressFill})` }} />
@@ -320,7 +482,23 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
               </div>
 
               {running ? (
-                <TrackPipeline className="mt-2" steps={job.steps} />
+                <>
+                  <GenerationStageRail
+                    className="mt-2"
+                    mode={job.mode}
+                    phase={phase}
+                    progress={job.progress}
+                    queued={queued}
+                    done={false}
+                  />
+                  <EngineTelemetryHud
+                    className="mt-1.5"
+                    telemetry={hudTelemetry}
+                    fallbackState="running"
+                    mode={job.mode}
+                  />
+                  <TrackPipeline className="mt-2" steps={job.steps} />
+                </>
               ) : (
                 <div className="mt-2 flex items-center gap-1.5">
                   <div className="flex min-w-0 flex-1 flex-wrap gap-1">
@@ -360,7 +538,9 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
           <span className="ml-auto flex min-w-0 items-center gap-1 text-[10px] text-ink-4">
             <span className="gen-live-dot" aria-hidden="true" />
             <span className="truncate">
-              {job.placed.length > 0 ? `已加入 ${job.placed.length} 条轨 · AI 自动执行中` : 'AI 自动执行中'}
+              {slots.length + job.placed.length > 0
+                ? `${job.placed.length > 0 ? `已落 ${job.placed.length} 条 · ` : ''}DAW 已建 ${slots.length + job.placed.length} 条轨`
+                : 'AI 自动执行中'}
             </span>
           </span>
         </div>
@@ -374,6 +554,7 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
             <div className="min-w-0 flex-1">
               <p className="text-[12px] font-semibold leading-4 text-accent-soft">{blockedState.title}</p>
               <p className="mt-1 break-words text-[11px] leading-[15px] text-ink-2">{blockedState.body}</p>
+              <StartChecklist className="mt-1.5" items={checkItems} />
               {job.blockReason === 'start-companion' && (
                 <p className="mt-1 flex items-center gap-1 text-[10px] leading-[13px] text-ink-4">
                   <span className="gen-detect-dot" aria-hidden="true" />

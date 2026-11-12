@@ -647,6 +647,67 @@ export function companionVariantLabel(variant: string | undefined): string {
   return COMPANION_VARIANT_LABEL[variant] ?? variantDisplayName(variant)
 }
 
+/** P13：生成引擎资源遥测（Companion 本机采样；macOS Metal 可能没有 GPU 字段） */
+export interface CompanionTelemetry {
+  /** 引擎进程 CPU 占用（%，多核可 >100） */
+  cpuPct?: number
+  /** 引擎进程常驻内存（MB） */
+  rssMb?: number
+  gpuName?: string
+  /** GPU 利用率（%） */
+  gpuUtilPct?: number
+  /** 显存已用 / 总量（MB） */
+  vramUsedMb?: number
+  vramTotalMb?: number
+  gpuTempC?: number
+  sampledAt?: number
+}
+
+/** 生成阶段（Companion 上报；旧节点可能没有） */
+export type CompanionEnginePhase =
+  | 'queued'
+  | 'prepare'
+  | 'engine'
+  | 'prompt'
+  | 'sampling'
+  | 'decoding'
+  | 'upload'
+  | 'done'
+  | 'idle'
+
+/** 常驻引擎实时状态（心跳 / 任务详情里的 worker.status.engine） */
+export interface CompanionEngineLive extends CompanionTelemetry {
+  state?: 'stopped' | 'starting' | 'ready' | 'busy' | 'error' | string
+  variant?: string
+  pid?: number
+  warm?: boolean
+  lm?: string | null
+  api?: 'legacy' | 'modern' | string
+  /** 计算设备（CUDA0 / MTL0 等） */
+  device?: string
+  phase?: CompanionEnginePhase | string
+  phaseLabel?: string
+  step?: number
+  stepTotal?: number
+  speed?: number
+  estimated?: boolean
+}
+
+/** GET /api/companion/tasks/:id 附带的任务执行节点快照（P13） */
+export interface CompanionTaskWorker {
+  id?: string
+  name?: string
+  version?: string
+  capabilities?: { tasks?: string[]; gpu?: string; models?: string[] }
+  lastHeartbeatAt?: number
+  status?: {
+    busy?: boolean
+    currentTaskId?: string
+    lastMessage?: string
+    engine?: CompanionEngineLive
+  }
+}
+
 export interface CompanionTaskState {
   id: string
   /** 任务类型（服务端返回，旧版可能没有） */
@@ -663,6 +724,16 @@ export interface CompanionTaskState {
   /** 该任务需要的工作节点能力（例如音频引擎变体） */
   requiredVariant?: string
   message?: string
+  /** P13：当前生成阶段 / 采样步数 / 资源快照（旧服务端不带） */
+  phase?: CompanionEnginePhase | string
+  phaseLabel?: string
+  step?: number
+  stepTotal?: number
+  speed?: number
+  estimated?: boolean
+  telemetry?: CompanionTelemetry
+  /** P13：执行节点快照（旧服务端不带） */
+  worker?: CompanionTaskWorker
   error?: string
   /** 完成后的音频资产 id */
   assetId?: string
@@ -703,11 +774,20 @@ export interface CompanionStatus {
   workers: {
     id?: string
     name?: string
+    version?: string
     busy?: boolean
     lastSeenAt?: number
+    lastHeartbeatAt?: number
     /** P9：节点上报的能力；capabilities.models 含 'xl_turbo' 表示支持 XL 变体（旧节点可能没有该字段） */
     capabilities?: { tasks?: string[]; gpu?: string; models?: string[] }
-    engine?: unknown
+    /** P13：节点忙碌状态 / 当前任务 / 引擎遥测（旧服务端可能没有 status） */
+    status?: {
+      busy?: boolean
+      currentTaskId?: string
+      lastMessage?: string
+      engine?: CompanionEngineLive
+    }
+    engine?: CompanionEngineLive
   }[]
   tasks: CompanionTaskState[]
   /** 离线时的启动提示（服务端给出） */

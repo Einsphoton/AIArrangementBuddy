@@ -40,7 +40,7 @@ import {
 import { cn } from '../../lib/format'
 import { useStore } from '../../store/store'
 import { switchActiveTake } from './audioTrack'
-import { COMPANION_START_HINT } from './CompanionBadge'
+import { resolveCompanionHint } from './CompanionBadge'
 
 /** 轮询间隔：契约要求 2s */
 const POLL_MS = 2000
@@ -193,7 +193,7 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
   const tasks = status?.tasks ?? []
   const summary = status?.summary
   const activeCount = tasks.filter((task) => task.status === 'queued' || task.status === 'running').length
-  const startHint = status?.hint ?? COMPANION_START_HINT
+  const startHint = resolveCompanionHint(status?.hint)
 
   const copyStartHint = async () => {
     try {

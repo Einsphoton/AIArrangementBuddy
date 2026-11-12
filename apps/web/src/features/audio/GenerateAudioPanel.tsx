@@ -42,7 +42,7 @@ import { SongWorkflow } from './SongWorkflow'
 import { useStore } from '../../store/store'
 import { clamp, tidy } from '../arrangement/timeline'
 import { assetRefFromPeaks, generatedAudioProvenance, placeAudioClip } from './audioTrack'
-import { COMPANION_START_HINT } from './CompanionBadge'
+import { resolveCompanionHint } from './CompanionBadge'
 import { primeAssetPeaks } from './peaks'
 
 /** 轮询间隔：契约要求 800–1200ms */
@@ -383,7 +383,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   }
 
   const copyStartCommand = async () => {
-    const hint = companion?.hint ?? COMPANION_START_HINT
+    const hint = resolveCompanionHint(companion?.hint)
     try {
       await navigator.clipboard?.writeText(hint)
       pushToast('success', '启动命令已复制')
@@ -396,7 +396,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   const progress = clamp(task?.progress ?? 0, 0, 1)
   const companionChecking = !companion && !companionFailed
   const offline = companionFailed || companion?.online === false
-  const startHint = companion?.hint ?? COMPANION_START_HINT
+  const startHint = resolveCompanionHint(companion?.hint)
   const running = status === 'queued' || status === 'running'
 
   /*

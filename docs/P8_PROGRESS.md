@@ -16,7 +16,7 @@
 - **API**：`GET /api/provision/status`、`POST /api/provision/install`、`GET /api/provision/jobs/:id`、`POST .../cancel`
 - **CLI**：`scripts/provision.mjs status|install|jobs`
 - **产品 UI**：顶栏「安装本机引擎」→ 选 profile → 实时进度/步骤/取消；完成后自动隐藏（`features/audio/ProvisionButton.tsx`）
-- **Companion 跨平台**：运行时搜索顺序 `AIAB_ACESTEP_DIR` > `<数据目录>/ace-step` > 旧 `music-gen/acestep-cpp`；二进制 `ace-server(.exe)`（含 bin/ 兼容）；计算后端 macOS 默认 `METAL`、其它默认 `CUDA0`；缺引擎时错误消息直接给自动安装命令
+- **Companion 跨平台**：运行时搜索顺序 `AIAB_ACESTEP_DIR` > `<数据目录>/ace-step` > 旧 `music-gen/acestep-cpp`；二进制 `ace-server(.exe)`（含 bin/ 兼容）；计算后端 macOS 默认 `MTL0`（ggml Metal 后端名）、其它默认 `CUDA0`；缺引擎时错误消息直接给自动安装命令
 
 ### 验收
 | 项 | 结果 |

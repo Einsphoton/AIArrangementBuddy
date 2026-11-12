@@ -32,6 +32,8 @@ import {
 } from '../arrangement/timeline'
 import { EmotionPicker, InstrumentPicker, popoverPosition } from './InstrumentPicker'
 import { TrackRow, type DropTarget } from './TrackRow'
+import { GenerationTrackHeader } from '../audio/GenerationTrack'
+import { useAudioJobStore } from '../audio/audioJobStore'
 
 type PickerState =
   | { kind: 'instrument'; mode: 'new'; rect: DOMRect }
@@ -53,6 +55,9 @@ export function TrackPanel() {
   const pushHistory = useStore((s) => s.pushHistory)
   const setSaveStatus = useStore((s) => s.setSaveStatus)
   const trackHeights = useUiStore((s) => s.trackHeights)
+  /* 生成中的占位轨：编曲车道与轨道头同步出现，落轨后逐条移除 */
+  const generationSlots = useAudioJobStore((s) => s.slots)
+  const audioJob = useAudioJobStore((s) => s.job)
 
   const listRef = useRef<HTMLDivElement>(null)
   /* 每轨电平：单条 rAF 直接改 DOM style（与 MixerPanel 同一策略），不触发 React 重渲染 */
@@ -213,6 +218,17 @@ export function TrackPanel() {
       <header className="flex h-[38px] shrink-0 items-center gap-1.5 border-b border-line px-2.5">
         <span className="label">轨道</span>
         <Badge>{tracks.length}</Badge>
+        {generationSlots.length > 0 && (
+          <span
+            data-gen-track-count
+            className="inline-flex h-[16px] shrink-0 items-center gap-1 rounded-full border border-accent/35 bg-accent/10 px-1.5 text-[10px] font-semibold leading-none text-accent-soft"
+            title={`AI 正在生成 ${generationSlots.length} 条音频轨`}
+            aria-label={`AI 正在生成 ${generationSlots.length} 条音频轨`}
+          >
+            <span className="gen-live-dot" aria-hidden />
+            AI +{generationSlots.length}
+          </span>
+        )}
         <div className="flex-1" />
         <IconButton
           title="添加轨道"
@@ -308,7 +324,7 @@ export function TrackPanel() {
         className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
         aria-label="轨道列表"
       >
-        {tracks.length === 0 ? (
+        {tracks.length === 0 && generationSlots.length === 0 ? (
           <EmptyState
             icon={<Plus size={20} />}
             title="还没有轨道"
@@ -348,6 +364,14 @@ export function TrackPanel() {
                 }}
                 onDragOver={(event) => handleDragOverRow(event, index)}
                 onDrop={(event) => handleDropRow(event, index)}
+              />
+            ))}
+            {generationSlots.map((slot) => (
+              <GenerationTrackHeader
+                key={slot.id}
+                slot={slot}
+                job={audioJob}
+                height={resolveTrackHeight(trackHeights, slot.id, fallbackRowHeight)}
               />
             ))}
             <button

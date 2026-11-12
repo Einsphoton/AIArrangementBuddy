@@ -55,6 +55,48 @@ function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+function bool(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+/** 百分比限定在 0–100（GPU/CPU 之外的比率字段用） */
+function pct(value: unknown): number | undefined {
+  const n = num(value)
+  return n === undefined ? undefined : Math.round(Math.min(100, Math.max(0, n)) * 10) / 10
+}
+
+/** 非负数值，保留 1 位小数（CPU% 可 >100，所以单独于 pct） */
+function nonNegative(value: unknown, max = Number.MAX_SAFE_INTEGER): number | undefined {
+  const n = num(value)
+  if (n === undefined || n < 0) return undefined
+  return Math.round(Math.min(max, n) * 10) / 10
+}
+
+function positiveInt(value: unknown, max = 100_000): number | undefined {
+  const n = num(value)
+  if (n === undefined || n < 0) return undefined
+  return Math.min(max, Math.round(n))
+}
+
+/** 引擎资源遥测白名单（P13）：只接受数值/短字符串，避免把任意对象写进任务状态 */
+function parseTelemetry(raw: unknown) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const source = raw as Json
+  const gpuName = str(source.gpuName)
+  const sampledAt = num(source.sampledAt)
+  const telemetry = {
+    cpuPct: nonNegative(source.cpuPct, 100_000),
+    rssMb: nonNegative(source.rssMb, 10_000_000),
+    gpuName: gpuName && gpuName.length <= 80 ? gpuName : undefined,
+    gpuUtilPct: pct(source.gpuUtilPct),
+    vramUsedMb: nonNegative(source.vramUsedMb, 1_000_000),
+    vramTotalMb: nonNegative(source.vramTotalMb, 1_000_000),
+    gpuTempC: nonNegative(source.gpuTempC, 200),
+    sampledAt: sampledAt && sampledAt > 0 ? Math.round(sampledAt) : undefined,
+  }
+  return Object.values(telemetry).some((value) => value !== undefined) ? telemetry : undefined
+}
+
 export function registerCompanionRoutes(app: FastifyInstance): void {
   app.post<{ Body: Json }>('/api/companion/register', async (request, reply) => {
     const body = request.body ?? {}
@@ -104,6 +146,20 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
                     : undefined,
             // 运行时形态：只透传合法值，旧客户端不带该字段则保持 undefined
             api: engineRaw.api === 'legacy' || engineRaw.api === 'modern' ? engineRaw.api : undefined,
+            // P13：实时引擎状态 + 阶段 + 资源遥测（旧 Companion 不带这些字段）
+            state:
+              typeof engineRaw.state === 'string' &&
+              ['stopped', 'starting', 'ready', 'busy', 'error'].includes(engineRaw.state)
+                ? (engineRaw.state as 'stopped' | 'starting' | 'ready' | 'busy' | 'error')
+                : undefined,
+            device: str(engineRaw.device),
+            phase: str(engineRaw.phase),
+            phaseLabel: str(engineRaw.phaseLabel),
+            step: positiveInt(engineRaw.step, 100_000),
+            stepTotal: positiveInt(engineRaw.stepTotal, 100_000),
+            speed: nonNegative(engineRaw.speed, 100_000),
+            estimated: bool(engineRaw.estimated),
+            ...(parseTelemetry(engineRaw.telemetry ?? engineRaw) ?? {}),
           }
         : undefined,
     })
@@ -133,12 +189,20 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
 
   app.post<{ Body: Json }>('/api/companion/progress', async (request, reply) => {
     const body = request.body ?? {}
+    const telemetry = parseTelemetry(body.telemetry)
     const result = reportProgress({
       workerId: str(body.workerId) ?? '',
       token: str(body.token) ?? '',
       taskId: str(body.taskId) ?? '',
       progress: Math.max(0, Math.min(1, num(body.progress) ?? 0)),
       message: str(body.message),
+      phase: str(body.phase),
+      phaseLabel: str(body.phaseLabel),
+      step: positiveInt(body.step, 100_000),
+      stepTotal: positiveInt(body.stepTotal, 100_000),
+      speed: nonNegative(body.speed, 100_000),
+      estimated: bool(body.estimated),
+      telemetry,
     })
     if (!result) return reply.code(401).send({ error: '进度上报被拒绝（worker/task 不匹配或 token 无效）' })
     return reply.send(result)
@@ -349,7 +413,26 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
   app.get<{ Params: { id: string } }>('/api/companion/tasks/:id', async (request, reply) => {
     const task = getTask(request.params.id)
     if (!task) return reply.code(404).send({ error: '任务不存在' })
-    return reply.send({ task: taskWithQueueInfo(task) })
+    // P13：附带执行节点快照（引擎状态 + 资源遥测），让前端无需再单独轮询 /status。
+    // 只暴露展示所需字段，绝不带 token。
+    const workers = listWorkers()
+    const worker = workers.find((item) => item.id === task.workerId) ?? workers.find((item) => item.status.currentTaskId === task.id)
+    const workerInfo = worker
+      ? {
+          id: worker.id,
+          name: worker.name,
+          version: worker.version,
+          capabilities: worker.capabilities,
+          lastHeartbeatAt: worker.lastHeartbeatAt,
+          status: {
+            busy: worker.status.busy,
+            currentTaskId: worker.status.currentTaskId,
+            lastMessage: worker.status.lastMessage,
+            engine: worker.status.engine,
+          },
+        }
+      : undefined
+    return reply.send({ task: { ...taskWithQueueInfo(task), worker: workerInfo } })
   })
 
   app.post<{ Params: { id: string } }>('/api/companion/tasks/:id/cancel', async (request, reply) => {

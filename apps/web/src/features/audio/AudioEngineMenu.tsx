@@ -18,7 +18,7 @@ import {
 import { getCompanionStatus, getProvisionStatus, type CompanionStatus, type ProvisionProfileId, type ProvisionStatus } from '../../lib/api'
 import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
-import { COMPANION_START_HINT } from './CompanionBadge'
+import { resolveCompanionHint } from './CompanionBadge'
 import { TrainingButton } from './TrainingButton'
 
 const POLL_MS = 30_000
@@ -93,7 +93,7 @@ export function AudioEngineMenu({ onOpenAdvanced, onOpenTasks }: AudioEngineMenu
   const essential = provision?.profiles?.find((profile) => profile.id === 'essential')
   const modelsReady = Boolean(provision?.runtime?.installed) && essential?.ready === true
   const missingBytes = provision?.missingBytes ?? 0
-  const hint = companion?.hint ?? COMPANION_START_HINT
+  const hint = resolveCompanionHint(companion?.hint)
 
   const copyHint = async () => {
     try {

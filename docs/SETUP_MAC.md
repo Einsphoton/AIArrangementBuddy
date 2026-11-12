@@ -59,7 +59,7 @@ node scripts/companion.mjs --server http://127.0.0.1:8787 --name "MacBook" --ace
 
 Companion 的路径解析顺序：
 `AIAB_ACESTEP_DIR` > `<数据目录>/ace-step`（自动安装的位置）> `music-gen/acestep-cpp`（旧开发布局）；
-计算后端默认 macOS 用 `METAL`（可用 `GGML_BACKEND` 覆盖）。
+计算后端默认 macOS 用 `MTL0`（ggml 的 Metal 后端名；可用 `GGML_BACKEND` 覆盖，填 `METAL` 会启动失败）。
 
 可用性自检：
 
