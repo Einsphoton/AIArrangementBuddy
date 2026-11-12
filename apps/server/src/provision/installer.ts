@@ -39,6 +39,17 @@ import {
 } from './manifest.js'
 import { extractTarGzToDir, safeArchivePath } from './untar.js'
 
+/**
+ * 大文件下载的重试次数（downloader 默认 3 次）。
+ *
+ * 国内网络经代理下载 HuggingFace / GitHub 大文件时，连接常在中途被重置；下载器支持
+ * 断点续传，失败只损失当前连接尚未落盘的一小段，因此多试几次的代价很小，却能避免
+ * 「2.5GB 模型下到 30% 就整任务失败、只能反复手点下载」。
+ */
+const RUNTIME_DOWNLOAD_ATTEMPTS = 5
+const MODEL_DOWNLOAD_ATTEMPTS = 8
+const ADAPTER_DOWNLOAD_ATTEMPTS = 5
+
 export interface ProvisionPaths {
   root: string
   downloads: string
@@ -268,6 +279,7 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<{ 
     signal: options.signal,
     fetchImpl: options.fetchImpl,
     log: options.log,
+    attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
     onProgress: ({ received, total }) => {
       const ratio = total > 0 ? received / total : 0
       options.onProgress?.(ratio * 0.7, `下载运行时 ${(received / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)}MB`)
@@ -360,6 +372,7 @@ export async function installModels(options: InstallModelsOptions): Promise<{ in
       signal: options.signal,
       fetchImpl: options.fetchImpl,
       log: options.log,
+      attempts: MODEL_DOWNLOAD_ATTEMPTS,
       onProgress: ({ received }) => {
         const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
         options.onProgress?.(
@@ -412,6 +425,7 @@ export async function installAdapters(options: InstallAdaptersOptions): Promise<
       signal: options.signal,
       fetchImpl: options.fetchImpl,
       log: options.log,
+      attempts: ADAPTER_DOWNLOAD_ATTEMPTS,
       onProgress: ({ received }) => {
         const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
         options.onProgress?.(ratio, `下载适配器 ${asset.id}（${((doneBytes + received) / 1e6).toFixed(1)}/${(totalBytes / 1e6).toFixed(1)}MB）`)
@@ -623,13 +637,26 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
             sha256: file.sha256,
             size: file.size,
             signal,
-            onProgress: ({ received, total }) => {
+            attempts: MODEL_DOWNLOAD_ATTEMPTS,
+            // 把重试日志写进步骤消息：网络抖动时面板能看到「第 n/8 次尝试」，而不是只报最后一句失败
+            log: (message) => {
               const jobNow = jobs.get(id)
               if (!jobNow) return
+              updateJob(id, { steps: jobNow.steps.map((item) => (item.key === step.key ? { ...item, message } : item)) })
+            },
+            onProgress: ({ received, total, attempt }) => {
+              const jobNow = jobs.get(id)
+              if (!jobNow) return
+              const attemptNote = attempt && attempt > 1 ? ` · 第 ${attempt}/${MODEL_DOWNLOAD_ATTEMPTS} 次尝试` : ''
               updateJob(id, {
                 steps: jobNow.steps.map((item) =>
                   item.key === step.key
-                    ? { ...item, progress: total > 0 ? received / total : 0, bytes: received, message: `${(received / 1e9).toFixed(2)}GB` }
+                    ? {
+                        ...item,
+                        progress: total > 0 ? received / total : 0,
+                        bytes: received,
+                        message: `${(received / 1e9).toFixed(2)}GB${attemptNote}`,
+                      }
                     : item,
                 ),
               })

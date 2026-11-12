@@ -10,7 +10,8 @@
  *   3. proxyAwareFetch：本地 http origin + 本地 http 代理（绝对 URL 转发），
  *      200/404 透传、Range 透传、302 跟随、abort、代理不可达可诊断、本机默认直连、CONNECT 502
  *   4. downloadFile：缓存命中、sha256 正确/不符、断点续传（只请求剩余字节 + 增量 hash）、
- *      服务器忽略 Range、attempts=3 重试、网络错误文案（主机名 + 代理提示）
+ *      服务器忽略 Range、attempts=3 重试、进度回调带 attempt、网络错误文案
+ *      （主机名 + 代理提示；已配置代理时点明「经代理传输中断」）
  *
  * 约束：全部 loopback / fake fetchImpl，不访问公网；不新增依赖；跑完关闭所有本地 server。
  * 用法：失败时非 0 退出，输出 ✓/✗ 与失败原因。
@@ -877,6 +878,52 @@ async function testDownloadFile(origin, tempDir) {
     eq(fake.calls.length, 3, '请求次数')
     eq(sha256(readFileSync(dest)), sha256(SMALL_BODY), '落盘 sha256')
     return '3 次请求后成功'
+  })
+
+  await check('重试进度带 attempt/attempts：第二次尝试成功时进度回调报告 attempt=2/3', async () => {
+    const dest = freshDest('retry-progress')
+    const fake = scriptedFetch((index) => {
+      if (index < 1) throw networkError('ECONNRESET')
+      return makeResponse(SMALL_BODY)
+    })
+    const seen = []
+    const result = await downloadFile({
+      url: 'http://fake.test/asset.bin',
+      dest,
+      size: SMALL_BODY.length,
+      sha256: sha256(SMALL_BODY),
+      attempts: 3,
+      fetchImpl: fake,
+      onProgress: ({ attempt, attempts }) => {
+        if (attempt) seen.push(`${attempt}/${attempts}`)
+      },
+    })
+    eq(result.status, 'downloaded', 'status')
+    assert(seen.length > 0, '应收到进度回调')
+    assert(
+      seen.every((value) => value === '2/3'),
+      `第二次尝试的进度应报告 attempt=2/attempts=3（实际 ${seen.join(',')}）`,
+    )
+    return seen[0]
+  })
+
+  await check('网络错误文案：已配置代理时点明「经代理传输中断」，不再误报「可能需要代理」', async () => {
+    const dest = freshDest('net-error-proxy')
+    const fake = scriptedFetch(() => {
+      throw networkError('ECONNRESET')
+    })
+    await withProxyEnv({ HTTPS_PROXY: 'http://127.0.0.1:10899' }, async () => {
+      const error = await captureRejection(
+        () => downloadFile({ url: 'https://huggingface.test/asset.bin', dest, attempts: 1, fetchImpl: fake }),
+        '网络错误（已配置代理）',
+      )
+      const message = String(error.message)
+      assert(/经代理/.test(message), `应说明经代理传输时连接被中断（实际 ${message}）`)
+      assert(message.includes('10899'), `错误文案应含代理端口 10899（实际 ${message}）`)
+      assert(!/可能需要代理/.test(message), `已配置代理时不应再误报「可能需要代理」（实际 ${message}）`)
+      assert(/ECONNRESET/.test(message), `错误文案应含错误码 ECONNRESET（实际 ${message}）`)
+      return message.slice(0, 90)
+    })
   })
 
   await check('网络错误文案：含主机名与「代理」提示（fake fetchImpl 持续失败）', async () => {

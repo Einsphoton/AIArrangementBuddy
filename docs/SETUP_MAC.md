@@ -106,7 +106,7 @@ node scripts/launch.mjs
 | --- | --- | --- |
 | `fetch failed` | Node 进程没有可用代理或网络不可达 | 确认代理软件已开启并能访问 <https://github.com>；重启应用让 `NODE_USE_ENV_PROXY=1` 生效；或在终端 `curl -I https://github.com` 验证 |
 | `网络错误（ETIMEDOUT，github.com/…）` | 直连超时（国内网络常见） | 开启代理后重启应用；用面板里的「复制诊断命令」查看任务详情 |
-| `ECONNRESET` / `ECONNREFUSED` | TLS 连接被重置，或代理端口写错/代理未启动 | 换一个代理节点；核对 `HTTPS_PROXY` 的端口与代理软件一致；确认代理软件允许本机连接 |
+| `ECONNRESET` / `ECONNREFUSED` | 代理端口写错/代理未启动，或代理线路在大文件传输中途被重置（国内网络常见，长连接可能每几分钟被掐断一次） | 换一个代理节点；核对 `HTTPS_PROXY` 的端口与代理软件一致；模型/适配器下载已支持自动多次重试 + 断点续传，面板会显示「第 n/N 次尝试」，通常能自己跑完；若仍失败，重新点「开始下载」即可从断点继续 |
 | `HTTP 404` | 资产地址或版本已变更（Release 被删、HF 文件名改了） | 升级到最新版本再试；或到 GitHub Releases / HuggingFace 确认文件名 |
 | `HTTP 416` | 断点续传偏移与服务端不一致（`.part` 大小对不上） | 新版会自动丢弃偏移并重下；仍失败则删掉 `data/ace-step/.downloads/` 下对应 `.part` 后重试 |
 | `sha256 校验失败` | 缓存损坏，或代理做了内容劫持/MITM | 删除对应缓存（`.downloads/*.part` 或已下载文件）后重下；检查代理是否开启 HTTPS 解密 |
@@ -114,11 +114,13 @@ node scripts/launch.mjs
 **断点续传**：下载器支持 `.part` 缓存，中途取消或断网后重新点「开始下载」会从断点继续（发 `Range: bytes=<已下载>-`）；
 带 sha256 校验的资产续传时会把已有 `.part` 字节补进同一个哈希再继续追加，**不会**因为要校验而从头重下 2.5GB 模型；
 若服务器返回的区间起点与本地 `.part` 对不上，会自动丢弃分片、从头重下（不会拼出坏文件）。
+大文件下载会自动重试：运行时 5 次、模型 8 次、风格适配器 5 次（downloader 默认 3 次），每次重试都复用已有 `.part`，
+面板的步骤消息会显示「第 n/N 次尝试」；即使任务最终报失败，重新点下载也会从断点继续，不会白下。
 手动清理缓存：删除 `<数据目录>/ace-step/.downloads/` 下对应的 `.part` 文件即可（数据目录默认是仓库下 `data/`）。
 
 ## 5. 已验收证据（P8-A）
 
-- `node --import tsx scripts/verify-provision.mjs`（或 `pnpm verify:provision`）：**36/36**
+- `node --import tsx scripts/verify-provision.mjs`（或 `pnpm verify:provision`）：**38/38**
   - 代理环境解析（大小写 / `ALL_PROXY` 兜底 / `user:pass` / `no_proxy` 通配与端口）
   - 本地假代理（绝对 URL + CONNECT）下的 `proxyAwareFetch`：200/404、`Range` 透传、302 跟随、中止、代理不可达错误码
   - 下载器：缓存命中 0 请求、sha256 正误、**续传只请求剩余字节**、服务器忽略 `Range` 时从头下、206 区间起点不符时丢弃分片重试、网络错误/429/5xx 重试（默认 3 次）、可诊断错误文案

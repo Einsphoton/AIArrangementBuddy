@@ -465,7 +465,7 @@ pnpm ai:logs -- --limit 30
 **Q：下载本机 AI 引擎（ACE-Step 运行时 / 模型）很慢或报 `fetch failed`？**
 国内网络访问 GitHub Releases / HuggingFace 通常需要代理。新版会自动识别 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`
 （启动脚本自动为服务端补 `NODE_USE_ENV_PROXY=1`）以及 macOS 系统代理，一般无需手动配置；**改完代理设置后要重启应用**。
-仍失败时，安装面板的错误框下方会显示提示和「复制诊断命令」，下载支持断点续传。详见 [docs/SETUP_MAC.md](docs/SETUP_MAC.md) 第 4 节。
+仍失败时，安装面板的错误框下方会显示提示和「复制诊断命令」。模型/适配器等大文件下载会自动多次重试并断点续传，面板步骤消息会显示「第 n/N 次尝试」；即使任务报失败，重新点「开始下载」也会从断点继续。详见 [docs/SETUP_MAC.md](docs/SETUP_MAC.md) 第 4 节。
 
 **Q：macOS 提示「无法打开」？**
 右键 → 打开；或终端执行 `xattr -dr com.apple.quarantine .`。

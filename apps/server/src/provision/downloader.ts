@@ -8,9 +8,12 @@
  * 关键行为：
  *   - 已有 .part 续传时，先把已有字节流式喂进同一个 sha256，再继续追加（不再为了哈希从头重下）；
  *   - 206 用 content-range 解析总大小；服务器忽略 Range 返回 200 时截断 .part 并重置哈希；
- *   - attempts（默认 3）只在网络类错误与 HTTP 429/5xx 时重试，指数退避 800ms→2s，重试复用 Range；
+ *   - attempts（默认 3；模型/适配器等大文件由 installer 传更多次）只在网络类错误与
+ *     HTTP 429/5xx 时重试，指数退避 800ms→2s，重试复用 Range；进度回调带 attempt，
+ *     面板可显示「第 n/N 次尝试」而不是只看到最后一次失败；
  *   - sha256/大小不符不自动重试，保持可读错误；
- *   - 网络错误信息带代理诊断提示，避免 UI 只看到 "fetch failed"。
+ *   - 网络错误信息带代理诊断提示，避免 UI 只看到 "fetch failed"；已配置代理时明确说明
+ *     「经代理传输时连接被中断」，不再误报成「可能需要代理」。
  */
 import { createHash } from 'node:crypto'
 import type { Hash } from 'node:crypto'
@@ -27,12 +30,16 @@ import { dirname } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
-import { networkFailureOf, proxyAwareFetch, type NetworkFailure } from '../net/proxy.js'
+import { detectProxyForUrl, networkFailureOf, proxyAwareFetch, type NetworkFailure } from '../net/proxy.js'
 import { sleep } from '../util.js'
 
 export interface DownloadProgress {
   received: number
   total: number
+  /** 当前是第几次尝试（1 起；缓存命中/完整分片直接完成时为 undefined） */
+  attempt?: number
+  /** 本次下载配置的总尝试次数 */
+  attempts?: number
 }
 
 export interface DownloadOptions {
@@ -133,13 +140,23 @@ function hostOfUrl(url: string): string {
 
 /**
  * 网络错误 → 用户可读的诊断文案。
- * 有代理：提示检查代理软件；无代理：提示设置 HTTPS_PROXY/ALL_PROXY 后重启。
+ *   - 代理连接本身失败：提示检查代理软件；
+ *   - 已配置代理、但连接是在传输中途被掐断（body 阶段错误拿不到代理上下文）：
+ *     明确说明「经代理传输时连接被中断」，避免误报成「可能需要代理」；
+ *   - 无代理：提示设置 HTTPS_PROXY / ALL_PROXY 后重启。
  */
-function formatNetworkFailure(failure: NetworkFailure, url: string): string {
+function formatNetworkFailure(
+  failure: NetworkFailure,
+  url: string,
+  proxy: { host: string; port: number } | null,
+): string {
   const host = failure.host ?? hostOfUrl(url)
   const head = `下载失败：网络错误（${failure.code}，${host}）。`
   if (failure.proxy) {
     return `${head}代理 ${failure.proxy.host}:${failure.proxy.port} 连接失败，请检查代理软件（或关闭代理后重试）。`
+  }
+  if (proxy) {
+    return `${head}数据经代理 ${proxy.host}:${proxy.port} 传输时连接被中断：请检查代理软件 / 更换节点后重试（断点已保留，重新下载会续传）。`
   }
   return `${head}当前网络可能需要代理：请设置 HTTPS_PROXY/ALL_PROXY（macOS 也可在系统设置里开代理）后重启应用再试。`
 }
@@ -196,7 +213,7 @@ export async function downloadFile(options: DownloadOptions): Promise<DownloadRe
   let lastError: unknown
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await downloadAttempt({ options, fetchImpl, log, partPath })
+      return await downloadAttempt({ options, fetchImpl, log, partPath, attempt, attempts })
     } catch (error) {
       lastError = error
       if (options.signal?.aborted) throw error
@@ -215,7 +232,7 @@ export async function downloadFile(options: DownloadOptions): Promise<DownloadRe
 
   if (options.signal?.aborted) throw lastError instanceof Error ? lastError : new Error('已取消')
   const failure = networkFailureOf(lastError)
-  if (failure) throw new Error(formatNetworkFailure(failure, options.url))
+  if (failure) throw new Error(formatNetworkFailure(failure, options.url, detectProxyForUrl(options.url)))
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
 
@@ -224,10 +241,21 @@ interface AttemptOptions {
   fetchImpl: typeof fetch
   log: (message: string) => void
   partPath: string
+  /** 当前第几次尝试（1 起） */
+  attempt: number
+  /** 总尝试次数 */
+  attempts: number
 }
 
 /** 单次下载尝试：检查 .part → 发 Range 请求 → 续传/重下 → 校验 → rename */
-async function downloadAttempt({ options, fetchImpl, log, partPath }: AttemptOptions): Promise<DownloadResult> {
+async function downloadAttempt({
+  options,
+  fetchImpl,
+  log,
+  partPath,
+  attempt,
+  attempts,
+}: AttemptOptions): Promise<DownloadResult> {
   let offset = fileSize(partPath)
   if (offset > 0 && options.size && offset > options.size) {
     log(`分片大小异常（${offset} > ${options.size}），丢弃后重新下载`)
@@ -305,16 +333,16 @@ async function downloadAttempt({ options, fetchImpl, log, partPath }: AttemptOpt
     const now = Date.now()
     if (now - lastReport >= interval) {
       lastReport = now
-      options.onProgress?.({ received, total })
+      options.onProgress?.({ received, total, attempt, attempts })
     }
   })
   try {
     await pipeline(nodeStream, writeStream)
   } catch (error) {
-    options.onProgress?.({ received, total })
+    options.onProgress?.({ received, total, attempt, attempts })
     throw error instanceof Error ? error : new Error(String(error))
   }
-  options.onProgress?.({ received, total })
+  options.onProgress?.({ received, total, attempt, attempts })
 
   if (options.size && received !== options.size) {
     throw new Error(`下载大小不符：期望 ${options.size}，实际 ${received}（已保留分片，可重试续传）`)
