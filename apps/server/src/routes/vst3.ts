@@ -15,17 +15,22 @@ import { createReadStream } from 'node:fs'
 import type { FastifyInstance } from 'fastify'
 import { enrichTask } from '../vst3/bridge.js'
 import { assetFilePath, getAsset } from '../storage/assets.js'
-import { cancelTask, enqueueTask, getTask, listWorkers } from '../companion/store.js'
+import { cancelTask, enqueueTask, getTask, listWorkers, parseEngineTier, variantForTask } from '../companion/store.js'
 import { errorMessage } from '../util.js'
 
 type Json = Record<string, unknown>
 
-const SUPPORTED = new Set(['generate_audio', 'repaint_audio', 'generate_stem'])
-const VARIANT: Record<string, 'turbo' | 'sft' | 'base'> = {
-  generate_audio: 'turbo',
-  repaint_audio: 'sft',
-  generate_stem: 'base',
-}
+const TASK_TYPES = ['generate_audio', 'repaint_audio', 'generate_stem'] as const
+const SUPPORTED = new Set<string>(TASK_TYPES)
+/**
+ * hello 下发的缺省（2B）变体映射：统一由 variantForTask 推导，避免与派单逻辑双份维护。
+ * 插件实际派单变体还会跟 params.engine（'xl' → xl_*）走。
+ */
+const DEFAULT_VARIANTS: Record<string, string | undefined> = Object.fromEntries(
+  TASK_TYPES.map((type) => [type, variantForTask(type)]),
+)
+/** 插件可选的引擎量级（P9）：2b = 标准 2B（缺省），xl = XL 4B（需 modern 运行时 + xl 模型档） */
+const ENGINES = ['2b', 'xl'] as const
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
@@ -46,9 +51,11 @@ export function registerVst3Routes(app: FastifyInstance): void {
       priority: true,
       cancel: true,
       assets: 'audio/wav',
+      engines: true,
     },
     taskTypes: [...SUPPORTED],
-    variants: VARIANT,
+    variants: DEFAULT_VARIANTS,
+    engines: [...ENGINES],
     onlineWorkers: listWorkers().length,
     hint:
       listWorkers().length === 0
@@ -63,6 +70,13 @@ export function registerVst3Routes(app: FastifyInstance): void {
       return reply.code(400).send({ error: `不支持的任务类型：${type}（可用：${[...SUPPORTED].join(', ')}）` })
     }
     const params = (body.params && typeof body.params === 'object' ? body.params : {}) as Json
+
+    // 引擎量级（P9）：只接受 '2b' | 'xl'；插件不带该字段时按缺省 2b
+    if (parseEngineTier(params.engine) === null) {
+      return reply.code(400).send({
+        error: `params.engine 只能是 '2b'（标准 2B，快）或 'xl'（XL 4B，最高质量），收到：${String(params.engine)}`,
+      })
+    }
 
     // 最小校验：插件端参数错误要立刻得到可读中文，而不是排队后失败
     if (type === 'generate_audio' && !str(params.caption)) {
@@ -108,14 +122,13 @@ export function registerVst3Routes(app: FastifyInstance): void {
     }
 
     try {
-      const quality = params.quality === true
-      const variantOverride = quality && type === 'generate_audio' ? 'sft' : undefined
-      const task = enqueueTask({ type, params, priority, projectId: str(body.projectId), variantOverride })
+      // 派单变体统一由 store 的 variantForTask 从 params（engine/quality）推导
+      const task = enqueueTask({ type, params, priority, projectId: str(body.projectId) })
       return reply.send({
         ...enrichTask(task),
         taskId: task.id,
         status: task.status,
-        requiredVariant: VARIANT[type],
+        requiredVariant: task.requiredVariant,
         priority: task.priority,
         pollMs: 800,
       })

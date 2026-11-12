@@ -16,6 +16,7 @@ import {
   createCompanionStemTask,
   getAssetPeaks,
   getCompanionTask,
+  type CompanionEngine,
   type CompanionPriority,
   type StemArm,
 } from '../../lib/api'
@@ -51,11 +52,14 @@ export function SongWorkflow({
   quality,
   priority,
   offline,
+  engine = '2b',
 }: {
   caption: string
   quality: boolean
   priority: CompanionPriority
   offline: boolean
+  /** P9：引擎量级（默认标准档）；增强版时整曲/分轨走增强版生成模型 */
+  engine?: CompanionEngine
 }) {
   const project = useStore((s) => s.project)
   const pushToast = useStore((s) => s.pushToast)
@@ -119,20 +123,34 @@ export function SongWorkflow({
     }
     setError(null)
     setRunning(true)
+    const tierLabel = engine === 'xl' ? '增强版' : '标准档'
     const initial: Step[] = [
-      { key: 'song', label: quality ? '整曲（质量模式 · 精修 50 步）' : '整曲（快速模式）', status: 'running', progress: 0 },
+      {
+        key: 'song',
+        label: `整曲（${tierLabel} · ${quality ? '质量模式 · 精修 50 步' : '快速模式'}）`,
+        status: 'running',
+        progress: 0,
+      },
       ...arms.map((arm) => ({ key: `stem:${arm}`, label: `分轨 · ${STEM_ARM_LABEL[arm]}`, status: 'pending' as StepStatus, progress: 0 })),
     ]
     setSteps(initial)
     let songAssetId: string | null = null
     try {
-      const song = await createCompanionGenerateTask({ caption: text, quality: quality || undefined }, project.id, priority)
+      const song = await createCompanionGenerateTask(
+        { caption: text, quality: quality || undefined, engine },
+        project.id,
+        priority,
+      )
       songAssetId = await waitTask(song.taskId, 'song')
       await placeAsset(songAssetId, `整曲 · ${text.slice(0, 28)}`, `音轨 · ${text.slice(0, 20)}`, text)
 
       for (const arm of arms) {
         update(`stem:${arm}`, { status: 'running' })
-        const stem = await createCompanionStemTask({ sourceAssetId: songAssetId, arm, caption: `${arm} stem` }, project.id, priority)
+        const stem = await createCompanionStemTask(
+          { sourceAssetId: songAssetId, arm, caption: `${arm} stem`, engine },
+          project.id,
+          priority,
+        )
         const stemAssetId = await waitTask(stem.taskId, `stem:${arm}`)
         await placeAsset(stemAssetId, `Stem · ${STEM_ARM_LABEL[arm]}`, `Stem · ${STEM_ARM_LABEL[arm]}`, `${text} · ${arm} stem`)
       }
@@ -161,7 +179,7 @@ export function SongWorkflow({
           className="btn btn-secondary h-6 px-2 text-[10px]"
           onClick={() => void start()}
           disabled={running || offline}
-          title="生成整曲后自动按所选乐器逐条生成分轨（分轨生成模型，冷启动较慢）"
+          title={`生成整曲后自动按所选乐器逐条生成分轨（${engine === 'xl' ? '增强版' : '标准档'} · 分轨生成模型，冷启动较慢）`}
         >
           {running ? <LoaderCircle size={10} className="mr-1 animate-spin" /> : null}
           {running ? '工作流进行中…' : '一键生成'}

@@ -28,10 +28,12 @@ import {
   heartbeat,
   listTasks,
   listWorkers,
+  parseEngineTier,
   queueCounts,
   registerWorker,
   reportProgress,
   taskWithQueueInfo,
+  variantForTask,
 } from '../companion/store.js'
 import { errorMessage } from '../util.js'
 
@@ -42,14 +44,6 @@ const SUPPORTED_TASK_TYPES = new Set(['generate_audio', 'repaint_audio', 'genera
 
 /** generate_stem 允许的乐器手臂（C++ lego 的 track 名称） */
 const STEM_ARMS = new Set(['guitar', 'bass', 'drums', 'strings', 'keys', 'synth', 'vocals'])
-
-/** 任务类型 → 需要的 DiT 变体（适配器基座校验也用这个） */
-const TASK_VARIANT: Record<string, 'turbo' | 'sft' | 'base'> = {
-  generate_audio: 'turbo',
-  repaint_audio: 'sft',
-  generate_stem: 'base',
-  cover_audio: 'turbo',
-}
 
 type Json = Record<string, unknown>
 
@@ -99,6 +93,17 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
             variant: str(engineRaw.variant),
             pid: num(engineRaw.pid),
             warm: typeof engineRaw.warm === 'boolean' ? engineRaw.warm : undefined,
+            // LM 档位：'' / '1.7B' / '4B'；旧 Companion 的布尔 true 按 legacy 1.7B 兼容
+            lm:
+              engineRaw.lm === null
+                ? null
+                : typeof engineRaw.lm === 'string'
+                  ? engineRaw.lm.trim()
+                  : engineRaw.lm === true
+                    ? '1.7B'
+                    : undefined,
+            // 运行时形态：只透传合法值，旧客户端不带该字段则保持 undefined
+            api: engineRaw.api === 'legacy' || engineRaw.api === 'modern' ? engineRaw.api : undefined,
           }
         : undefined,
     })
@@ -203,6 +208,14 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
     }
     const params = (body.params && typeof body.params === 'object' ? body.params : {}) as Json
 
+    // 引擎量级（P9）：只接受 '2b' | 'xl'；缺省（旧前端/旧插件不带）按 2b 处理
+    const engine = parseEngineTier(params.engine)
+    if (!engine) {
+      return reply.code(400).send({
+        error: `params.engine 只能是 '2b'（标准 2B，快）或 'xl'（XL 4B，最高质量），收到：${String(params.engine)}`,
+      })
+    }
+
     if (type === 'generate_audio' && !str(params.caption)) {
       return reply.code(400).send({ error: 'generate_audio 需要 params.caption（英文提示词，含风格/乐器/情绪/速度）' })
     }
@@ -287,7 +300,9 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
           error: `适配器不可用：${entry.audit?.errors?.[0] ?? '未通过审计'}`,
         })
       }
-      const requiredBase = TASK_VARIANT[type] ?? 'turbo'
+      // 适配器基座校验：按任务族的基座变体（不受 quality 覆盖影响，与旧行为一致），
+      // 变体映射复用 variantForTask，仅跟随引擎量级（xl 用 xl_* 基座）
+      const requiredBase = variantForTask(type, { engine }) ?? 'turbo'
       if (entry.manifest.baseModel !== requiredBase) {
         return reply.code(400).send({
           error: `适配器 ${adapterId} 基于${variantDisplayName(entry.manifest.baseModel)}，而当前任务需要${variantDisplayName(requiredBase)}基座（风格适配器与基座版本绑定）`,
@@ -312,17 +327,13 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
       priority = raw
     }
 
-    // 质量模式（P7-A）：布尔校验；任务实际走 sft+LM，派单需要 sft worker
-    let quality = false
-    if (params.quality !== undefined) {
-      if (typeof params.quality !== 'boolean') {
-        return reply.code(400).send({ error: 'params.quality 必须是布尔值' })
-      }
-      quality = params.quality
+    // 质量模式（P7-A）：布尔校验（语义不变：仅 generate_audio 生效、与 LoRA 互斥）；
+    // 派单变体由 variantForTask 从 params 推导（2B→sft，XL→xl_sft），不再单独传 variantOverride
+    if (params.quality !== undefined && typeof params.quality !== 'boolean') {
+      return reply.code(400).send({ error: 'params.quality 必须是布尔值' })
     }
-    const variantOverride = quality && type === 'generate_audio' ? 'sft' : undefined
 
-    const task = enqueueTask({ type, params, projectId: str(body.projectId), priority, variantOverride })
+    const task = enqueueTask({ type, params, projectId: str(body.projectId), priority })
     const info = taskWithQueueInfo(task)
     return reply.send({
       taskId: task.id,

@@ -17,6 +17,7 @@ import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
 import { getHealth } from '../../lib/api'
 import { ProjectMenu } from './ProjectMenu'
+import { ProvisionButton } from '../audio/ProvisionButton'
 import { Kbd } from '../../components/ui/menu'
 import { modSymbol } from '../../lib/shortcuts'
 
@@ -180,6 +181,9 @@ export function TopBar() {
       </button>
 
       <span className="h-5 w-px shrink-0 bg-line" />
+
+      {/* 本机引擎 / 模型档位：顶部常驻入口（未装时显示「安装本机引擎」；装好后隐藏，改从 AI 助手菜单管理档位） */}
+      <ProvisionButton mode="trigger" />
 
       {/* AI 对话面板开关 */}
       <button

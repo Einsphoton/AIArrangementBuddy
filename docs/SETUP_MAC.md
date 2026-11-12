@@ -3,6 +3,8 @@
 本文档对应「本机 AI 引擎自动安装」：在 macOS（Apple Silicon）上跑产品时，自动下载 ACE-Step 运行时与模型（sha256 校验、断点续传），装好后 Companion 自动识别并可用于生成音频。
 
 > 现状：P8-A 已交付并验收（运行时+模型自动安装）。LoRA 适配器自动下载与「按需训练」是 P8-B/C，尚未完成，见 `docs/P8_PROGRESS.md`。
+>
+> **P9（2026-11）更新**：Windows 侧运行时已升级为上游 `acestep.cpp` modern 构建（支持 XL 4B），并新增 `xl` 模型档；**macOS / Linux 仍使用官方 legacy 运行时（v0.1.0），不支持 XL**，安装面板里的 XL 档在这些平台会显示「当前平台不支持」。详见 [P9_XL_ENGINE.md](./P9_XL_ENGINE.md)。
 
 ## 1. 环境要求
 

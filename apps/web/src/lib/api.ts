@@ -1,3 +1,4 @@
+import { variantDisplayName } from '@aiab/core'
 import type { AppSettings, AssetRef, MasterChain, MixPlan, Project, TrackChainSuggestion } from '@aiab/core'
 
 /* ------------------------------------------------------------------ */
@@ -607,6 +608,36 @@ export const COMPANION_PRIORITY_LABEL: Record<CompanionPriority, string> = {
   2: '紧急',
 }
 
+/**
+ * P9：引擎量级（DiT 模型档）。
+ * - '2b'：标准档（turbo / sft / base），显存占用低、速度快；
+ * - 'xl'：XL 4B 档（xl_turbo / xl_sft / xl_base），最佳质量，需 ≥12GB 显存。
+ * 任务参数缺省按 '2b'。XL 只在已装 xl 模型档、且生成节点上报 xl_turbo 能力时可用。
+ */
+export type CompanionEngine = '2b' | 'xl'
+
+/** P9：引擎量级 → 界面中性名称（不暴露底层模型档位名） */
+export const COMPANION_ENGINE_LABEL: Record<CompanionEngine, string> = {
+  '2b': '标准档',
+  xl: '增强版',
+}
+
+/** P9：内部变体 id → 界面中性名称（与 packages/core/src/branding.ts 保持一致） */
+export const COMPANION_VARIANT_LABEL: Record<string, string> = {
+  turbo: '快速生成模型',
+  sft: '精修生成模型',
+  base: '分轨生成模型',
+  xl_turbo: '快速生成模型（增强版）',
+  xl_sft: '精修生成模型（增强版）',
+  xl_base: '分轨生成模型（增强版）',
+}
+
+/** 变体 id 的可读文案：未知变体走 branding 的兜底名（不回显内部 id） */
+export function companionVariantLabel(variant: string | undefined): string {
+  if (!variant) return ''
+  return COMPANION_VARIANT_LABEL[variant] ?? variantDisplayName(variant)
+}
+
 export interface CompanionTaskState {
   id: string
   /** 任务类型（服务端返回，旧版可能没有） */
@@ -660,7 +691,15 @@ export interface CompanionStatus {
   queue?: CompanionQueueSummary
   /** 缺能力被阻塞的任务 */
   blockedByCapability?: CompanionBlockedCapability[]
-  workers: { id?: string; name?: string; busy?: boolean; lastSeenAt?: number; engine?: unknown }[]
+  workers: {
+    id?: string
+    name?: string
+    busy?: boolean
+    lastSeenAt?: number
+    /** P9：节点上报的能力；capabilities.models 含 'xl_turbo' 表示支持 XL 变体（旧节点可能没有该字段） */
+    capabilities?: { tasks?: string[]; gpu?: string; models?: string[] }
+    engine?: unknown
+  }[]
   tasks: CompanionTaskState[]
   /** 离线时的启动提示（服务端给出） */
   hint?: string
@@ -672,7 +711,8 @@ export function getCompanionStatus(): Promise<CompanionStatus> {
 
 /* ---------------- P8：本机引擎自动安装 ---------------- */
 
-export type ProvisionProfileId = 'essential' | 'quality' | 'stems'
+/** P9：'xl' = XL 4B 最佳质量档（xl_turbo/xl_sft/xl_base + LM 4B，约 23.8GB，需 ≥12GB 显存） */
+export type ProvisionProfileId = 'essential' | 'quality' | 'stems' | 'xl'
 
 export interface ProvisionProfileInfo {
   id: ProvisionProfileId
@@ -701,12 +741,63 @@ export interface ProvisionAdapterStatus {
   license: string
 }
 
+/* ---------------- P10：下载加速（国内镜像 / 多源分片 / 服务器离线包） ---------------- */
+
+/** 下载源策略：auto = 探测最快；mirror = 国内镜像优先（失败回落官方）；direct = 只用官方源 */
+export type ProvisionSourceStrategy = 'auto' | 'mirror' | 'direct'
+
+/**
+ * 安装 / 训练下载配置（P10），字段对应服务端 `sources.ts` 的 `ProvisionDownloadConfig`
+ * 与 settings.provision。服务端以 settings 为准；本类型用于请求体透传与状态展示
+ * （全部可选，旧服务端没有也能渲染）。
+ */
+export interface ProvisionDownloadConfig {
+  /** 源策略；服务端字段名为 strategy（设置里叫 sourceStrategy） */
+  strategy?: ProvisionSourceStrategy
+  /** HuggingFace 镜像：空 = 内置 https://hf-mirror.com，'off' = 关闭 */
+  hfMirror?: string
+  /** GitHub 加速前缀：空 = 内置 https://ghfast.top/，'off' = 关闭 */
+  githubMirror?: string
+  /** 运行时 / CUDA 镜像基础 URL：空 = 官方 + 服务器离线包 */
+  runtimeMirror?: string
+  /** 分片并发数：0/1 = 单连接，默认 4 */
+  concurrency?: number
+  /** 服务器助攻：优先用本机/服务器离线包与镜像 */
+  serverAssist?: boolean
+  /** 服务器镜像地址：空 = 只用本机离线包 */
+  serverAssistUrl?: string
+  /** 服务器镜像令牌（服务端开启 token 校验时使用） */
+  serverAssistToken?: string
+  /** 自动使用本机离线包 */
+  useLocalPackage?: boolean
+  /** 离线包目录：空 = 数据目录下 engine-package */
+  packageDir?: string
+  /** 源探测超时（毫秒，服务端可选字段） */
+  probeTimeoutMs?: number
+}
+
+/** GET /api/provision/status 的 download 段：配置 + 本机离线包概况（旧服务端不返回该字段） */
+export interface ProvisionDownloadInfo extends ProvisionDownloadConfig {
+  /** 是否发现可用离线包（engine-package.json + 清单内文件） */
+  packagePresent?: boolean
+  /** 离线包内文件数 */
+  packageFiles?: number
+  /** 离线包总字节数 */
+  packageBytes?: number
+  /** 服务端解析后的离线包目录（settings.packageDir 为空时是 <dataDir>/engine-package） */
+  packagePath?: string
+  /** 离线包构建平台（如 win32-x64，可选） */
+  packagePlatform?: string
+}
+
 export interface ProvisionStatus {
   platform: string
   supported: boolean
   error?: string
   root?: string
   dataDir?: string
+/** P10：下载加速配置与本机离线包概况（旧服务端不返回，UI 按可选处理） */
+  download?: ProvisionDownloadInfo
   runtime: { installed: boolean; sizeBytes: number; version?: string }
   models: ProvisionModelStatus[]
   adapters: ProvisionAdapterStatus[]
@@ -744,11 +835,17 @@ export function getProvisionStatus(): Promise<ProvisionStatus> {
 /** POST /api/provision/install：开始自动下载（服务端执行） */
 export function startProvisionInstall(
   profiles: ProvisionProfileId[],
-  options: { adapters?: boolean } = {},
+  options: { adapters?: boolean; download?: ProvisionDownloadConfig } = {},
 ): Promise<{ jobId: string; job: ProvisionJob }> {
+  const body: Record<string, unknown> = {
+    profiles,
+    adapters: options.adapters !== false,
+  }
+  /* P10：下载配置以服务端 settings 为准，这里透传一份（旧服务端忽略未知字段） */
+  if (options.download) body.download = options.download
   return request<{ jobId: string; job: ProvisionJob }>('/api/provision/install', {
     method: 'POST',
-    body: JSON.stringify({ profiles, adapters: options.adapters !== false }),
+    body: JSON.stringify(body),
   })
 }
 
@@ -758,6 +855,132 @@ export function getProvisionJob(jobId: string): Promise<{ job: ProvisionJob }> {
 
 export function cancelProvisionJob(jobId: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/provision/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+}
+
+/* ---------------- P10：下载源探测 / 服务器离线包 ---------------- */
+
+/** 单条下载源探测结果（对应服务端 sources.ts 的 SourceProbeEntry；字段全部按可选处理） */
+export interface ProvisionSourceProbe {
+  label: string
+  url?: string
+  ok?: boolean
+  latencyMs?: number
+  /** 失败原因（服务端 field: error） */
+  error?: string
+  /** 失败原因 / 补充说明（兼容部分服务端字段） */
+  detail?: string
+  /** 源类型：official / mirror / server … */
+  kind?: string
+}
+
+export interface ProvisionSourcesResult {
+  sources: ProvisionSourceProbe[]
+  /** 当前生效的源策略（服务端可能放在 config.strategy 里，已归一化到这里） */
+  strategy?: ProvisionSourceStrategy | string
+  /** 探测时间（毫秒时间戳，可选） */
+  probedAt?: number
+  /** 探测整体失败的说明（服务端可能 200 + error 返回，不阻塞页面） */
+  error?: string
+}
+
+/** 服务端 /api/provision/sources 的原始返回（route 用 results，部分实现可能用 sources，都兼容） */
+interface RawProvisionSources {
+  sources?: ProvisionSourceProbe[]
+  results?: ProvisionSourceProbe[]
+  strategy?: ProvisionSourceStrategy | string
+  config?: { strategy?: ProvisionSourceStrategy | string }
+  probedAt?: number
+  error?: string
+}
+
+/**
+ * GET /api/provision/sources?probe=1：当前下载源配置与（可选）各源探测延迟。
+ * 服务端可能直接返回数组、`{ results: [...] }` 或 `{ sources: [...] }`，这里统一成对象。
+ */
+export async function getProvisionSources(
+  options: { probe?: boolean } = {},
+): Promise<ProvisionSourcesResult> {
+  const raw = await request<RawProvisionSources | ProvisionSourceProbe[]>(
+    `/api/provision/sources${options.probe ? '?probe=1' : ''}`,
+  )
+  if (Array.isArray(raw)) return { sources: raw }
+  const sources = Array.isArray(raw?.sources)
+    ? raw.sources
+    : Array.isArray(raw?.results)
+      ? raw.results
+      : []
+  return {
+    sources,
+    strategy: raw?.strategy ?? raw?.config?.strategy,
+    probedAt: raw?.probedAt,
+    error: raw?.error,
+  }
+}
+
+/** 离线包内单个文件（对应 engine-package.json 的 files） */
+export interface ProvisionPackageFile {
+  key: string
+  kind?: string
+  file?: string
+  size: number
+  sha256?: string
+}
+
+export interface ProvisionPackageManifest {
+  schema?: number
+  createdAt?: string
+  platform?: string
+  label?: string
+  files: ProvisionPackageFile[]
+}
+
+export type ProvisionPackageJobStatus = 'running' | 'done' | 'failed' | 'canceled'
+
+/** 离线包构建任务（服务端内存态，由 UI 轮询） */
+export interface ProvisionPackageJob {
+  id: string
+  status: ProvisionPackageJobStatus
+  progress: number
+  message?: string
+  error?: string
+  result?: {
+    dir?: string
+    files?: number
+    bytes?: number
+    copied?: number
+    linked?: number
+    warnings?: string[]
+  }
+  createdAt?: number
+  startedAt?: number
+  updatedAt?: number
+}
+
+export interface BuildProvisionPackageOptions {
+  profiles?: ProvisionProfileId[]
+  includeTraining?: boolean
+  outDir?: string
+}
+
+/** POST /api/provision/package/build：把已装好的运行时/模型打成服务器离线包 */
+export function buildProvisionPackage(
+  options: BuildProvisionPackageOptions = {},
+): Promise<{ jobId: string; job: ProvisionPackageJob }> {
+  const payload: BuildProvisionPackageOptions = {
+    profiles: options.profiles ?? ['essential'],
+    includeTraining: options.includeTraining === true,
+  }
+  if (options.outDir) payload.outDir = options.outDir
+  return request<{ jobId: string; job: ProvisionPackageJob }>('/api/provision/package/build', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function getProvisionPackageJob(jobId: string): Promise<{ job: ProvisionPackageJob }> {
+  return request<{ job: ProvisionPackageJob }>(
+    `/api/provision/package/jobs/${encodeURIComponent(jobId)}`,
+  )
 }
 
 /* ---------------- P8-C：按需训练 ---------------- */
@@ -846,6 +1069,8 @@ export interface GenerateAudioParams {
   adapterId?: string
   /** P7-A 质量模式：LM → sft 50 步（更慢；与 LoRA 适配器互斥） */
   quality?: boolean
+  /** P9 引擎量级：'2b'（缺省）或 'xl'（需已装 XL 档 + 支持 XL 的节点） */
+  engine?: CompanionEngine
 }
 
 /** 提交生成任务；无在线 Companion 时服务端返回 503（error 里带启动命令） */
@@ -872,6 +1097,8 @@ export interface RepaintAudioParams {
   style?: string
   /** 来自 GET /api/adapters 的 nativeReady 列表 */
   adapterId?: string
+  /** P9 引擎量级：'xl' 时走 xl_sft（缺省 2b） */
+  engine?: CompanionEngine
 }
 
 /** 局部重绘任务；产物是整段音频（区间外由模型重建保持连续） */
@@ -897,6 +1124,8 @@ export interface CoverAudioParams {
   /** 0–1：越大越贴近原结构（默认 0.7）；越小越自由 */
   audioCoverStrength?: number
   seed?: number
+  /** P9 引擎量级：'xl' 时走 xl_turbo（缺省 2b） */
+  engine?: CompanionEngine
 }
 
 /** AI 重编（cover）任务；产物是整段新音频 */
@@ -936,6 +1165,8 @@ export interface GenerateStemParams {
   /** 可选：该 arm 的额外描述（留空用 Companion 内置映射） */
   caption?: string
   seed?: number
+  /** P9 引擎量级：'xl' 时走 xl_base（缺省 2b） */
+  engine?: CompanionEngine
 }
 
 /** 提交分轨任务（服务端会派给带 base 能力的 Companion，冷启动可能较慢） */

@@ -3,6 +3,7 @@ import {
   AudioLines,
   Bot,
   Check,
+  Download,
   Globe,
   LoaderCircle,
   Palette,
@@ -21,11 +22,12 @@ import { AiProvidersSection } from './AiProvidersSection'
 import { SearchSection } from './SearchSection'
 import { AgentSection, type AgentProbeInfo } from './AgentSection'
 import { AudioSection } from './AudioSection'
+import { EngineDownloadSection } from './EngineDownloadSection'
 import { UiSection } from './UiSection'
 import { mergeSecrets } from './secretMerge'
 import { StatusLine, describeRequestError } from './shared'
 
-type TabId = 'ai' | 'search' | 'agent' | 'audio' | 'ui'
+type TabId = 'ai' | 'search' | 'agent' | 'audio' | 'engine' | 'ui'
 
 const TABS: {
   id: TabId
@@ -64,6 +66,13 @@ const TABS: {
     icon: AudioLines,
   },
   {
+    id: 'engine',
+    label: '引擎下载',
+    description: '镜像 / 多源 / 离线包',
+    summary: '决定 AI 引擎与模型的下载线路：国内镜像、多源分片并发、服务器离线包。国内网络建议保持「自动」。',
+    icon: Download,
+  },
+  {
     id: 'ui',
     label: '界面',
     description: '主题与视图',
@@ -72,7 +81,7 @@ const TABS: {
   },
 ]
 
-/** 设置：AI 服务商 / 联网搜索 / Agent 后端 / 音频 / 界面。 */
+/** 设置：AI 服务商 / 联网搜索 / Agent 后端 / 音频 / 引擎下载 / 界面。 */
 export function SettingsModal() {
   const open = useStore((s) => s.settingsOpen)
   const setOpen = useStore((s) => s.setSettingsOpen)
@@ -173,7 +182,14 @@ export function SettingsModal() {
 
   /** 每个分区是否各自有未保存修改（左侧导航显示小圆点） */
   const tabDirty = useMemo<Record<TabId, boolean>>(() => {
-    const clean: Record<TabId, boolean> = { ai: false, search: false, agent: false, audio: false, ui: false }
+    const clean: Record<TabId, boolean> = {
+      ai: false,
+      search: false,
+      agent: false,
+      audio: false,
+      engine: false,
+      ui: false,
+    }
     if (!draft || !loaded) return clean
     const merged = mergeSecrets(draft, loaded, clearedKeys)
     const slice = (value: AppSettings): Record<TabId, unknown> => ({
@@ -181,6 +197,7 @@ export function SettingsModal() {
       search: value.search,
       agent: value.agent,
       audio: value.audio,
+      engine: value.provision,
       ui: value.ui,
     })
     const next = slice(merged)
@@ -305,7 +322,7 @@ export function SettingsModal() {
       open={open}
       onClose={handleClose}
       title="设置"
-      subtitle="AI 服务商、联网搜索、Agent 后端、音频与界面偏好。所有配置都只保存在本机。"
+      subtitle="AI 服务商、联网搜索、Agent 后端、音频、引擎下载与界面偏好。所有配置都只保存在本机。"
       width="xl"
       footer={
         <div className="flex w-full items-center gap-2">
@@ -496,6 +513,15 @@ export function SettingsModal() {
             />
           ) : tab === 'audio' ? (
             <AudioSection
+              draft={draft}
+              loaded={loaded}
+              update={update}
+              clearedKeys={clearedKeys}
+              onClearKey={() => undefined}
+              onRestoreKey={() => undefined}
+            />
+          ) : tab === 'engine' ? (
+            <EngineDownloadSection
               draft={draft}
               loaded={loaded}
               update={update}

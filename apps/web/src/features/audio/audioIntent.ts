@@ -27,6 +27,7 @@ import {
   STEM_ARM_LABEL,
   STEM_ARMS,
   uploadAudioAsset,
+  type CompanionEngine,
   type CompanionPriority,
   type CompanionTaskStatus,
   type ProvisionProfileId,
@@ -52,6 +53,11 @@ export interface AudioPlan {
   startBeat?: number
   trackName?: string
   quality?: boolean
+  /**
+   * P9：引擎量级（可选）。AI 工具可以指定 xl，但这里**不把 xl 当作生成前置条件**：
+   * 缺省仍走 2b，装没装 XL 只需要在任务失败时由服务端报错说明。
+   */
+  engine?: CompanionEngine
   priority?: CompanionPriority
   /** AI 给出的一句话理由（展示在任务卡里） */
   reason?: string
@@ -168,6 +174,7 @@ export function parseAudioPlan(data: unknown): AudioPlan | null {
     startBeat: toNumber(value.startBeat),
     trackName: typeof value.trackName === 'string' ? value.trackName.slice(0, 60) : undefined,
     quality: value.quality === true,
+    engine: value.engine === 'xl' ? 'xl' : value.engine === '2b' ? '2b' : undefined,
     priority: toPriority(value.priority),
     reason: typeof value.reason === 'string' ? value.reason.slice(0, 200) : undefined,
   }
@@ -424,6 +431,8 @@ async function runCompanionFlow(jobId: string, plan: AudioPlan, stems: StemArm[]
         durationSec,
         style: plan.style,
         quality: plan.quality || undefined,
+        /* P9：AI 可指定引擎量级；缺省不传 = 服务端按 2b */
+        engine: plan.engine,
       },
       projectId,
       priority,
@@ -446,7 +455,7 @@ async function runCompanionFlow(jobId: string, plan: AudioPlan, stems: StemArm[]
       const key = `stem:${arm}`
       useAudioJobStore.getState().updateStep(key, { status: 'running', progress: 0 })
       const stemTask = await createCompanionStemTask(
-        { sourceAssetId: songAssetId, arm, caption: `${caption} · ${arm} stem` },
+        { sourceAssetId: songAssetId, arm, caption: `${caption} · ${arm} stem`, engine: plan.engine },
         projectId,
         priority,
       )

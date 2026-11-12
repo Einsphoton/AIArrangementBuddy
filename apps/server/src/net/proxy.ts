@@ -192,9 +192,16 @@ function onAbort(signal: AbortSignal | undefined, handler: () => void): () => vo
 /**
  * 把 undici / Node 网络栈的异常归一成可判别的失败信息；返回 null 表示不像网络错误
  * （例如 sha256 不符、HTTP 4xx、AbortError）。
+ * 会沿 `cause` 链向上找（下载器/多源回退会把真实网络错误包在带标签的 Error 里）。
  */
 export function networkFailureOf(error: unknown): NetworkFailure | null {
-  if (!error || typeof error !== 'object') return null
+  return networkFailureOfDepth(error, 0)
+}
+
+const MAX_CAUSE_DEPTH = 6
+
+function networkFailureOfDepth(error: unknown, depth: number): NetworkFailure | null {
+  if (!error || typeof error !== 'object' || depth > MAX_CAUSE_DEPTH) return null
   if (error instanceof ProxyFetchError) {
     return { code: error.code, host: error.host, proxy: error.proxy }
   }
@@ -202,7 +209,12 @@ export function networkFailureOf(error: unknown): NetworkFailure | null {
   if (name === 'AbortError') return null
   const directCode = errorCodeOf(error)
   if (directCode === 'ABORT_ERR') return null
+  if (directCode && isNetworkErrorCode(directCode)) {
+    return { code: directCode, host: hostOf(error) }
+  }
   const cause = (error as { cause?: unknown }).cause
+  const nested = cause && cause !== error ? networkFailureOfDepth(cause, depth + 1) : null
+  if (nested) return nested
   const causeCode = errorCodeOf(cause)
   const code = directCode ?? causeCode
   if (code && isNetworkErrorCode(code)) {

@@ -1,42 +1,69 @@
 /**
- * 本机引擎安装器（P8）：运行时 + 模型 + 任务进度。
+ * 本机引擎安装器（P8 / P9 / P10）：运行时 + 模型 + 任务进度。
  *
  * 目录布局（放在数据目录下，随产品数据一起迁移）：
- *   <dataDir>/audio-engine/
- *     ace-server(.exe) / dylibs / tools   ← 运行时（官方 release 解压）
+ *   <dataDir>/audio-engine/            ← 旧版名为 ace-step，首次读取时自动改名迁移
+ *     ace-server(.exe) / dylibs / tools   ← 运行时（Windows = modern 逐文件下载；Mac/Linux = legacy 归档解压）
  *     models/*.gguf                        ← 模型（HF 下载，sha256 校验）
- *     .downloads/                          ← 断点续传缓存
- *     runtime.json                         ← 已安装运行时版本记录
+ *     .downloads/                          ← 断点续传缓存（含 CUDA redist zip）
+ *     runtime.json                         ← 已安装运行时记录（含 api: legacy / modern）
  *
- * 界面展示名统一走 @aiab/core 的 branding（见 modelDisplayName / AI_ENGINE_RUNTIME_NAME），
+ * P9：Windows x64 改用上游 modern 运行时（逐文件 sha256 + CUDA 13 redist DLL），
+ * 支持 XL 4B 模型；已装 legacy 的 Windows 用户再次安装时会自动升级（同名文件覆盖）。
+ * P10：下载源/离线包/服务器助攻接线（见 sources.ts / enginePackage.ts）。
+ *
+ * 界面展示名统一走 @aiab/core 的 branding（modelDisplayName / AI_ENGINE_RUNTIME_NAME），
  * 磁盘文件名与下载地址保持真实值，避免破坏已有安装与校验。
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { modelDisplayName } from '@aiab/core'
 import { readZipEntries } from '../sync/zip-read.js'
-import { downloadFile } from './downloader.js'
+import { downloadFile, type DownloadProgress } from './downloader.js'
+import { copyLocalArtifact, findLocalArtifact } from './enginePackage.js'
 import {
   ADAPTER_ASSETS,
+  CUDA_REDIST_ASSETS,
   DOWNLOAD_CACHE_DIR,
   ENGINE_RUNTIME_VERSION,
   LEGACY_PROVISION_DIR_NAME,
   MODEL_FILES,
+  MODERN_RUNTIME_FILES,
+  NVCUDART_HYBRID_DLL,
   PROVISION_DIR_NAME,
   RUNTIME_ASSETS,
   RUNTIME_BINARIES,
   RUNTIME_EXECUTABLES,
+  RUNTIME_VERSION,
   adapterUrl,
   adaptersTotalBytes,
   modelUrl,
   modelsForProfiles,
+  modernRuntimeUrl,
   resolvePlatform,
+  runtimeApiForPlatform,
+  runtimePlanBytes,
+  runtimePlanVersion,
   runtimeUrl,
+  type CudaRedistAsset,
   type ModelFile,
   type ProvisionPlatform,
   type ProvisionProfile,
+  type RuntimeApi,
+  type RuntimeFile,
 } from './manifest.js'
+import {
+  artifactKey,
+  fetchServerMirrorIndex,
+  normalizeDownloadConfig,
+  rankSources,
+  sourcesForArtifact,
+  type DownloadSource,
+  type ProvisionArtifactKind,
+  type ProvisionDownloadConfig,
+  type ServerMirrorIndex,
+} from './sources.js'
 import { extractTarGzToDir, safeArchivePath } from './untar.js'
 
 /**
@@ -84,6 +111,138 @@ export function provisionPaths(dataDir: string): ProvisionPaths {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 下载源 / 本地离线包接线（P10）                                       */
+/* ------------------------------------------------------------------ */
+
+/** 一次安装流程的下载上下文：解析后的配置 +（可选）服务器镜像清单 */
+export interface DownloadContext {
+  dataDir: string
+  config: ProvisionDownloadConfig
+  serverIndex: ServerMirrorIndex | null
+  fetchImpl?: typeof fetch
+  signal?: AbortSignal
+  log?: (message: string) => void
+}
+
+/** 进度消息里的实时速度（UI 显示 MB/s；拿不到速度时为空串） */
+export function speedText(speedBps: number | undefined): string {
+  return speedBps && Number.isFinite(speedBps) ? ` · ${(speedBps / (1024 * 1024)).toFixed(1)}MB/s` : ''
+}
+
+/**
+ * 创建下载上下文：
+ * - 不传 download（旧调用/离线测试）→ DIRECT 配置：纯官方 URL + 单连接，行为与 P9 一致；
+ * - 传了 download（路由从 settings 解析）→ 镜像/多源/并发/离线包/服务器助攻全部启用。
+ */
+export async function createDownloadContext(options: {
+  dataDir: string
+  download?: Partial<ProvisionDownloadConfig>
+  fetchImpl?: typeof fetch
+  signal?: AbortSignal
+  log?: (message: string) => void
+}): Promise<DownloadContext> {
+  const config = normalizeDownloadConfig(options.download)
+  let serverIndex: ServerMirrorIndex | null = null
+  if (config.serverAssist && config.serverAssistUrl) {
+    try {
+      serverIndex = await fetchServerMirrorIndex(config, {
+        fetchImpl: options.fetchImpl,
+        signal: options.signal,
+        log: options.log,
+      })
+    } catch {
+      serverIndex = null
+    }
+  }
+  return {
+    dataDir: options.dataDir,
+    config,
+    serverIndex,
+    fetchImpl: options.fetchImpl,
+    signal: options.signal,
+    log: options.log,
+  }
+}
+
+export interface ArtifactSpec {
+  kind: ProvisionArtifactKind
+  /** manifest.ts / trainingManifest.ts 里钉死的官方 URL */
+  url: string
+  /** 文件名 / dataset id / checkpoint dest（与 sources.artifactKey 一致） */
+  name: string
+  sha256?: string
+  size?: number
+}
+
+/** 生成候选下载源并排序（auto 策略会做一次 Range 0-0 延迟探测）。 */
+export async function artifactSources(context: DownloadContext, spec: ArtifactSpec): Promise<DownloadSource[]> {
+  const unranked = sourcesForArtifact({
+    kind: spec.kind,
+    officialUrl: spec.url,
+    name: spec.name,
+    config: context.config,
+    serverIndex: context.serverIndex,
+  })
+  return rankSources(unranked, {
+    config: context.config,
+    fetchImpl: context.fetchImpl,
+    signal: context.signal,
+    log: context.log,
+  })
+}
+
+/**
+ * 取单个工件到 dest：本机离线包（useLocalPackage）优先 → 服务器镜像 → 国内镜像 → 官方源。
+ * 本地拷贝失败自动回退网络；网络下载失败抛中文错误（分片/续传状态保留）。
+ */
+export async function fetchArtifact(
+  context: DownloadContext,
+  spec: ArtifactSpec,
+  dest: string,
+  hooks: { onProgress?: (progress: DownloadProgress) => void; force?: boolean; attempts?: number; log?: (message: string) => void } = {},
+): Promise<'downloaded' | 'cached' | 'local'> {
+  const log = context.log
+  // force：先删目标文件，离线包/网络都重新落盘
+  if (hooks.force) rmSync(dest, { force: true })
+  // 1) 本机离线包优先（B 的 enginePackage：硬链接/复制 + size/sha256 校验）
+  if (context.config.useLocalPackage) {
+    const key = artifactKey(spec.kind, spec.name)
+    const local = findLocalArtifact(context.dataDir, key, context.config.packageDir || undefined)
+    if (local && path.resolve(local.path) !== path.resolve(dest)) {
+      log?.(`使用本地离线包：${key}（${(local.size / 1e6).toFixed(1)}MB）`)
+      const copied = await copyLocalArtifact(local, dest, { sha256: spec.sha256, signal: context.signal, log })
+      if (copied) {
+        hooks.onProgress?.({
+          received: spec.size ?? local.size,
+          total: spec.size ?? local.size,
+          speedBps: 0,
+          source: '本地离线包',
+          segments: 1,
+        })
+        return 'local'
+      }
+      log?.(`本地离线包校验失败（${key}），改用网络下载`)
+    }
+  }
+  // 2) 网络多源下载（sources.ts 已按策略/测速排好序）
+  const sources = await artifactSources(context, spec)
+  if (sources.length > 1) log?.(`下载 ${spec.name}：候选源 ${sources.map((source) => source.label).join(' → ')}`)
+  const result = await downloadFile({
+    sources,
+    dest,
+    sha256: spec.sha256,
+    size: spec.size,
+    concurrency: context.config.concurrency,
+    attempts: hooks.attempts,
+    signal: context.signal,
+    fetchImpl: context.fetchImpl,
+    log: hooks.log ?? log,
+    onProgress: hooks.onProgress,
+  })
+  return result.status
+}
+
 function binaryCandidates(root: string, platform: ProvisionPlatform): string[] {
   const names =
     platform === 'win32-x64'
@@ -102,9 +261,13 @@ export function findRuntimeBinary(root: string, platform: ProvisionPlatform): st
 }
 
 export interface RuntimeStatus {
+  /** 当前安装计划的运行时是否已完整就绪（Windows 需 modern + 24 个文件 + CUDA DLL 齐全） */
   installed: boolean
   path: string | null
   sizeBytes: number
+  /** 已装/计划使用的运行时 API；legacy 表示旧版 v0.1.0 归档（Windows 上会触发自动升级） */
+  api: RuntimeApi
+  /** 安装计划版本：modern = acestep.cpp-20261106；legacy = 官方归档名 */
   version?: string
 }
 
@@ -120,7 +283,7 @@ export interface AdapterStatus {
 
 export interface ModelStatus {
   name: string
-  /** 界面展示名（不暴露真实权重名） */
+  /** 界面展示名（不暴露真实权重文件名） */
   displayName: string
   installed: boolean
   sizeBytes: number
@@ -146,6 +309,88 @@ function fileSizeSafe(target: string): number {
   } catch {
     return 0
   }
+}
+
+/** runtime.json 的结构（旧版本没有 api 字段 → 视为 legacy） */
+interface RuntimeRecord {
+  api?: string
+  version?: string
+  platform?: string
+  archive?: string
+  sha256?: string
+  files?: number
+  installedAt?: string
+}
+
+function readRuntimeRecord(root: string): RuntimeRecord | null {
+  try {
+    return JSON.parse(readFileSync(path.join(root, 'runtime.json'), 'utf8')) as RuntimeRecord
+  } catch {
+    return null
+  }
+}
+
+/** 统计 modern 运行时缺哪些文件 / CUDA DLL（按精确 size 判断；sha256 在安装下载时校验） */
+function modernRuntimeGaps(
+  root: string,
+  runtimeFiles: RuntimeFile[] = MODERN_RUNTIME_FILES,
+  cudaAssets: CudaRedistAsset[] = CUDA_REDIST_ASSETS,
+): { missingFiles: RuntimeFile[]; missingCuda: CudaRedistAsset[] } {
+  return {
+    missingFiles: runtimeFiles.filter((file) => fileSizeSafe(path.join(root, file.name)) !== file.size),
+    missingCuda: cudaAssets.filter((asset) => asset.dllNames.some((name) => !existsSync(path.join(root, name)))),
+  }
+}
+
+/**
+ * 扫描 DriverStore 找 NVIDIA 驱动自带的 nvcudart_hybrid64.dll（不随 CUDA redist 分发）。
+ * 取“最近更新”的那份驱动目录；找不到返回 null（安装仅告警，不阻断）。
+ */
+function findDriverStoreHybridDll(): string | null {
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows'
+  const repository = path.join(systemRoot, 'System32', 'DriverStore', 'FileRepository')
+  let names: string[]
+  try {
+    names = readdirSync(repository)
+  } catch {
+    return null
+  }
+  const candidates: { file: string; mtime: number }[] = []
+  for (const name of names) {
+    if (!/^nv.*\.inf_amd64_/i.test(name)) continue
+    const candidate = path.join(repository, name, NVCUDART_HYBRID_DLL)
+    if (!existsSync(candidate)) continue
+    let mtime = 0
+    try {
+      mtime = statSync(candidate).mtimeMs
+    } catch {
+      /* ignore */
+    }
+    candidates.push({ file: candidate, mtime })
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime)
+  return candidates[0]?.file ?? null
+}
+
+/** 从 CUDA redist zip 里按 DLL 文件名（前缀匹配 basename）提取并写到运行时根目录 */
+function extractCudaDlls(archivePath: string, asset: CudaRedistAsset, root: string, log: (message: string) => void): number {
+  const entries = readZipEntries(readFileSync(archivePath))
+  let written = 0
+  for (const dllName of asset.dllNames) {
+    let payload: Buffer | null = null
+    for (const [entryName, data] of entries) {
+      const baseName = entryName.replace(/\\/g, '/').split('/').pop() ?? ''
+      if (baseName.startsWith(dllName)) {
+        payload = data
+        break
+      }
+    }
+    if (!payload) throw new Error(`CUDA 组件 ${asset.archive} 里找不到 ${dllName}（上游包结构可能已变化）`)
+    writeFileSync(path.join(root, dllName), payload)
+    written += 1
+  }
+  log(`已从 ${asset.archive} 提取 ${asset.dllNames.join(' / ')}`)
+  return written
 }
 
 export interface AdapterPaths {
@@ -185,14 +430,33 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
   const paths = provisionPaths(options.dataDir)
   const binary = findRuntimeBinary(paths.root, platform)
   const runtimeSize = binary ? fileSizeSafe(binary) : 0
-  let version: string | undefined
-  try {
-    const raw = (JSON.parse(readFileSync(path.join(paths.root, 'runtime.json'), 'utf8')) as { version?: string }).version
-    // 旧版 installer 把内部打包名写进 version：非版本号一律用对外版本号代替
-    version = raw ? (/^\d+(\.\d+){1,3}$/.test(raw) ? raw : ENGINE_RUNTIME_VERSION) : undefined
-  } catch {
-    version = undefined
-  }
+  const record = readRuntimeRecord(paths.root)
+  const planApi = runtimeApiForPlatform(platform)
+  /** 已装记录的 api（旧 runtime.json 没有 api 字段 → legacy） */
+  const installedApi: RuntimeApi = record?.api === 'modern' ? 'modern' : 'legacy'
+  const api: RuntimeApi = binary ? installedApi : planApi
+  /**
+   * 对外展示版本（P10 / branding）：内部打包名（acestep.cpp-20261106、归档名）不暴露给用户。
+   * 已是语义化版本号（旧版 installer 写过的数字版本）就直接展示，否则统一展示 ENGINE_RUNTIME_VERSION。
+   */
+  const rawVersion = record?.version
+  const displayVersion = rawVersion && /^\d+(\.\d+){1,3}$/.test(rawVersion) ? rawVersion : ENGINE_RUNTIME_VERSION
+  const version = platform === 'win32-x64' ? ENGINE_RUNTIME_VERSION : rawVersion ? displayVersion : undefined
+  const gaps = platform === 'win32-x64' ? modernRuntimeGaps(paths.root) : { missingFiles: [], missingCuda: [] }
+  const runtimeInstalled =
+    platform === 'win32-x64'
+      ? Boolean(binary) &&
+        installedApi === 'modern' &&
+        record?.version === RUNTIME_VERSION &&
+        gaps.missingFiles.length === 0 &&
+        gaps.missingCuda.length === 0
+      : Boolean(binary)
+  const runtimeMissingBytes =
+    platform === 'win32-x64'
+      ? gaps.missingFiles.reduce((sum, file) => sum + file.size, 0) + gaps.missingCuda.reduce((sum, asset) => sum + asset.size, 0)
+      : binary
+        ? 0
+        : RUNTIME_ASSETS[platform].size
   const models: ModelStatus[] = MODEL_FILES.map((file) => {
     const target = path.join(paths.models, file.name)
     const sizeBytes = fileSizeSafe(target)
@@ -216,14 +480,28 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
     essential,
     quality: satisfied('quality'),
     stems: satisfied('stems'),
+    xl: satisfied('xl'),
   }
   const notes: string[] = []
-  if (!binary) notes.push('运行时未安装：需要下载 AI 音频生成引擎运行时（约 3–135MB，视平台）')
+  if (!binary) {
+    notes.push(
+      platform === 'win32-x64'
+        ? '运行时未安装：需要下载现代运行时（24 个文件 + NVIDIA CUDA 13 组件，约 600MB）'
+        : '运行时未安装：需要下载 AI 音频生成引擎运行时（约 2–135MB，视平台）',
+    )
+  } else if (platform === 'win32-x64' && api !== 'modern') {
+    notes.push(`检测到旧版运行时：Windows 上将自动升级为现代运行时（${ENGINE_RUNTIME_VERSION}，支持增强版模型）`)
+  } else if (platform === 'win32-x64' && !runtimeInstalled) {
+    notes.push('现代运行时文件不完整：再次安装会自动补齐缺失文件')
+  } else if (platform === 'win32-x64') {
+    notes.push(`现代运行时已就绪（${ENGINE_RUNTIME_VERSION}）`)
+  }
   const missingModels = models.filter((model) => !model.installed)
   if (missingModels.length > 0) {
     notes.push(`模型缺 ${missingModels.length} 个，共约 ${(missingModels.reduce((sum, model) => sum + model.expectedBytes, 0) / 1e9).toFixed(1)}GB`)
   }
   if (binary && essential) notes.push('基础能力已就绪（快速生成模式可直接使用）')
+  if (profiles.xl) notes.push('增强版模型已就绪（需 ≥12GB 显存，仅现代运行时支持）')
   const missingAdapters = adapters.filter((adapter) => !adapter.installed)
   if (missingAdapters.length > 0) {
     notes.push(`风格适配器缺 ${missingAdapters.length} 个（共 ${(adaptersTotalBytes() / 1e6).toFixed(0)}MB，自生成数据、可安全分发）`)
@@ -234,12 +512,12 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
     platform,
     supported: true,
     root: paths.root,
-    runtime: { installed: Boolean(binary), path: binary, sizeBytes: runtimeSize, version },
+    runtime: { installed: runtimeInstalled, path: binary, sizeBytes: runtimeSize, api, version },
     models,
     adapters,
     profiles,
     missingBytes:
-      (binary ? 0 : RUNTIME_ASSETS[platform].size) +
+      runtimeMissingBytes +
       missingModels.reduce((sum, model) => sum + model.expectedBytes, 0) +
       missingAdapters.reduce((sum, adapter) => sum + adapter.expectedBytes, 0),
     notes,
@@ -254,15 +532,180 @@ export interface InstallRuntimeOptions {
   force?: boolean
   fetchImpl?: typeof fetch
   log?: (message: string) => void
+  /** 诊断/离线验证用：注入自定义 modern 下载计划（默认用清单里的完整 24 个文件） */
+  runtimeFiles?: RuntimeFile[]
+  /** 诊断/离线验证用：注入自定义 CUDA redist 计划（默认用清单里的 2 个 zip） */
+  cudaAssets?: CudaRedistAsset[]
+  /** 诊断/离线验证用：指定 nvcudart_hybrid64.dll 源文件（默认自动扫描 DriverStore） */
+  hybridDllPath?: string
+  /** 下载加速配置（P10）：不传 = 官方直连 + 单连接（与 P9 行为一致） */
+  download?: Partial<ProvisionDownloadConfig>
 }
 
+/**
+ * 安装运行时：Windows x64 走 modern 流程（逐文件 + CUDA redist）；
+ * Mac/Linux 走 legacy 归档流程。已装 legacy 的 Windows 用户会在这里自动升级。
+ */
 export async function installRuntime(options: InstallRuntimeOptions): Promise<{ binary: string; cached: boolean }> {
   const platform = options.platform ?? resolvePlatform()
-  const asset = RUNTIME_ASSETS[platform]
   const paths = provisionPaths(options.dataDir)
   mkdirSync(paths.root, { recursive: true })
   mkdirSync(paths.downloads, { recursive: true })
   mkdirSync(paths.models, { recursive: true })
+  if (platform === 'win32-x64') return installModernRuntime(options, platform, paths)
+  return installLegacyRuntime(options, platform, paths)
+}
+
+/** modern Windows 运行时：逐文件下载（sha256）→ 解出 CUDA DLL → 复制驱动 hybrid DLL → 写 runtime.json */
+async function installModernRuntime(
+  options: InstallRuntimeOptions,
+  platform: ProvisionPlatform,
+  paths: ProvisionPaths,
+): Promise<{ binary: string; cached: boolean }> {
+  const runtimeFiles = options.runtimeFiles ?? MODERN_RUNTIME_FILES
+  const cudaAssets = options.cudaAssets ?? CUDA_REDIST_ASSETS
+  const download = await createDownloadContext(options)
+  const record = readRuntimeRecord(paths.root)
+  const existing = findRuntimeBinary(paths.root, platform)
+  const gaps = modernRuntimeGaps(paths.root, runtimeFiles, cudaAssets)
+  // 已装 modern 且版本一致、文件齐全 → 缓存命中
+  const cacheHit =
+    !options.force &&
+    record?.api === 'modern' &&
+    record.version === RUNTIME_VERSION &&
+    Boolean(existing) &&
+    gaps.missingFiles.length === 0 &&
+    gaps.missingCuda.length === 0
+  if (cacheHit) {
+    options.onProgress?.(1, '运行时已安装，跳过下载')
+    return { binary: existing as string, cached: true }
+  }
+
+  // 旧版 legacy 安装 / 版本变化 / force → 全部重新下载（downloadFile 会按 sha256 命中缓存，代价可控）
+  const refreshAll =
+    options.force === true ||
+    (record !== null && record.api !== 'modern') ||
+    (record?.api === 'modern' && record.version !== RUNTIME_VERSION)
+  const filesToFetch = refreshAll ? runtimeFiles : gaps.missingFiles
+  const cudaToFetch = refreshAll ? cudaAssets : gaps.missingCuda
+  const downloadBytes =
+    filesToFetch.reduce((sum, file) => sum + file.size, 0) + cudaToFetch.reduce((sum, asset) => sum + asset.size, 0)
+  let doneBytes = 0
+  const reportProgress = (received: number, message: string): void => {
+    const ratio = downloadBytes > 0 ? doneBytes + received : 0
+    options.onProgress?.(downloadBytes > 0 ? (ratio / downloadBytes) * 0.85 : 0, message)
+  }
+
+  options.onProgress?.(
+    0,
+    `准备下载现代运行时（${filesToFetch.length} 个文件${cudaToFetch.length > 0 ? ` + ${cudaToFetch.length} 个 CUDA 组件` : ''}，共 ${(downloadBytes / 1e6).toFixed(0)}MB）`,
+  )
+  for (const file of filesToFetch) {
+    const target = path.join(paths.root, file.name)
+    options.log?.(`下载运行时文件：${file.name}（${(file.size / 1e6).toFixed(1)}MB）`)
+    await fetchArtifact(
+      download,
+      { kind: 'runtime', url: modernRuntimeUrl(file), name: file.name, sha256: file.sha256, size: file.size },
+      target,
+      {
+        force: options.force,
+        attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
+        onProgress: ({ received, speedBps }) => {
+          reportProgress(
+            received,
+            `下载 ${file.name}（${(received / 1e6).toFixed(1)}/${(file.size / 1e6).toFixed(1)}MB${speedText(speedBps)}）`,
+          )
+        },
+      },
+    )
+    doneBytes += file.size
+    options.onProgress?.(
+      downloadBytes > 0 ? (doneBytes / downloadBytes) * 0.85 : 0,
+      `${file.name} 就绪（${filesToFetch.length} 个文件中的第 ${filesToFetch.indexOf(file) + 1} 个）`,
+    )
+  }
+  for (const asset of cudaToFetch) {
+    const archivePath = path.join(paths.downloads, asset.archive)
+    options.log?.(`下载 CUDA 组件：${asset.archive}（${(asset.size / 1e6).toFixed(0)}MB）`)
+    await fetchArtifact(
+      download,
+      { kind: 'cuda', url: asset.url, name: asset.archive, sha256: asset.sha256, size: asset.size },
+      archivePath,
+      {
+        force: options.force,
+        attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
+        onProgress: ({ received, speedBps }) => {
+          reportProgress(
+            received,
+            `下载 CUDA 组件 ${asset.archive}（${(received / 1e6).toFixed(0)}/${(asset.size / 1e6).toFixed(0)}MB${speedText(speedBps)}）`,
+          )
+        },
+      },
+    )
+    doneBytes += asset.size
+    options.onProgress?.(downloadBytes > 0 ? (doneBytes / downloadBytes) * 0.85 : 0, `${asset.archive} 就绪`)
+  }
+
+  // CUDA zip 已下载（或命中缓存）后，按 DLL 缺失情况解压到运行时根目录
+  const cudaToExtract = cudaAssets.filter((asset) => asset.dllNames.some((name) => !existsSync(path.join(paths.root, name))))
+  let extracted = 0
+  for (let index = 0; index < cudaToExtract.length; index++) {
+    const asset = cudaToExtract[index]
+    options.onProgress?.(0.85 + 0.05 * (index / Math.max(1, cudaToExtract.length)), `解压 CUDA 组件：${asset.archive}…`)
+    extracted += extractCudaDlls(path.join(paths.downloads, asset.archive), asset, paths.root, options.log ?? (() => {}))
+  }
+
+  // 复制 NVIDIA 驱动自带的 hybrid CUDA runtime（redist 里没有；缺失仅告警）
+  options.onProgress?.(0.92, '检查 NVIDIA 驱动组件…')
+  let hybridCopied = false
+  const hybridSource = options.hybridDllPath ?? findDriverStoreHybridDll()
+  if (hybridSource) {
+    try {
+      copyFileSync(hybridSource, path.join(paths.root, NVCUDART_HYBRID_DLL))
+      hybridCopied = true
+      options.log?.(`已复制驱动组件 ${NVCUDART_HYBRID_DLL}`)
+    } catch (error) {
+      options.log?.(
+        `警告：复制 ${NVCUDART_HYBRID_DLL} 失败（${error instanceof Error ? error.message : String(error)}）；若模型加载报缺 DLL，请更新 NVIDIA 驱动`,
+      )
+    }
+  } else {
+    options.log?.(
+      `警告：DriverStore 里没找到 ${NVCUDART_HYBRID_DLL}（NVIDIA 驱动缺失或过旧）；若模型加载报缺 DLL，请更新显卡驱动`,
+    )
+  }
+
+  options.onProgress?.(0.96, '写入运行时清单…')
+  // files 统计：运行时文件 + 从 CUDA zip 取出的 DLL + 复制的驱动 DLL
+  const filesWritten = runtimeFiles.length + extracted + (hybridCopied ? 1 : 0)
+  writeFileSync(
+    path.join(paths.root, 'runtime.json'),
+    JSON.stringify(
+      {
+        api: 'modern',
+        version: RUNTIME_VERSION,
+        platform,
+        files: filesWritten,
+        installedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  )
+  const binary = findRuntimeBinary(paths.root, platform)
+  if (!binary) throw new Error('运行时文件已下载，但没找到 ace-server.exe；请检查数据目录权限或文件是否被安全软件拦截')
+  options.onProgress?.(1, `运行时已安装：${path.relative(paths.root, binary)}`)
+  return { binary, cached: false }
+}
+
+/** legacy 运行时（Mac/Linux）：沿用官方 v0.1.0 归档（zip / tar.gz）解压 */
+async function installLegacyRuntime(
+  options: InstallRuntimeOptions,
+  platform: ProvisionPlatform,
+  paths: ProvisionPaths,
+): Promise<{ binary: string; cached: boolean }> {
+  const asset = RUNTIME_ASSETS[platform]
   const existing = findRuntimeBinary(paths.root, platform)
   if (existing && !options.force) {
     options.onProgress?.(1, '运行时已安装，跳过下载')
@@ -270,21 +713,24 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<{ 
   }
 
   const archivePath = path.join(paths.downloads, asset.archive)
+  const download = await createDownloadContext(options)
   options.log?.(`下载 AI 音频生成引擎运行时：${asset.archive}（${(asset.size / 1e6).toFixed(0)}MB）`)
-  await downloadFile({
-    url: runtimeUrl(platform),
-    dest: archivePath,
-    sha256: asset.sha256,
-    size: asset.size,
-    signal: options.signal,
-    fetchImpl: options.fetchImpl,
-    log: options.log,
-    attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
-    onProgress: ({ received, total }) => {
-      const ratio = total > 0 ? received / total : 0
-      options.onProgress?.(ratio * 0.7, `下载运行时 ${(received / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)}MB`)
+  await fetchArtifact(
+    download,
+    { kind: 'runtime-archive', url: runtimeUrl(platform), name: asset.archive, sha256: asset.sha256, size: asset.size },
+    archivePath,
+    {
+      force: options.force,
+      attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
+      onProgress: ({ received, total, speedBps }) => {
+        const ratio = total > 0 ? received / total : 0
+        options.onProgress?.(
+          ratio * 0.7,
+          `下载运行时 ${(received / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)}MB${speedText(speedBps)}`,
+        )
+      },
     },
-  })
+  )
 
   options.onProgress?.(0.75, '解压运行时…')
   let written = 0
@@ -322,6 +768,7 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<{ 
     path.join(paths.root, 'runtime.json'),
     JSON.stringify(
       {
+        api: 'legacy',
         platform,
         version: ENGINE_RUNTIME_VERSION,
         archive: asset.archive,
@@ -349,6 +796,12 @@ export interface InstallModelsOptions {
   onProgress?: (progress: number, message: string) => void
   fetchImpl?: typeof fetch
   log?: (message: string) => void
+  /** 下载加速配置（P10）：不传 = 官方直连 + 单连接 */
+  download?: Partial<ProvisionDownloadConfig>
+  /** 诊断/离线验证用：注入自定义模型下载计划（默认按 profile 从清单取） */
+  models?: ModelFile[]
+  /** 诊断/离线验证用：覆盖模型下载基础 URL（默认 HuggingFace） */
+  modelBaseUrl?: string
 }
 
 export async function installModels(options: InstallModelsOptions): Promise<{ installed: number; cached: number; bytes: number }> {
@@ -357,31 +810,32 @@ export async function installModels(options: InstallModelsOptions): Promise<{ in
   const paths = provisionPaths(options.dataDir)
   mkdirSync(paths.models, { recursive: true })
   mkdirSync(paths.downloads, { recursive: true })
-  const files = modelsForProfiles(options.profiles)
+  const download = await createDownloadContext(options)
+  const files = options.models ?? modelsForProfiles(options.profiles)
+  const sourceOf = (file: ModelFile): string =>
+    options.modelBaseUrl ? `${options.modelBaseUrl.replace(/\/+$/, '')}/${file.path}` : modelUrl(file)
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
   let doneBytes = 0
   let installed = 0
   let cached = 0
   for (const file of files) {
     const target = path.join(paths.models, file.name)
-    const result = await downloadFile({
-      url: modelUrl(file),
-      dest: target,
-      sha256: file.sha256,
-      size: file.size,
-      signal: options.signal,
-      fetchImpl: options.fetchImpl,
-      log: options.log,
-      attempts: MODEL_DOWNLOAD_ATTEMPTS,
-      onProgress: ({ received }) => {
-        const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
-        options.onProgress?.(
-          ratio,
-          `下载 ${file.name}（${((doneBytes + received) / 1e9).toFixed(2)}/${(totalBytes / 1e9).toFixed(2)}GB）`,
-        )
+    const status = await fetchArtifact(
+      download,
+      { kind: 'model', url: sourceOf(file), name: file.name, sha256: file.sha256, size: file.size },
+      target,
+      {
+        attempts: MODEL_DOWNLOAD_ATTEMPTS,
+        onProgress: ({ received, speedBps }) => {
+          const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
+          options.onProgress?.(
+            ratio,
+            `下载 ${file.name}（${((doneBytes + received) / 1e9).toFixed(2)}/${(totalBytes / 1e9).toFixed(2)}GB${speedText(speedBps)}）`,
+          )
+        },
       },
-    })
-    if (result.status === 'downloaded') installed += 1
+    )
+    if (status !== 'cached') installed += 1
     else cached += 1
     doneBytes += file.size
     options.onProgress?.(totalBytes > 0 ? doneBytes / totalBytes : 1, `${file.name} 就绪`)
@@ -397,6 +851,8 @@ export interface InstallAdaptersOptions {
   onProgress?: (progress: number, message: string) => void
   fetchImpl?: typeof fetch
   log?: (message: string) => void
+  /** 下载加速配置（P10）：不传 = 官方直连 + 单连接 */
+  download?: Partial<ProvisionDownloadConfig>
 }
 
 /**
@@ -411,30 +867,32 @@ export async function installAdapters(options: InstallAdaptersOptions): Promise<
   const paths = adapterPaths(options.dataDir, options.adaptersDir)
   mkdirSync(paths.dir, { recursive: true })
   mkdirSync(paths.downloads, { recursive: true })
+  const download = await createDownloadContext(options)
   const totalBytes = assets.reduce((sum, asset) => sum + asset.size, 0)
   let doneBytes = 0
   let installed = 0
   let cached = 0
   for (const asset of assets) {
     const archivePath = path.join(paths.downloads, asset.file)
-    const result = await downloadFile({
-      url: adapterUrl(asset),
-      dest: archivePath,
-      sha256: asset.sha256,
-      size: asset.size,
-      signal: options.signal,
-      fetchImpl: options.fetchImpl,
-      log: options.log,
-      attempts: ADAPTER_DOWNLOAD_ATTEMPTS,
-      onProgress: ({ received }) => {
-        const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
-        options.onProgress?.(ratio, `下载适配器 ${asset.id}（${((doneBytes + received) / 1e6).toFixed(1)}/${(totalBytes / 1e6).toFixed(1)}MB）`)
+    const result = await fetchArtifact(
+      download,
+      { kind: 'adapter', url: adapterUrl(asset), name: asset.file, sha256: asset.sha256, size: asset.size },
+      archivePath,
+      {
+        attempts: ADAPTER_DOWNLOAD_ATTEMPTS,
+        onProgress: ({ received, speedBps }) => {
+          const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
+          options.onProgress?.(
+            ratio,
+            `下载适配器 ${asset.id}（${((doneBytes + received) / 1e6).toFixed(1)}/${(totalBytes / 1e6).toFixed(1)}MB${speedText(speedBps)}）`,
+          )
+        },
       },
-    })
+    )
     extractTarGzToDir(readFileSync(archivePath), paths.dir, { log: options.log })
     const status = adapterStatus({ dataDir: options.dataDir, adaptersDir: options.adaptersDir }).find((item) => item.id === asset.id)
     if (!status?.installed) throw new Error(`适配器解压后未找到文件：${asset.id}`)
-    if (result.status === 'downloaded') installed += 1
+    if (result !== 'cached') installed += 1
     else cached += 1
     doneBytes += asset.size
     options.onProgress?.(totalBytes > 0 ? doneBytes / totalBytes : 1, `适配器 ${asset.id} 就绪`)
@@ -516,6 +974,8 @@ export interface StartProvisionOptions {
   adapters?: boolean
   /** 指定适配器 id（默认清单全部） */
   adapterIds?: string[]
+  /** 下载加速配置（P10）：路由从 settings 解析后传入；不传 = 官方直连 + 单连接 */
+  download?: Partial<ProvisionDownloadConfig>
 }
 
 /** 启动安装任务（异步执行；返回立即返回 job）。 */
@@ -532,23 +992,17 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
   if (!status.runtime.installed || options.force) {
     steps.push({
       key: 'runtime',
-      label: 'AI 音频生成引擎运行时',
+      label: platform === 'win32-x64' ? 'AI 音频生成引擎运行时（含 CUDA 13 组件）' : 'AI 音频生成引擎运行时',
       status: 'pending',
       progress: 0,
-      totalBytes: RUNTIME_ASSETS[platform].size,
+      totalBytes: runtimePlanBytes(platform),
     })
   }
   for (const file of modelsForProfiles(options.profiles)) {
     const target = path.join(paths.models, file.name)
     const installed = existsSync(target) && fileSizeSafe(target) === file.size
     if (!installed || options.force) {
-      steps.push({
-        key: `model:${file.name}`,
-        label: modelDisplayName(file.name),
-        status: 'pending',
-        progress: 0,
-        totalBytes: file.size,
-      })
+      steps.push({ key: `model:${file.name}`, label: modelDisplayName(file.name), status: 'pending', progress: 0, totalBytes: file.size })
     }
   }
   const wantAdapters = options.adapters !== false
@@ -598,6 +1052,7 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
             platform,
             signal,
             force: options.force,
+            download: options.download,
             onProgress: (progress, message) => {
               const jobNow = jobs.get(id)
               if (!jobNow) return
@@ -616,6 +1071,7 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
             dataDir: options.dataDir,
             ids: adapterIds,
             signal,
+            download: options.download,
             onProgress: (progress, message) => {
               const jobNow = jobs.get(id)
               if (!jobNow) return
@@ -631,37 +1087,47 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
           const fileName = step.key.replace(/^model:/, '')
           const file = MODEL_FILES.find((item) => item.name === fileName)
           if (!file) throw new Error(`未知模型：${fileName}`)
-          await downloadFile({
-            url: modelUrl(file),
-            dest: path.join(paths.models, file.name),
-            sha256: file.sha256,
-            size: file.size,
+          const modelDownload = await createDownloadContext({
+            dataDir: options.dataDir,
+            download: options.download,
             signal,
-            attempts: MODEL_DOWNLOAD_ATTEMPTS,
-            // 把重试日志写进步骤消息：网络抖动时面板能看到「第 n/8 次尝试」，而不是只报最后一句失败
             log: (message) => {
               const jobNow = jobs.get(id)
               if (!jobNow) return
               updateJob(id, { steps: jobNow.steps.map((item) => (item.key === step.key ? { ...item, message } : item)) })
             },
-            onProgress: ({ received, total, attempt }) => {
-              const jobNow = jobs.get(id)
-              if (!jobNow) return
-              const attemptNote = attempt && attempt > 1 ? ` · 第 ${attempt}/${MODEL_DOWNLOAD_ATTEMPTS} 次尝试` : ''
-              updateJob(id, {
-                steps: jobNow.steps.map((item) =>
-                  item.key === step.key
-                    ? {
-                        ...item,
-                        progress: total > 0 ? received / total : 0,
-                        bytes: received,
-                        message: `${(received / 1e9).toFixed(2)}GB${attemptNote}`,
-                      }
-                    : item,
-                ),
-              })
-            },
           })
+          await fetchArtifact(
+            modelDownload,
+            { kind: 'model', url: modelUrl(file), name: file.name, sha256: file.sha256, size: file.size },
+            path.join(paths.models, file.name),
+            {
+              attempts: MODEL_DOWNLOAD_ATTEMPTS,
+              // 把重试日志写进步骤消息：网络抖动时面板能看到「第 n/8 次尝试」，而不是只报最后一句失败
+              log: (message) => {
+                const jobNow = jobs.get(id)
+                if (!jobNow) return
+                updateJob(id, { steps: jobNow.steps.map((item) => (item.key === step.key ? { ...item, message } : item)) })
+              },
+              onProgress: ({ received, total, speedBps, attempt }) => {
+                const jobNow = jobs.get(id)
+                if (!jobNow) return
+                const attemptNote = attempt && attempt > 1 ? ` · 第 ${attempt}/${MODEL_DOWNLOAD_ATTEMPTS} 次尝试` : ''
+                updateJob(id, {
+                  steps: jobNow.steps.map((item) =>
+                    item.key === step.key
+                      ? {
+                          ...item,
+                          progress: total > 0 ? received / total : 0,
+                          bytes: received,
+                          message: `${(received / 1e9).toFixed(2)}GB${speedText(speedBps)}${attemptNote}`,
+                        }
+                      : item,
+                  ),
+                })
+              },
+            },
+          )
         }
         const finished = jobs.get(id)
         if (!finished) return

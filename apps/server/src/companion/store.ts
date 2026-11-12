@@ -18,6 +18,27 @@ import { saveAsset, type StoredAsset } from '../storage/assets.js'
 
 export type CompanionTaskStatus = 'queued' | 'claimed' | 'running' | 'done' | 'failed' | 'canceled'
 
+/** 引擎量级（P9）：'2b' = 标准 2B DiT（缺省，快）；'xl' = XL 4B DiT（最高质量，需现代运行时 + xl 模型档） */
+export type EngineTier = '2b' | 'xl'
+
+/** DiT 变体（与 Companion 上报的 capabilities.models / 任务 requiredVariant 逐字一致；xl 用下划线） */
+export type DiTVariant = 'turbo' | 'sft' | 'base' | 'xl_turbo' | 'xl_sft' | 'xl_base'
+
+/** 变体顺序（与 Companion 上报顺序一致：2B 三档 → XL 三档） */
+export const VARIANT_ORDER: readonly DiTVariant[] = ['turbo', 'sft', 'base', 'xl_turbo', 'xl_sft', 'xl_base']
+
+/** 常驻引擎心跳信息（P2/P9）：变体 / 进程号 / 是否已预热 / LM 档位 / 运行时形态 */
+export interface CompanionEngineStatus {
+  /** 当前常驻的 DiT 变体（新值域见 DiTVariant；保持 string 以兼容旧 Companion） */
+  variant?: string
+  pid?: number
+  warm?: boolean
+  /** LM 档位：'' / '1.7B' / '4B'（null = 未启用 LM） */
+  lm?: string | null
+  /** 运行时形态：legacy（v0.1.0 归档）/ modern（acestep.cpp 2026-11+，支持 XL 4B） */
+  api?: 'legacy' | 'modern'
+}
+
 export interface CompanionWorker {
   id: string
   token: string
@@ -28,8 +49,8 @@ export interface CompanionWorker {
     busy: boolean
     currentTaskId?: string
     lastMessage?: string
-    /** 常驻引擎信息（P2）：变体 / 进程号 / 是否已预热 */
-    engine?: { variant?: string; pid?: number; warm?: boolean }
+    /** 常驻引擎信息（P2/P9）：变体 / 进程号 / 是否已预热 / LM 档位 / 运行时形态 */
+    engine?: CompanionEngineStatus
   }
   registeredAt: number
   lastHeartbeatAt: number
@@ -38,13 +59,59 @@ export interface CompanionWorker {
 /** 任务优先级：0 普通 / 1 高 / 2 紧急 */
 export type CompanionPriority = 0 | 1 | 2
 
-/** 任务所需的 DiT 变体（决定派给哪个 worker；与 Companion 上报的 models 匹配） */
-export function variantForTaskType(type: string): 'turbo' | 'sft' | 'base' | undefined {
-  if (type === 'generate_audio') return 'turbo'
-  if (type === 'repaint_audio') return 'sft'
-  if (type === 'generate_stem') return 'base'
-  if (type === 'cover_audio') return 'turbo'
-  return undefined
+/** 任务参数里的引擎量级（缺省 2b；非法值由路由层先拒绝，这里按缺省处理，避免旧任务落盘数据把队列打挂）。 */
+export function engineTierOfParams(params?: Record<string, unknown>): EngineTier {
+  return params?.engine === 'xl' ? 'xl' : '2b'
+}
+
+/** 校验任务参数里的 engine：只接受 '2b' | 'xl'；缺省视作 '2b'，非法值返回 null（路由层据此 400）。 */
+export function parseEngineTier(value: unknown): EngineTier | null {
+  if (value === undefined || value === null) return '2b'
+  if (value === '2b' || value === 'xl') return value
+  return null
+}
+
+/** 落盘/入参里的变体字符串 → DiTVariant（非法值返回 undefined，交给映射函数重算）。 */
+function asDiTVariant(value: unknown): DiTVariant | undefined {
+  return typeof value === 'string' && (VARIANT_ORDER as readonly string[]).includes(value)
+    ? (value as DiTVariant)
+    : undefined
+}
+
+/**
+ * **唯一**的「任务类型 + 参数 → 所需 DiT 变体」映射（P9 契约 §3.1，Companion 侧同规则）：
+ *
+ * ```
+ * generate_audio:  quality ? (engine==='xl' ? 'xl_sft' : 'sft')
+ *                           : (engine==='xl' ? 'xl_turbo' : 'turbo')
+ * cover_audio:     engine==='xl' ? 'xl_turbo' : 'turbo'
+ * repaint_audio:   engine==='xl' ? 'xl_sft' : 'sft'
+ * generate_stem:   engine==='xl' ? 'xl_base' : 'base'
+ * 其他/未知:        undefined
+ * ```
+ *
+ * 路由层、入队、旧任务规整、能力阻塞提示全部走这一份，禁止在别处再写一份映射。
+ */
+export function variantForTask(type: string, params?: Record<string, unknown>): DiTVariant | undefined {
+  const xl = engineTierOfParams(params) === 'xl'
+  switch (type) {
+    case 'generate_audio':
+      if (params?.quality === true) return xl ? 'xl_sft' : 'sft'
+      return xl ? 'xl_turbo' : 'turbo'
+    case 'cover_audio':
+      return xl ? 'xl_turbo' : 'turbo'
+    case 'repaint_audio':
+      return xl ? 'xl_sft' : 'sft'
+    case 'generate_stem':
+      return xl ? 'xl_base' : 'base'
+    default:
+      return undefined
+  }
+}
+
+/** 兼容旧名（P9 前只有任务类型维度）：等价于 variantForTask(type)。新代码请直接用 variantForTask。 */
+export function variantForTaskType(type: string): DiTVariant | undefined {
+  return variantForTask(type)
 }
 
 export interface CompanionTask {
@@ -60,8 +127,8 @@ export interface CompanionTask {
   assetId?: string
   /** 0 普通 / 1 高 / 2 紧急（越大越先派） */
   priority: CompanionPriority
-  /** 派单所需的模型变体（缺省 = 不限制，兼容旧任务与 mock worker） */
-  requiredVariant?: 'turbo' | 'sft' | 'base'
+  /** 派单所需的模型变体（缺省 = 不限制，兼容旧任务与 mock worker）；P9 起含 xl_* */
+  requiredVariant?: DiTVariant
   cancelRequested: boolean
   createdAt: number
   updatedAt: number
@@ -96,10 +163,11 @@ const workers = new Map<string, CompanionWorker>()
 function normalizeTask(raw: Partial<CompanionTask> & { id: string; type: string }): CompanionTask {
   const now = Date.now()
   const priority = raw.priority === 1 || raw.priority === 2 ? raw.priority : 0
+  const params = raw.params ?? {}
   return {
     id: raw.id,
     type: raw.type,
-    params: raw.params ?? {},
+    params,
     projectId: raw.projectId,
     status: raw.status ?? 'queued',
     progress: raw.progress ?? 0,
@@ -108,7 +176,8 @@ function normalizeTask(raw: Partial<CompanionTask> & { id: string; type: string 
     error: raw.error,
     assetId: raw.assetId,
     priority,
-    requiredVariant: raw.requiredVariant ?? variantForTaskType(raw.type),
+    // 旧落盘数据没有 requiredVariant（或值不在新值域里）时，按 type + params 重新推导
+    requiredVariant: asDiTVariant(raw.requiredVariant) ?? variantForTask(raw.type, params),
     cancelRequested: raw.cancelRequested ?? false,
     createdAt: raw.createdAt ?? now,
     updatedAt: raw.updatedAt ?? now,
@@ -199,7 +268,7 @@ export function authWorker(workerId: string, token: string): CompanionWorker | n
 export function heartbeat(
   workerId: string,
   token: string,
-  status?: { busy?: boolean; currentTaskId?: string; engine?: { variant?: string; pid?: number; warm?: boolean } },
+  status?: { busy?: boolean; currentTaskId?: string; engine?: CompanionEngineStatus },
 ): { ok: boolean; cancelTaskIds: string[]; serverTime: number } | null {
   const worker = authWorker(workerId, token)
   if (!worker) return null
@@ -255,20 +324,21 @@ export function enqueueTask(input: {
   params?: Record<string, unknown>
   projectId?: string
   priority?: CompanionPriority
-  /** 覆盖默认变体要求（例如质量模式 generate_audio 实际用 sft+LM，需要 sft worker） */
-  variantOverride?: 'turbo' | 'sft' | 'base'
+  /** 覆盖默认变体要求（例如质量模式实际用 sft+LM，需要 sft worker）；P9 起一般由 variantForTask 从 params 推导 */
+  variantOverride?: DiTVariant
 }): CompanionTask {
   housekeeping()
   const now = Date.now()
+  const params = input.params ?? {}
   const task: CompanionTask = {
     id: `task_${randomUUID().slice(0, 8)}`,
     type: input.type,
-    params: input.params ?? {},
+    params,
     projectId: input.projectId,
     status: 'queued',
     progress: 0,
     priority: input.priority === 1 || input.priority === 2 ? input.priority : 0,
-    requiredVariant: input.variantOverride ?? variantForTaskType(input.type),
+    requiredVariant: input.variantOverride ?? variantForTask(input.type, params),
     cancelRequested: false,
     createdAt: now,
     updatedAt: now,
@@ -284,7 +354,8 @@ export function claimTask(workerId: string, token: string): CompanionTask | null
   if (!worker) return null
   housekeeping()
   const allowed = new Set(worker.capabilities.tasks)
-  // 能力匹配：worker 上报了 models 时，只派发它支持的变体；未上报（空数组）视为全收（兼容旧 Companion）
+  // 能力匹配：worker 上报了 models 时，只派发它支持的变体（2B 三档 + XL 三档）；
+  // 未上报（空数组）视为全收（兼容旧 Companion）
   const models = worker.capabilities.models ?? []
   const candidates = tasks
     .filter((item) => {
@@ -420,6 +491,7 @@ export function queueCounts(): { normal: number; high: number; urgent: number } 
 /**
  * 因能力不匹配而无法派发的排队任务（variant × count），
  * 供 Companion 在空闲时提示"本机能力不足"，也供 UI 展示。
+ * variant 取值域即 DiTVariant（含 xl_turbo / xl_sft / xl_base）。
  */
 export function blockedByCapability(): Array<{ variant: string; count: number }> {
   const caps = [...workers.values()].flatMap((worker) => worker.capabilities.models ?? [])

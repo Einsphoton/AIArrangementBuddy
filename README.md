@@ -79,6 +79,7 @@
 | **简谱导入（P7-D）** | 文件菜单「导入简谱…」：粘贴简谱（`1=C`、`4/4`、`♩=120`、1–7 音符、`'`/`,` 八度、`#`/`b`、`/` 八分、`.` 附点、`-` 延长、`~` 连音、`\|` 小节线）→ 生成单条旋律轨；可再接「AI 重编（cover）」渲染成完整歌 |
 | **一键整曲 + 分轨（P7-E）** | 生成面板「一键整曲 + 分轨 Stem」：选乐器（吉他/贝斯/鼓/弦乐/键盘/合成器/人声，默认 3 种）+ 质量模式 → 先出整曲音频轨，再以整曲为上下文逐条生成 Stem 落独立轨道；面板内显示每步进度，每步独立撤销 |
 | **本机引擎自动安装（P8）** | 首次启动检测平台（Windows x64 / macOS Apple Silicon / Linux x64），自动下载 ACE-Step 运行时（官方 GitHub release）与模型（公开 HF，sha256 校验、断点续传、按需 profile：基础≈3.4GB / +质量≈7.6GB / +分轨≈10.2GB）；自动附带自生成数据的 LoRA 适配器（jrpg_v1/jrpg_v2/jrock_v1，≈81MB，GitHub Releases 校验安装）；顶栏「安装本机引擎」或 `node scripts/provision.mjs`；macOS 用 Metal 后端。训练代码/自生成数据集/基座检查点按需下载（`training-code-v1` / `training-data-v1` / HF ACE-Step），顶栏「训练风格」一键准备环境并训练，完成后自动注册适配器；见 `training/` 与 [docs/P8_PROGRESS.md](docs/P8_PROGRESS.md)。详见 [docs/SETUP_MAC.md](docs/SETUP_MAC.md) |
+| **XL 4B 引擎 + 引擎量级选择（P9）** | 新增 **ACE-Step 1.5 XL（4B DiT）** 模型档：`xl` profile（`xl-turbo` + `xl-sft` + `xl-base` + `LM 4B`，Q8_0 ≈20.4GB，需 ≥12GB 显存）。Windows 自动安装**现代运行时**（上游 `acestep.cpp` 2026-11 预编译 + NVIDIA CUDA 13 redist，逐文件 sha256 校验；旧版运行时自动升级）；AI 面板「引擎量级」可选 **标准 2B（快）/ XL 4B（最佳质量）**，质量模式在 XL 档自动走 `xl_sft + LM 4B`；Companion 按 `params.engine` 派单并在 `capabilities` 上报 `xl_*` 变体；macOS/Linux 暂不支持 XL（保持官方 legacy 运行时）。详见 [docs/P9_XL_ENGINE.md](docs/P9_XL_ENGINE.md) |
 | **MIDI 键盘** | Web MIDI 直连、热插拔；可直接弹奏当前轨道音色试听，打开「录入」开关后弹奏会写入钢琴卷帘（支持音阶锁定） |
 | **AI 编曲 Agent** | 真正的思考链 + 37 个工具 + 联网搜索；三种后端可切换。除生成/分析外还能**编辑已有编配**：复制/重复片段与段落、拆分/合并、量化、整体或片段移调、人性化、力度曲线、音阶锁定、复制/清空轨道、摇摆/拍号/循环区间；也能通过 `ui_action` 直接驱动界面（播放/停止/跳转/切视图/打开导出/撤销重做）。AI 面板支持停止生成、重新生成、Slash 命令、上下文引用、窄条折叠 |
 | **命令面板** | ⌘K 搜索并执行全部命令（走带 / 编辑 / 视图 / 轨道 / 工程 / AI / 帮助），与快捷键帮助同源 |
@@ -188,6 +189,9 @@ pnpm soundfonts     # 下载开源音色库（可选，40MB）
 > 端到端验收会用 headless Chrome 真实操作界面：检查示例工程、三种视图、钢琴卷帘写入/撤销、
 > 9 类智能片段生成、走带、WAV 离线渲染、导出格式、设置页分区、MIDI 导出，并用 mock AI 服务商
 > 验证「AI 对话 → 工具调用 → 工程被修改」全链路。截图输出在 `.verify/`。
+
+> **国内网络下载引擎/模型很慢？** 从 P10 起可在 **设置 →「引擎下载」** 切换国内镜像（`hf-mirror.com` / `ghfast.top`）、开启多源分片并发，或用服务器离线包做完全离线安装与局域网分发；
+> 配置项、离线包工作流与排障见 [docs/DOWNLOAD_ACCELERATION.md](docs/DOWNLOAD_ACCELERATION.md)。
 
 ---
 

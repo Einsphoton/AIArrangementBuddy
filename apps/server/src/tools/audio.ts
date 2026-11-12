@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 音频生成工具（P9）：让 AI 编曲助手按用户意图决定「MIDI / 音频 / 先 MIDI 再音频 / 分轨」。
  *
  * 实现要点（与 CONTRACTS §6 一致）：
@@ -24,6 +24,13 @@ const STEM_LABEL: Record<string, string> = {
 }
 
 const MODES = ['text_to_audio', 'midi_to_audio', 'audio_with_stems', 'midi_then_audio'] as const
+
+/** 引擎量级（P9）：2B 标准（缺省，快）/ XL 4B（最高质量，需现代运行时 + xl 模型档） */
+const ENGINE_TIERS = ['2b', 'xl'] as const
+const ENGINE_LABEL: Record<string, string> = {
+  '2b': '标准 2B',
+  xl: 'XL 4B',
+}
 
 const MODE_LABEL: Record<string, string> = {
   text_to_audio: '文本 → 整首音频',
@@ -76,6 +83,10 @@ export const AUDIO_TOOLS: ToolDef[] = [
         startBeat: num('音频落轨起点（拍，≥0）；省略时落在播放头', { minimum: 0 }),
         trackName: str('可选的轨道/片段名（中文即可）'),
         quality: bool('质量模式：精修 50 步，更慢但更完整（与风格适配器互斥）'),
+        engine: enm(
+          '引擎量级：2b=标准 2B（快，缺省）；xl=XL 4B（最高质量，需 ≥12GB 显存且已安装 XL 模型档）。用户明确要「最高质量/最好效果/XL」时选 xl',
+          ENGINE_TIERS,
+        ),
         priority: int('任务优先级：0 普通 / 1 高 / 2 紧急', { minimum: 0, maximum: 2 }),
         reason: str('用一句中文说明为什么选这个模式，会展示给用户'),
       },
@@ -119,6 +130,15 @@ export const AUDIO_TOOLS: ToolDef[] = [
       const stems = mode === 'audio_with_stems' ? (stemList.length ? stemList : ['guitar', 'bass', 'drums']) : []
       const priority = Number.isFinite(Number(args.priority)) ? clamp(Math.round(Number(args.priority)), 0, 2) : 0
       const startBeat = Number.isFinite(Number(args.startBeat)) ? Math.max(0, Number(args.startBeat)) : undefined
+      // 引擎量级（P9）：校验后只透传显式选择的值；缺省不写进计划（任务 params 不带 engine = 2b，保持旧默认）
+      const engineRaw = typeof args.engine === 'string' ? args.engine.trim() : ''
+      if (engineRaw && !(ENGINE_TIERS as readonly string[]).includes(engineRaw)) {
+        return {
+          ok: false,
+          message: `engine 只能是 '2b'（${ENGINE_LABEL['2b']}）或 'xl'（${ENGINE_LABEL.xl}，最高质量）；不确定时省略该参数`,
+        }
+      }
+      const engine = engineRaw === 'xl' ? ('xl' as const) : engineRaw === '2b' ? ('2b' as const) : undefined
       const audioPlan = {
         mode,
         caption: caption || undefined,
@@ -129,14 +149,16 @@ export const AUDIO_TOOLS: ToolDef[] = [
         startBeat,
         trackName: typeof args.trackName === 'string' && args.trackName.trim() ? args.trackName.trim().slice(0, 60) : undefined,
         quality: args.quality === true || undefined,
+        engine: engine ?? undefined,
         priority,
         reason: typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim().slice(0, 200) : undefined,
       }
       const stemText = stems.length ? `，分轨：${stems.map((arm) => STEM_LABEL[arm] ?? arm).join(' / ')}` : ''
+      const engineText = engine ? `，引擎：${ENGINE_LABEL[engine]}` : ''
       return {
         ok: true,
         message:
-          `已安排音频任务：${MODE_LABEL[mode]}（BPM ${bpm}${mode === 'midi_to_audio' ? '' : `，约 ${durationSec}s`}${stemText}）。` +
+          `已安排音频任务：${MODE_LABEL[mode]}（BPM ${bpm}${mode === 'midi_to_audio' ? '' : `，约 ${durationSec}s`}${stemText}${engineText}）。` +
           '生成在界面中异步执行，完成后自动加入音频轨；你不需要轮询，用一两句话告诉用户选择了哪种模式即可。',
         data: { audioPlan },
       }

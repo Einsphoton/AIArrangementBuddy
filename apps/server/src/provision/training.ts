@@ -10,7 +10,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
-import { downloadFile } from './downloader.js'
+import { createDownloadContext, fetchArtifact, speedText } from './installer.js'
+import type { ProvisionDownloadConfig } from './sources.js'
 import {
   TRAINING_CHECKPOINTS,
   TRAINING_CODE,
@@ -23,6 +24,9 @@ import {
 import { extractTarGz } from './untar.js'
 
 export type TrainingPhase = 'code' | 'datasets' | 'python' | 'checkpoints' | 'env'
+
+/** 训练资产（代码/Python/数据集/检查点）下载的重试次数（downloader 默认 3；经代理拉大文件易中断） */
+const TRAINING_DOWNLOAD_ATTEMPTS = 5
 
 /** 检查点目录名 → 界面展示名（训练进度里不暴露真实权重目录名） */
 const CHECKPOINT_GROUP_LABELS: Record<string, string> = {
@@ -175,6 +179,8 @@ export interface SetupTrainingOptions {
   onProgress?: (progress: TrainingProgress) => void
   log?: (message: string) => void
   fetchImpl?: typeof fetch
+  /** 下载加速配置（P10）：不传 = 官方直连 + 单连接（与 P9 行为一致） */
+  download?: Partial<ProvisionDownloadConfig>
   /** 测试/高级用法：复用已有代码/检查点/Python，跳过下载与 pip */
   overrides?: { codeDir?: string; checkpointsDir?: string; pythonPath?: string; workDir?: string; datasetDir?: string; shimPath?: string; runnerPath?: string }
 }
@@ -247,8 +253,8 @@ export async function setupTraining(options: SetupTrainingOptions): Promise<Trai
   for (const dir of [paths.root, paths.code, paths.datasets, paths.python, paths.checkpoints, paths.work, paths.downloads]) {
     mkdirSync(dir, { recursive: true })
   }
-  const fetchImpl = options.fetchImpl
   const overrides = options.overrides ?? {}
+  const download = await createDownloadContext(options)
 
   // 1) 训练代码
   if (overrides.codeDir) {
@@ -256,15 +262,20 @@ export async function setupTraining(options: SetupTrainingOptions): Promise<Trai
     options.onProgress?.({ phase: 'code', progress: 1, message: '复用已有训练代码' })
   } else {
     const archivePath = path.join(paths.downloads, TRAINING_CODE.file)
-    await downloadFile({
-      url: TRAINING_CODE.url,
-      dest: archivePath,
-      size: TRAINING_CODE.size,
-      sha256: TRAINING_CODE.sha256,
-      signal: options.signal,
-      fetchImpl,
-      onProgress: ({ received, total }) => options.onProgress?.({ phase: 'code', progress: total > 0 ? received / total : 0, message: '下载训练代码包…' }),
-    })
+    await fetchArtifact(
+      download,
+      { kind: 'training-code', url: TRAINING_CODE.url, name: TRAINING_CODE.file, sha256: TRAINING_CODE.sha256, size: TRAINING_CODE.size },
+      archivePath,
+      {
+        attempts: TRAINING_DOWNLOAD_ATTEMPTS,
+        onProgress: ({ received, total, speedBps }) =>
+          options.onProgress?.({
+            phase: 'code',
+            progress: total > 0 ? received / total : 0,
+            message: `下载训练代码包…${speedText(speedBps)}`,
+          }),
+      },
+    )
     extractArchiveTo(archivePath, paths.code)
     if (!existsSync(path.join(paths.code, 'training', 'runner.py'))) throw new Error('训练代码包解压后缺少 training/runner.py')
     options.onProgress?.({ phase: 'code', progress: 1, message: '训练代码就绪' })
@@ -278,18 +289,18 @@ export async function setupTraining(options: SetupTrainingOptions): Promise<Trai
     const totalBytes = trainingCheckpointBytes()
     let doneBytes = 0
     for (const file of TRAINING_CHECKPOINTS) {
-      await downloadFile({
-        url: file.url,
-        dest: path.join(paths.checkpoints, file.dest),
-        size: file.size,
-        sha256: file.sha256,
-        signal: options.signal,
-        fetchImpl,
-        onProgress: ({ received }) => {
-          const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
-          options.onProgress?.({ phase: 'checkpoints', progress: ratio, message: `下载检查点（${checkpointGroupLabel(file.path)}）…` })
+      await fetchArtifact(
+        download,
+        { kind: 'training-checkpoint', url: file.url, name: file.dest, sha256: file.sha256, size: file.size },
+        path.join(paths.checkpoints, file.dest),
+        {
+          attempts: TRAINING_DOWNLOAD_ATTEMPTS,
+          onProgress: ({ received, speedBps }) => {
+            const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
+            options.onProgress?.({ phase: 'checkpoints', progress: ratio, message: `下载检查点（${checkpointGroupLabel(file.path)}）…${speedText(speedBps)}` })
+          },
         },
-      })
+      )
       doneBytes += file.size
     }
     options.onProgress?.({ phase: 'checkpoints', progress: 1, message: '检查点就绪' })
@@ -301,15 +312,20 @@ export async function setupTraining(options: SetupTrainingOptions): Promise<Trai
   } else {
     const pythonAsset = TRAINING_PYTHON[platform]
     const archivePath = path.join(paths.downloads, pythonAsset.file)
-    await downloadFile({
-      url: pythonAsset.url,
-      dest: archivePath,
-      size: pythonAsset.size,
-      sha256: pythonAsset.sha256,
-      signal: options.signal,
-      fetchImpl,
-      onProgress: ({ received, total }) => options.onProgress?.({ phase: 'python', progress: total > 0 ? received / total : 0, message: '下载独立 Python…' }),
-    })
+    await fetchArtifact(
+      download,
+      { kind: 'training-python', url: pythonAsset.url, name: pythonAsset.file, sha256: pythonAsset.sha256, size: pythonAsset.size },
+      archivePath,
+      {
+        attempts: TRAINING_DOWNLOAD_ATTEMPTS,
+        onProgress: ({ received, total, speedBps }) =>
+          options.onProgress?.({
+            phase: 'python',
+            progress: total > 0 ? received / total : 0,
+            message: `下载独立 Python…${speedText(speedBps)}`,
+          }),
+      },
+    )
     extractArchiveTo(archivePath, paths.python)
     if (!existsSync(bundledPythonPath(paths.python, platform))) throw new Error('独立 Python 解压后找不到可执行文件')
     options.onProgress?.({ phase: 'python', progress: 1, message: '独立 Python 就绪' })
@@ -325,18 +341,18 @@ export async function setupTraining(options: SetupTrainingOptions): Promise<Trai
       continue
     }
     const archivePath = path.join(paths.downloads, dataset.file)
-    await downloadFile({
-      url: dataset.url,
-      dest: archivePath,
-      size: dataset.size,
-      sha256: dataset.sha256,
-      signal: options.signal,
-      fetchImpl,
-      onProgress: ({ received }) => {
-        const ratio = datasetTotal > 0 ? (datasetDone + received) / datasetTotal : 0
-        options.onProgress?.({ phase: 'datasets', progress: ratio, message: `下载数据集 ${dataset.id}…` })
+    await fetchArtifact(
+      download,
+      { kind: 'training-dataset', url: dataset.url, name: dataset.id, sha256: dataset.sha256, size: dataset.size },
+      archivePath,
+      {
+        attempts: TRAINING_DOWNLOAD_ATTEMPTS,
+        onProgress: ({ received, speedBps }) => {
+          const ratio = datasetTotal > 0 ? (datasetDone + received) / datasetTotal : 0
+          options.onProgress?.({ phase: 'datasets', progress: ratio, message: `下载数据集 ${dataset.id}…${speedText(speedBps)}` })
+        },
       },
-    })
+    )
     extractArchiveTo(archivePath, paths.datasets)
     datasetDone += dataset.size
   }
@@ -442,6 +458,8 @@ export interface StartTrainingSetupOptions {
   platform?: TrainingPlatform
   overrides?: SetupTrainingOptions['overrides']
   fetchImpl?: typeof fetch
+  /** 下载加速配置（P10）：路由从 settings 解析后传入 */
+  download?: Partial<ProvisionDownloadConfig>
 }
 
 export function startTrainingSetup(options: StartTrainingSetupOptions): TrainingJob {
@@ -477,6 +495,7 @@ export function startTrainingSetup(options: StartTrainingSetupOptions): Training
         signal,
         overrides: options.overrides,
         fetchImpl: options.fetchImpl,
+        download: options.download,
         onProgress: ({ phase, progress, message }) => update(phase, progress, message),
         log: (message) => {
           job.logTail = `${job.logTail ?? ''}\n${message}`.slice(-4000)

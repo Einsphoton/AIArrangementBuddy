@@ -15,7 +15,7 @@ import {
   Settings2,
   SlidersHorizontal,
 } from 'lucide-react'
-import { getCompanionStatus, getProvisionStatus, type CompanionStatus, type ProvisionStatus } from '../../lib/api'
+import { getCompanionStatus, getProvisionStatus, type CompanionStatus, type ProvisionProfileId, type ProvisionStatus } from '../../lib/api'
 import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
 import { COMPANION_START_HINT } from './CompanionBadge'
@@ -106,6 +106,17 @@ export function AudioEngineMenu({ onOpenAdvanced, onOpenTasks }: AudioEngineMenu
 
   const statusLabel = online ? '生成节点在线' : modelsReady ? '模型已就绪 · 节点未启动' : '需要下载音频模型'
 
+  /* P9：档位概览（基础档就绪后入口仍然保留，方便加装 XL 4B / 质量 / 分轨档） */
+  const profiles = provision?.profiles ?? []
+  const readyProfiles = profiles.filter((profile) => profile.ready)
+  const profileTotal = profiles.length || 4
+  const xlReady = profiles.some((profile) => profile.id === 'xl' && profile.ready)
+  const profileSummary = modelsReady ? `已就绪 ${readyProfiles.length}/${profileTotal} 档` : `缺 ${humanBytes(missingBytes)}`
+  /** 打开安装面板：profiles = [] 表示不预选（让用户自己勾档位） */
+  const openProvision = (detail: { reason: string; title?: string; profiles: ProvisionProfileId[] }) => {
+    window.dispatchEvent(new CustomEvent('aiab:provision-open', { detail }))
+  }
+
   return (
     <div className="relative shrink-0" ref={rootRef}>
       <button
@@ -186,36 +197,46 @@ export function AudioEngineMenu({ onOpenAdvanced, onOpenTasks }: AudioEngineMenu
               )}
             </div>
 
-            {!modelsReady && (
-              <div className="rounded-lg border border-line bg-bg-soft px-2.5 py-2">
-                <div className="flex items-center gap-1.5 text-[10.5px]">
-                  <HardDriveDownload size={11} className="shrink-0 text-accent" />
-                  <span className="font-medium text-ink-2">本机引擎</span>
-                  <span className="ml-auto text-[9.5px] text-ink-4">
-                    {provision?.supported === false ? '当前平台不支持自动安装' : `缺 ${humanBytes(missingBytes)}`}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  data-provision-trigger
-                  className="mt-1.5 flex h-7 w-full items-center justify-center gap-1 rounded-md border border-accent/40 bg-accent/10 text-[10px] text-accent-soft hover:bg-accent/16 disabled:opacity-40"
-                  disabled={provision?.supported === false}
-                  onClick={() =>
-                    window.dispatchEvent(
-                      new CustomEvent('aiab:provision-open', {
-                        detail: {
-                          reason: '安装本机 AI 引擎与模型后，才能在 AI 编曲助手里直接生成音频与分轨。',
-                          profiles: ['essential'],
-                        },
-                      }),
-                    )
-                  }
-                >
-                  <HardDriveDownload size={10} />
-                  安装本机引擎
-                </button>
+            <div className="rounded-lg border border-line bg-bg-soft px-2.5 py-2">
+              <div className="flex items-center gap-1.5 text-[10.5px]">
+                <HardDriveDownload size={11} className="shrink-0 text-accent" />
+                <span className="font-medium text-ink-2">本机引擎 / 模型档位</span>
+                <span className="ml-auto shrink-0 text-[9.5px] text-ink-4">
+                  {provision?.supported === false ? '当前平台不支持自动安装' : profileSummary}
+                </span>
               </div>
-            )}
+              <p className="mt-1 text-[9.5px] leading-relaxed text-ink-4">
+                {provision?.supported === false
+                  ? '当前平台不支持自动安装；请手动部署本机引擎。'
+                  : modelsReady
+                    ? xlReady
+                      ? '基础档与 XL 4B 档已安装；可加装质量 / 分轨档，或查看安装状态。'
+                      : '基础档已就绪；可加装 XL 4B 档（约 23.8GB，需 ≥12GB 显存）、质量档或分轨档。'
+                    : '首次使用需要先下载本机模型与运行时（基础档约 3.4GB）。'}
+              </p>
+              <button
+                type="button"
+                data-provision-trigger
+                className="mt-1.5 flex h-7 w-full items-center justify-center gap-1 rounded-md border border-accent/40 bg-accent/10 text-[10px] text-accent-soft hover:bg-accent/16 disabled:opacity-40"
+                disabled={provision?.supported === false}
+                title={`本机 AI 引擎：平台 ${provision?.platform ?? '检测中'}，${profileSummary}${
+                  xlReady ? '，XL 4B 已安装' : modelsReady ? '，可加装 XL 4B' : ''
+                }`}
+                onClick={() =>
+                  openProvision({
+                    title: modelsReady ? '管理本机模型档位' : undefined,
+                    reason: modelsReady
+                      ? '已安装的档位不会重复下载；勾选需要的档位（如 XL 4B）后开始下载即可。'
+                      : '安装本机 AI 引擎与模型后，才能在 AI 编曲助手里直接生成音频与分轨。',
+                    /* 基础档就绪时不预选任何档位，避免误下 23.8GB 的 XL 档 */
+                    profiles: modelsReady ? [] : ['essential'],
+                  })
+                }
+              >
+                <HardDriveDownload size={10} />
+                {modelsReady ? '模型档位（含 XL 4B）' : '安装本机引擎'}
+              </button>
+            </div>
 
             <div className="grid grid-cols-2 gap-1.5">
               <button

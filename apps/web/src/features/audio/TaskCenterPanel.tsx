@@ -367,8 +367,11 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
                       {priorityMeta.label}
                     </span>
                     {task.requiredVariant && (
-                      <span className="shrink-0 rounded border border-line bg-bg-soft px-1 py-[1px] text-[9px] text-ink-4">
-                        {task.requiredVariant}
+                      <span
+                        title={`需要的模型能力：${variantDisplayName(task.requiredVariant)}`}
+                        className="shrink-0 rounded border border-line bg-bg-soft px-1 py-[1px] text-[9px] text-ink-4"
+                      >
+                        {variantDisplayName(task.requiredVariant)}
                       </span>
                     )}
                     <div className="flex-1" />

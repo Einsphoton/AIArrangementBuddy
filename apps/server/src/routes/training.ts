@@ -8,6 +8,9 @@
  *   POST /api/training/jobs/:id/cancel
  *   GET  /api/training/jobs
  *
+ * P10：setup/train 会把「下载加速配置」（国内镜像 / 多源 / 离线包，见 provision/sources.ts）
+ * 传给训练安装器，训练代码/数据集/检查点下载同样享受镜像与服务器助攻。
+ *
  * 测试/高级用法：环境变量 AIAB_TRAINING_ALLOW_OVERRIDES=1 时接受 sources 覆盖路径。
  */
 import type { FastifyInstance } from 'fastify'
@@ -20,6 +23,8 @@ import {
   startTrainingSetup,
   trainingStatus,
 } from '../provision/training.js'
+import { resolveDownloadConfig } from '../provision/sources.js'
+import { loadSettings } from '../storage/settings.js'
 import { errorMessage } from '../util.js'
 
 type Json = Record<string, unknown>
@@ -43,13 +48,20 @@ function parseOverrides(raw: unknown): { codeDir?: string; checkpointsDir?: stri
   }
 }
 
+/** 当前下载加速配置（settings + 环境变量；训练器据此走镜像/离线包） */
+function currentDownloadConfig(): ReturnType<typeof resolveDownloadConfig> {
+  return resolveDownloadConfig(loadSettings())
+}
+
 export function registerTrainingRoutes(app: FastifyInstance): void {
   app.get('/api/training/status', async () => trainingStatus({ dataDir }))
 
   app.post<{ Body: Json }>('/api/training/setup', async (request, reply) => {
     try {
       const overrides = parseOverrides(request.body?.sources)
-      const job = startTrainingSetup({ dataDir, overrides })
+      // 对象变量传递：A 给 startTrainingSetup 加 download 参数后自动生效
+      const setupOptions = { dataDir, overrides, download: currentDownloadConfig() }
+      const job = startTrainingSetup(setupOptions)
       return reply.send({ jobId: job.id, job })
     } catch (error) {
       return reply.code(400).send({ error: errorMessage(error) })
@@ -63,7 +75,7 @@ export function registerTrainingRoutes(app: FastifyInstance): void {
     if (!DATASETS.has(datasetId)) return reply.code(400).send({ error: `datasetId 必须是 ${[...DATASETS].join(' / ')}` })
     if (!TAG_RE.test(tag)) return reply.code(400).send({ error: 'tag 只能是小写字母/数字/下划线/中划线，2–40 个字符' })
     try {
-      const job = startTraining({
+      const trainOptions = {
         dataDir,
         datasetId,
         tag,
@@ -74,7 +86,9 @@ export function registerTrainingRoutes(app: FastifyInstance): void {
         device: typeof body.device === 'string' ? body.device : undefined,
         precision: typeof body.precision === 'string' ? body.precision : undefined,
         overrides: parseOverrides(body.sources),
-      })
+        download: currentDownloadConfig(),
+      }
+      const job = startTraining(trainOptions)
       return reply.send({ jobId: job.id, job })
     } catch (error) {
       return reply.code(400).send({ error: errorMessage(error) })

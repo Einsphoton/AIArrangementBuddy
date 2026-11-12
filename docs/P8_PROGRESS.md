@@ -89,3 +89,13 @@
 - macOS MPS 路径：代码按 Side-Step 的 MPS/fp32 支持实现，runner 支持 `--device mps --precision fp32`；本轮无 Mac 硬件，仅平台模拟与文档验收（Mac 建议先小数据集、epochs 60–100）。
 - 自动安装的 venv 依赖体积大（PyTorch 等约 2–4GB，仅首次训练时下载）；若用户已有 Python/torch 可用 sources 覆盖跳过。
 - 真实数据内部研究版仍只在本机，不参与任何发布/训练数据下载清单。
+
+---
+
+## 后续（P9，2026-11-12）
+
+P9 把 Windows 侧运行时升级为上游 `acestep.cpp` modern 构建（支持 XL 4B），安装器与模型档有实质性变化，**本文档的 P8 数字（运行时来源、profile 大小、验收条数）以 [P9_XL_ENGINE.md](./P9_XL_ENGINE.md) 为准**：
+
+- Windows：现代运行时（24 个文件 + CUDA 13 redist，≈600MB）+ 新增 `xl` profile（xl-turbo/xl-sft/xl-base + LM 4B，≈20.4GB）；旧 legacy 安装会自动升级。
+- macOS / Linux：运行时与 profile 不变（仍 legacy v0.1.0，无 XL）。
+- 客户端新增「引擎量级」选择（2B / XL）；Companion 支持 legacy/modern 双 API。

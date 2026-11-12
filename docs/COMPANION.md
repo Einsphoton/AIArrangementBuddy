@@ -1,6 +1,6 @@
-# Companion 工作节点（P5-A）
+# Companion 工作节点（P5-A / P9）
 
-> 状态：P5-A（常驻引擎 + 真取消 + repaint + 真实能力上报/优先级 + generate_stem lego 分轨/base 变体）。Companion 是「数据面」进程：跑在用户自己的电脑/GPU 上，向服务端（NAS 控制面或本机服务）拉取音频生成任务并回传结果。
+> 状态：P5-A（常驻引擎 + 真取消 + repaint + 真实能力上报/优先级 + generate_stem lego 分轨/base 变体）；**P9 起支持两种运行时形态（legacy / modern）与「引擎量级」参数（2B / XL 4B）**，详见 [P9_XL_ENGINE.md](./P9_XL_ENGINE.md)。Companion 是「数据面」进程：跑在用户自己的电脑/GPU 上，向服务端（NAS 控制面或本机服务）拉取音频生成任务并回传结果。
 > 设计背景见 [STUDIO_ARCHITECTURE.md](./STUDIO_ARCHITECTURE.md) §4；P1 用「HTTP 轮询」落地 §4 的 Worker 协议（WSS 推到后续）。
 
 ## 1. 它做什么
@@ -48,6 +48,25 @@ Companion（本机）                               服务端（NAS / 本机 878
 - 所有请求失败都按指数退避重试（500ms 起，翻倍，封顶 10s），服务端暂时不可达不会崩。
 - 服务端重启会丢内存里的 worker 表：`heartbeat/claim` 收到 401/403/404 时自动重新注册。注意服务端在 worker 未知时 `claim` 可能仍返回 204（「无任务」），所以 **心跳的 401 是可靠失效信号**：心跳置位后，主循环在两次 claim 之间重新注册，不打断在途任务。
 - 出错不静默：执行失败/取消都会 `complete(status=failed, error=中文原因)`；进程级致命错误才退出。
+
+### 1.1 运行时形态与引擎量级（P9）
+
+Companion 通过 `<引擎目录>/runtime.json` 的 `api` 字段判定运行时形态（`AIAB_ACESTEP_API=legacy|modern` 可覆盖）：
+
+- **legacy**（macOS/Linux、旧 Windows 安装）：启动参数 `--dit/--embedding/--vae[/--lora][/--lm]`，同步 `/lm`、`/synth?wav=1`；按「变体 + 适配器」身份复用引擎，**换变体重启**；只支持 2B 变体。
+- **modern**（Windows，P9）：启动参数 `--models <模型目录> --device CUDA0[--adapters <目录>]`，HTTP 改用异步 job（`POST /lm|/synth` 返回 `{id}`，轮询 `GET /job?id=N`，`GET /job?id=N&result=1` 取结果并从 multipart 提取 WAV）；模型由请求体 `synth_model`/`lm_model` 选择，**同一进程切换变体不重启**（只有适配器目录变化才重启）。支持 XL 4B 变体。
+
+引擎量级：任务参数 `params.engine: '2b' | 'xl'`（缺省 `2b`）。映射规则：
+
+| 任务 | 2b | xl |
+|---|---|---|
+| `generate_audio` 快模式 | `turbo` | `xl_turbo` |
+| `generate_audio` 质量模式 | `sft` + LM 1.7B | `xl_sft` + LM 4B |
+| `cover_audio` | `turbo` | `xl_turbo` |
+| `repaint_audio` | `sft` | `xl_sft` |
+| `generate_stem` | `base` | `xl_base` |
+
+`capabilities.models` 在 modern 运行时会额外上报 `xl_turbo/xl_sft/xl_base`（仅文件存在时）；心跳 `engine` 增加 `lm`（`''`/`'1.7B'`/`'4B'`/`null`）与 `api`（`legacy`/`modern`）。
 
 ## 2. 前置条件
 

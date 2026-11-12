@@ -255,6 +255,37 @@ export const uiSettingsSchema = z.object({
 })
 export type UiSettings = z.infer<typeof uiSettingsSchema>
 
+/* ------------------------------------------------------------------ */
+/* 引擎下载加速（P10）：国内镜像 / 多源分片 / 服务器助攻 / 离线包        */
+/* ------------------------------------------------------------------ */
+
+/** 下载源策略：auto = 探测后按速度排序；mirror = 国内镜像优先；direct = 只走官方 */
+export const provisionSourceStrategySchema = z.enum(['auto', 'mirror', 'direct'])
+export type ProvisionSourceStrategy = z.infer<typeof provisionSourceStrategySchema>
+
+export const provisionSettingsSchema = z.object({
+  sourceStrategy: provisionSourceStrategySchema.default('auto'),
+  /** HuggingFace 镜像（留空 = 内置 https://hf-mirror.com；填 'off' 关闭镜像） */
+  hfMirror: z.string().default(''),
+  /** GitHub 加速前缀（留空 = 内置 https://ghfast.top/；填 'off' 关闭） */
+  githubMirror: z.string().default(''),
+  /** 运行时 / CUDA 组件镜像基础 URL（留空 = 官方 + 服务器离线包） */
+  runtimeMirror: z.string().default(''),
+  /** 分片并发下载数：0/1 = 单连接，默认 4（大文件多连接提速） */
+  concurrency: z.number().min(0).max(16).default(4),
+  /** 服务器助攻：优先使用服务器离线包/已装模型，并为本机/局域网提供镜像 */
+  serverAssist: z.boolean().default(true),
+  /** 服务器镜像地址（留空 = 只用本机离线包；填 http://nas:8787 可从另一台服务器取） */
+  serverAssistUrl: z.string().default(''),
+  /** 服务器镜像令牌（服务端开启 token 校验时使用） */
+  serverAssistToken: z.string().default(''),
+  /** 自动使用本机离线包（<dataDir>/engine-package 或自定义目录），可完全离线安装 */
+  useLocalPackage: z.boolean().default(true),
+  /** 离线包目录（留空 = 数据目录下 engine-package） */
+  packageDir: z.string().default(''),
+})
+export type ProvisionSettings = z.infer<typeof provisionSettingsSchema>
+
 export const appSettingsSchema = z.object({
   providers: z.array(aiProviderConfigSchema).default([]),
   activeProviderId: z.string().default(''),
@@ -283,6 +314,18 @@ export const appSettingsSchema = z.object({
     showMinimap: true,
     defaultVelocity: 96,
     scaleHighlight: true,
+  }),
+  provision: provisionSettingsSchema.default({
+    sourceStrategy: 'auto',
+    hfMirror: '',
+    githubMirror: '',
+    runtimeMirror: '',
+    concurrency: 4,
+    serverAssist: true,
+    serverAssistUrl: '',
+    serverAssistToken: '',
+    useLocalPackage: true,
+    packageDir: '',
   }),
 })
 export type AppSettings = z.infer<typeof appSettingsSchema>
@@ -334,6 +377,18 @@ export function createDefaultSettings(): AppSettings {
       showMinimap: true,
       defaultVelocity: 96,
       scaleHighlight: true,
+    },
+    provision: {
+      sourceStrategy: 'auto',
+      hfMirror: '',
+      githubMirror: '',
+      runtimeMirror: '',
+      concurrency: 4,
+      serverAssist: true,
+      serverAssistUrl: '',
+      serverAssistToken: '',
+      useLocalPackage: true,
+      packageDir: '',
     },
   }
 }

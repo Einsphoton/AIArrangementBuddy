@@ -25,13 +25,16 @@ import {
   getAssetPeaks,
   getCompanionStatus,
   getCompanionTask,
+  getProvisionStatus,
   listAdapters,
   uploadAudioAsset,
   type AdapterInfo,
+  type CompanionEngine,
   type CompanionPriority,
   type CompanionStatus,
   type CompanionTaskState,
   type CompanionTaskStatus,
+  type ProvisionStatus,
 } from '../../lib/api'
 import { cn } from '../../lib/format'
 import { getAudioEngine } from '../../audio'
@@ -54,6 +57,18 @@ const STATUS_LABEL: Record<CompanionTaskStatus, string> = {
 }
 
 const TERMINAL: ReadonlySet<CompanionTaskStatus> = new Set(['done', 'failed', 'canceled'])
+
+/**
+ * P9 引擎量级选项（对外用中性档位名，不暴露底层模型/权重名）。
+ * 标准档是默认档（旧版生成节点也支持）；增强版需要「已装增强版模型 + 节点上报增强版能力」。
+ */
+const ENGINE_OPTIONS: { id: CompanionEngine; label: string; hint: string }[] = [
+  { id: '2b', label: '标准档', hint: '快，显存占用低' },
+  { id: 'xl', label: '增强版', hint: '最佳质量，需 ≥12GB 显存' },
+]
+
+/** 增强版体积估算（服务端未给出 xl profile 时的提示数字） */
+const XL_APPROX_BYTES = 23.8 * 1024 ** 3
 
 /** 常用提示词糖：点一下就能得到一句可用的 caption */
 const CAPTION_PRESETS = [
@@ -88,6 +103,8 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   const [priority, setPriority] = useState<CompanionPriority>(0)
   /** P7-A：质量模式（精修 50 步，更慢；与风格适配器互斥） */
   const [quality, setQuality] = useState(false)
+  /** P9：引擎量级（标准档 / 增强版），默认标准档；增强版不可用时自动退回标准档 */
+  const [engine, setEngine] = useState<CompanionEngine>('2b')
   /** P7-B：AI 重编（cover）——把当前工程渲染成 WAV 后整体换编制 */
   const [coverStrength, setCoverStrength] = useState(0.7)
   const [coverRendering, setCoverRendering] = useState(false)
@@ -98,6 +115,9 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   const [adapterHint, setAdapterHint] = useState<string | null>(null)
   const [companion, setCompanion] = useState<CompanionStatus | null>(null)
   const [companionFailed, setCompanionFailed] = useState(false)
+  /** P9：本机安装状态（判断增强版模型是否已安装；拿不到时降级为「可显示但提示」） */
+  const [provision, setProvision] = useState<ProvisionStatus | null>(null)
+  const [provisionFailed, setProvisionFailed] = useState(false)
 
   const [submitting, setSubmitting] = useState(false)
   const [taskId, setTaskId] = useState<string | null>(null)
@@ -118,6 +138,20 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
     } catch {
       setCompanion(null)
       setCompanionFailed(true)
+      return null
+    }
+  }, [])
+
+  /** P9：读本机安装状态（只用于增强版可用性判断，失败不阻塞面板） */
+  const refreshProvision = useCallback(async () => {
+    try {
+      const next = await getProvisionStatus()
+      setProvision(next)
+      setProvisionFailed(false)
+      return next
+    } catch {
+      setProvision(null)
+      setProvisionFailed(true)
       return null
     }
   }, [])
@@ -148,7 +182,8 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     void refreshCompanion()
-  }, [refreshCompanion])
+    void refreshProvision()
+  }, [refreshCompanion, refreshProvision])
 
   /* Esc 关闭（document 捕获阶段：模态框抢在编曲视图等全局 Escape 之前关闭） */
   useEffect(() => {
@@ -264,8 +299,10 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
           bpm: Number.isFinite(parsedBpm) ? clamp(Math.round(parsedBpm), 20, 320) : undefined,
           durationSec: Number.isFinite(parsedDuration) ? clamp(parsedDuration, 1, 300) : undefined,
           style: style.trim() || undefined,
-          adapterId: quality ? undefined : adapterId || undefined,
+          adapterId: quality || engine === 'xl' ? undefined : adapterId || undefined,
           quality: quality || undefined,
+          /* P9：显式带上引擎量级（缺省标准档；增强版需服务端/节点支持） */
+          engine,
         },
         project.id,
         priority,
@@ -302,8 +339,8 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
     setCoverError(null)
     setSubmitError(null)
     try {
-      const engine = getAudioEngine()
-      const blob = await engine.renderToWav(project, {
+      const audioEngine = getAudioEngine()
+      const blob = await audioEngine.renderToWav(project, {
         sampleRate: 44100,
         onProgress: (ratio) => setCoverProgress(Math.min(0.6, ratio * 0.6)),
       })
@@ -312,7 +349,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
       const uploaded = await uploadAudioAsset(file)
       setCoverProgress(0.75)
       const res = await createCompanionCoverTask(
-        { sourceAssetId: uploaded.asset.id, caption: text, audioCoverStrength: coverStrength },
+        { sourceAssetId: uploaded.asset.id, caption: text, audioCoverStrength: coverStrength, engine },
         project.id,
         priority,
       )
@@ -361,6 +398,38 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   const offline = companionFailed || companion?.online === false
   const startHint = companion?.hint ?? COMPANION_START_HINT
   const running = status === 'queued' || status === 'running'
+
+  /*
+   * P9：增强版可用性。
+   * ① /api/provision/status 的 xl profile 未就绪 → 禁用并提示去装；
+   * ② /api/companion/status 的在线节点能力里没有增强版 → 禁用并解释；
+   * 状态拿不到（接口失败/尚未返回）→ 不阻塞 UI：选项可点，但提示「需已安装增强版且生成节点支持」。
+   */
+  const xlProfile = provision?.profiles?.find((item) => item.id === 'xl')
+  const provisionChecked = provision !== null && !provisionFailed
+  const xlInstalled = provisionChecked ? xlProfile?.ready === true : null
+  const workers = companion?.workers ?? []
+  const onlineWorkerCount = companion?.online === true ? workers.length : 0
+  const xlWorkerReady = workers.some((worker) => (worker.capabilities?.models ?? []).includes('xl_turbo'))
+  let xlBlockedReason: string | null = null
+  if (xlInstalled === false) {
+    xlBlockedReason = `增强版模型未安装：需先下载增强版模型档（约 ${(XL_APPROX_BYTES / 1024 ** 3).toFixed(1)}GB，需 ≥12GB 显存）。入口：「音频引擎」菜单 →「模型档位」。`
+  } else if (companion && !companion.online) {
+    xlBlockedReason = '生成节点（Companion）离线：增强版需要已启动、且上报增强版能力的节点。'
+  } else if (onlineWorkerCount > 0 && !xlWorkerReady) {
+    xlBlockedReason = '当前生成节点未上报增强版能力：需已安装增强版模型，并使用支持增强版的新版生成节点（旧版只支持标准档）。'
+  }
+  const xlUsable = xlBlockedReason === null
+  const xlHint =
+    xlBlockedReason ??
+    (xlInstalled === null || !companion
+      ? '暂时读取不到安装/节点状态：可以选，但需已安装增强版模型且生成节点支持。'
+      : '增强版已就绪：快速模式使用增强版快速生成模型（质量模式用增强版精修生成模型），与风格适配器互斥。')
+
+  /* 状态刷新后增强版变为不可用时，选择退回标准档，避免"看起来选了其实不能用" */
+  useEffect(() => {
+    if (!xlUsable && engine === 'xl') setEngine('2b')
+  }, [xlUsable, engine])
 
   return createPortal(
     <div
@@ -519,7 +588,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
               <SlidersHorizontal size={12} className="shrink-0 text-ink-3" />
               高级参数
               <span className="min-w-0 truncate text-[10.5px] font-normal text-ink-4">
-                优先级 · 适配器 · 质量模式 · AI 重编
+                优先级 · 适配器 · 引擎量级 · 质量模式 · AI 重编
               </span>
               <ChevronDown size={12} className="ml-auto shrink-0 text-ink-4 transition-transform group-open:rotate-180" />
             </summary>
@@ -546,9 +615,15 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
                     onChange={(event) => setAdapterId(event.target.value)}
                     className="field w-full text-[12.5px]"
                     aria-label="风格适配器"
-                    disabled={quality || !adapters || adapters.length === 0}
+                    disabled={quality || engine === 'xl' || !adapters || adapters.length === 0}
                   >
-                    <option value="">{adapters && adapters.length > 0 ? '默认模型' : '无可用适配器'}</option>
+                    <option value="">
+                      {engine === 'xl'
+                        ? '增强版不使用风格适配器'
+                        : adapters && adapters.length > 0
+                          ? '默认模型'
+                          : '无可用适配器'}
+                    </option>
                     {(adapters ?? []).map((adapter) => (
                       <option key={adapter.id} value={adapter.id}>
                         {adapter.name || adapter.id}
@@ -558,6 +633,49 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
                 </label>
               </div>
               {adapterHint && <p className="text-[10.5px] leading-relaxed text-ink-4">{adapterHint}</p>}
+
+              {/* P9 引擎量级：标准档 / 增强版（与质量模式共存：增强版 + 质量 = 增强版精修） */}
+              <div className="rounded-lg border border-line bg-surface-2/50 px-2.5 py-2">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <span className="text-[11px] font-medium text-ink-2">引擎量级</span>
+                  <span className="text-[10px] text-ink-4">默认标准档（快）；增强版质量更好但需要额外模型与显存</span>
+                </div>
+                <div className="mt-1.5 flex gap-1.5" role="group" aria-label="引擎量级">
+                  {ENGINE_OPTIONS.map((option) => {
+                    const isXl = option.id === 'xl'
+                    const optionDisabled = isXl && !xlUsable
+                    const active = engine === option.id
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        data-engine-option={option.id}
+                        aria-pressed={active}
+                        disabled={optionDisabled}
+                        title={optionDisabled ? xlHint : option.hint}
+                        onClick={() => {
+                          setEngine(option.id)
+                          /* 增强版与标准档的风格适配器基座不同，切到增强版时清空适配器 */
+                          if (isXl) setAdapterId('')
+                        }}
+                        className={cn(
+                          'min-w-0 flex-1 rounded-md border px-2 py-1.5 text-left transition-colors',
+                          active
+                            ? 'border-accent/60 bg-accent/12 text-ink'
+                            : 'border-line bg-surface-2/60 text-ink-3 hover:border-accent/35',
+                          optionDisabled && 'cursor-not-allowed opacity-45 hover:border-line',
+                        )}
+                      >
+                        <span className="block text-[10.5px] font-medium">{option.label}</span>
+                        <span className="mt-0.5 block truncate text-[9px] text-ink-4">{option.hint}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+                <p data-engine-hint className="mt-1 text-[10px] leading-relaxed text-ink-4">
+                  {xlHint}
+                </p>
+              </div>
 
               {/* P7-A 质量模式 */}
               <label className="flex items-start gap-2 rounded-lg border border-line bg-surface-2/50 px-2.5 py-2 text-[11px] text-ink-3">
@@ -574,7 +692,8 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
                 <span className="min-w-0">
                   <span className="font-medium text-ink-2">质量模式（精修 50 步）</span>
                   <span className="mt-0.5 block text-[10.5px] leading-relaxed text-ink-4">
-                    更慢（20s 音频约 15–25s），高频/编曲更完整；与风格适配器互斥（勾选后自动清空适配器）
+                    更慢（20s 音频约 15–25s），高频/编曲更完整；与风格适配器互斥（勾选后自动清空适配器）。
+                    与引擎量级组合：标准档 → 精修生成模型，增强版 → 增强版精修生成模型（含提示词增强）。
                   </span>
                 </span>
               </label>
@@ -633,7 +752,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
               <ChevronDown size={12} className="ml-auto shrink-0 text-ink-4 transition-transform group-open:rotate-180" />
             </summary>
             <div className="border-t border-line/70 px-3 py-3 [&>div]:mt-0 [&>div]:border-0 [&>div]:bg-transparent [&>div]:px-0 [&>div]:py-0">
-              <SongWorkflow caption={caption} quality={quality} priority={priority} offline={offline} />
+              <SongWorkflow caption={caption} quality={quality} priority={priority} offline={offline} engine={engine} />
             </div>
           </details>
 

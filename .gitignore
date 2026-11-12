@@ -52,3 +52,6 @@ music-gen/
 
 # AI 音频意图验收产物（本地生成）
 .verify-audio/
+
+# 服务器离线包（P10：runtime + 模型 + 适配器，数十 GB，本地生成，绝不入库）
+/engine-package/

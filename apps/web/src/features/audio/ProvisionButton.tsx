@@ -21,7 +21,7 @@ import {
 import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
 
-const PROFILE_ORDER: ProvisionProfileId[] = ['essential', 'quality', 'stems']
+const PROFILE_ORDER: ProvisionProfileId[] = ['essential', 'quality', 'stems', 'xl']
 const POLL_MS = 1200
 
 /** 步骤状态的中文文案（data-provision-step-status 仍保留原始英文值，自动化脚本依赖） */
@@ -53,6 +53,39 @@ function diagnosticCommand(): string {
   return `node scripts/provision.mjs jobs --server ${window.location.origin}`
 }
 
+/**
+ * P9/P10：各档位兜底文案与体积（服务端未返回该 profile 时也能给用户足够预期）。
+ * 文案统一使用品牌中性命名（见 packages/core/src/branding.ts），不暴露底层模型/权重名；
+ * 增强版体积按契约 ≈23.8GB，显存要求 ≥12GB；仅在 Windows 现代运行时下可用。
+ */
+const PROFILE_META: Record<ProvisionProfileId, { title: string; note: string; approxBytes: number }> = {
+  essential: {
+    title: '基础档（快速模式）',
+    note: '运行时 + 快速生成模型 + 语义编码器 + 音频编解码器',
+    approxBytes: 3_400_000_000,
+  },
+  quality: {
+    title: '质量档',
+    note: '精修生成模型（50 步）+ 提示词增强模型',
+    approxBytes: 4_500_000_000,
+  },
+  stems: {
+    title: '分轨档',
+    note: '分轨生成模型（lego 分轨基座）',
+    approxBytes: 2_500_000_000,
+  },
+  xl: {
+    title: '增强版（最佳质量）',
+    note: '增强版快速 / 精修 / 分轨生成模型 + 提示词增强模型（增强版） · 约 23.8GB · 需 ≥12GB 显存 · 仅 Windows 现代运行时',
+    approxBytes: 23_800_000_000,
+  },
+}
+
+/** 是否 Windows 平台（增强版只随现代运行时提供，macOS/Linux 走 legacy 运行时） */
+function isWindowsPlatform(platform: string | undefined): boolean {
+  return (platform ?? '').startsWith('win32')
+}
+
 function humanBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -71,10 +104,11 @@ function humanBytes(bytes: number): string {
  */
 export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'global' } = {}) {
   const pushToast = useStore((s) => s.pushToast)
+  const setSettingsOpen = useStore((s) => s.setSettingsOpen)
   const [status, setStatus] = useState<ProvisionStatus | null>(null)
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<ProvisionProfileId[]>(['essential'])
-  /** P8-B：是否同时下载 LoRA 适配器（自生成数据，默认勾选） */
+  /** P8-B：是否同时下载风格适配器（自生成数据，默认勾选） */
   const [withAdapters, setWithAdapters] = useState(true)
   const [job, setJob] = useState<ProvisionJob | null>(null)
   const [starting, setStarting] = useState(false)
@@ -83,7 +117,9 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
   const [copied, setCopied] = useState(false)
   /** 由 AI 音频意图自动唤起时展示的说明（为什么需要下载） */
   const [reason, setReason] = useState<string | null>(null)
-  /** AI 指定要安装的 profile（不被「建议选择」覆盖） */
+  /** 唤起横幅标题（AI 缺模型 / 用户主动管理档位时文案不同） */
+  const [reasonTitle, setReasonTitle] = useState<string | null>(null)
+  /** AI 指定要安装的 profile（不被「建议选择」覆盖；空数组 = 明确不预选） */
   const [requestedProfiles, setRequestedProfiles] = useState<ProvisionProfileId[] | null>(null)
   const pollTimer = useRef<number | null>(null)
 
@@ -108,10 +144,11 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
     }
   }, [])
 
-  /** 建议选择：缺什么就默认勾什么（质量/分轨只在基础就绪时推荐；AI 指定时优先） */
+  /** 建议选择：缺什么就默认勾什么（质量/分轨只在基础就绪时推荐；AI 指定时优先；增强版绝不自动勾选） */
   useEffect(() => {
     if (!status) return
-    if (requestedProfiles?.length) return
+    /* 显式指定过（含空数组 = 用户自己勾）就不再覆盖 */
+    if (requestedProfiles !== null) return
     const next: ProvisionProfileId[] = ['essential']
     if (!status.profiles.some((item) => item.id === 'quality' && item.ready) && status.profiles.find((item) => item.id === 'essential')?.ready) {
       next.push('quality')
@@ -120,17 +157,22 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
   }, [status, requestedProfiles])
 
   /**
-   * 全局唤起：AI 音频意图检测到本机缺模型时自动打开下载对话框。
-   * detail: { reason?: string; profiles?: ProvisionProfileId[]; source?: string }
+   * 全局唤起：AI 音频意图检测到本机缺模型时自动打开下载对话框；
+   * 顶栏「模型档位」入口也用它打开（detail.profiles = [] 表示不预选，让用户自己勾）。
+   * detail: { reason?: string; title?: string; profiles?: ProvisionProfileId[]; source?: string }
    */
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ reason?: string; profiles?: ProvisionProfileId[] }>).detail ?? {}
-      const request = (detail.profiles ?? ['essential']).filter((id): id is ProvisionProfileId => PROFILE_ORDER.includes(id))
-      const profiles = request.length ? request : (['essential'] as ProvisionProfileId[])
+      const detail = (
+        event as CustomEvent<{ reason?: string; title?: string; profiles?: ProvisionProfileId[] }>
+      ).detail ?? {}
+      const request = Array.isArray(detail.profiles)
+        ? detail.profiles.filter((id): id is ProvisionProfileId => PROFILE_ORDER.includes(id))
+        : (['essential'] as ProvisionProfileId[])
       setReason(detail.reason?.trim() || '音频生成需要本机 AI 引擎与模型。是否现在下载？')
-      setRequestedProfiles(profiles)
-      setSelected(profiles)
+      setReasonTitle(detail.title?.trim() || null)
+      setRequestedProfiles(request)
+      setSelected(request)
       setOpen(true)
       void refresh()
     }
@@ -156,6 +198,8 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
           if (latest.status === 'done') {
             pushToast('success', '本机引擎安装完成，可以开始生成音频了')
             setReason(null)
+            setReasonTitle(null)
+            setRequestedProfiles(null)
             void refresh()
             window.dispatchEvent(new CustomEvent('aiab:provision-done', { detail: { jobId: latest.id, profiles: selected } }))
           } else {
@@ -249,6 +293,27 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                     <code>{status?.platform ?? '检测中'}</code> · 安装到{' '}
                     <code className="break-all">{status?.root ?? '数据目录'}</code>
                   </p>
+                  <p className="mt-0.5 text-[10px] leading-relaxed text-ink-4">
+                    增强版为最佳质量档（约 23.8GB，需 ≥12GB 显存，仅 Windows 现代运行时）；已装基础档后可随时回来加装。
+                  </p>
+                  <p className="mt-0.5 text-[10px] leading-relaxed text-ink-4">
+                    国内网络下载慢？可在{' '}
+                    <button
+                      type="button"
+                      className="text-accent-soft underline decoration-dotted underline-offset-2 hover:text-accent disabled:opacity-50"
+                      data-provision-open-download-settings
+                      onClick={() => {
+                        if (running) return
+                        setOpen(false)
+                        setSettingsOpen(true)
+                      }}
+                      disabled={running}
+                      title="打开设置 → 引擎下载：切换国内镜像 / 多源分片加速 / 服务器离线包"
+                    >
+                      设置 → 引擎下载
+                    </button>{' '}
+                    切换国内镜像 / 多源加速，或使用服务器离线包。
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -266,7 +331,9 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                   <div className="flex items-start gap-1.5 text-[10.5px] leading-relaxed text-ink-2">
                     <TriangleAlert size={12} className="mt-[1px] shrink-0 text-accent" />
                     <div className="min-w-0">
-                      <span className="font-medium text-accent-soft">AI 想生成音频，但本机缺少生成环境。</span>
+                      <span className="font-medium text-accent-soft">
+                        {reasonTitle ?? 'AI 想生成音频，但本机缺少生成环境。'}
+                      </span>
                       <p className="mt-0.5 text-ink-3">{reason}</p>
                       <p className="mt-0.5 text-[9.5px] text-ink-4">
                         下载完成后还需要在跑 GPU 的机器上启动生成节点（Companion），详情见「音频引擎」菜单里的启动命令。
@@ -281,22 +348,34 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                 <div className="space-y-1.5">
                   {PROFILE_ORDER.map((id) => {
                     const info = profiles.find((item) => item.id === id)
+                    const meta = PROFILE_META[id]
                     const checked = selected.includes(id)
                     const ready = info?.ready === true
+                    /* 增强版档只随现代运行时提供（Windows）；其它平台禁用并说明，不静默隐藏 */
+                    const platformBlocked = id === 'xl' && Boolean(status) && !isWindowsPlatform(status?.platform)
+                    const sizeBytes = info && info.downloadBytes > 0 ? info.downloadBytes : meta.approxBytes
                     return (
                       <label
                         key={id}
                         data-provision-profile={id}
+                        data-provision-profile-blocked={platformBlocked ? 'platform' : undefined}
+                        title={
+                          platformBlocked
+                            ? '增强版档只在 Windows（现代运行时）下可用；当前平台请使用基础档位'
+                            : id === 'xl' && !ready
+                              ? '增强版：体积大（约 23.8GB）且需 ≥12GB 显存，默认不勾选'
+                              : undefined
+                        }
                         className={cn(
                           'flex cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-[10.5px]',
                           checked ? 'border-accent/45 bg-accent/8' : 'border-line bg-bg-soft',
-                          running && 'pointer-events-none opacity-70',
+                          (running || platformBlocked) && 'pointer-events-none opacity-70',
                         )}
                       >
                         <input
                           type="checkbox"
                           checked={checked}
-                          disabled={running || ready}
+                          disabled={running || ready || platformBlocked}
                           onChange={(event) => {
                             setSelected((prev) =>
                               event.target.checked ? [...new Set([...prev, id])] : prev.filter((item) => item !== id),
@@ -306,15 +385,19 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                         />
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center gap-1.5">
-                            <span className="font-medium text-ink-2">{info?.label ?? id}</span>
+                            <span className="font-medium text-ink-2">{info?.label ?? meta.title}</span>
                             {ready && <span className="text-success text-[9px]">已就绪</span>}
+                            {platformBlocked && <span className="text-[9px] text-ink-4">当前平台不支持</span>}
                             <span className="ml-auto shrink-0 text-[9px] text-ink-4">
-                              下载 ~{humanBytes(info?.downloadBytes ?? 0)}
+                              下载 ~{humanBytes(sizeBytes)}
                             </span>
                           </span>
-                          <span className="mt-0.5 block truncate text-[9px] text-ink-4">
-                            {(info?.files ?? []).join(' · ')}
-                          </span>
+                          <span className="mt-0.5 block text-[9px] leading-relaxed text-ink-4">{meta.note}</span>
+                          {(info?.files ?? []).length > 0 && (
+                            <span className="mt-0.5 block truncate text-[9px] text-ink-4">
+                              {(info?.files ?? []).join(' · ')}
+                            </span>
+                          )}
                         </span>
                       </label>
                     )
@@ -431,8 +514,16 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                               </span>
                             </span>
                             {/* 失败步骤补出 message（截断展示，title 看全文）：运行时/下载的具体报错原来完全看不到 */}
-                            {step.status === 'failed' && step.message && (
-                              <span className="mt-0.5 block truncate text-danger/90" title={step.message}>
+                            {/* P10：installer 的 message 还带「下载源 / 实时 MB/s」；失败时用红色突出，两套 data-* 都保留 */}
+                            {step.message && (
+                              <span
+                                data-provision-step-message
+                                className={cn(
+                                  'mt-0.5 block truncate',
+                                  step.status === 'failed' ? 'text-danger/90' : 'text-ink-4/90',
+                                )}
+                                title={step.message}
+                              >
                                 {step.message}
                               </span>
                             )}

@@ -74,6 +74,11 @@ export const MODEL_DISPLAY_NAMES = Object.freeze({
   'acestep-v15-sft-Q8_0.gguf': '精修生成模型',
   'acestep-5Hz-lm-1.7B-Q8_0.gguf': '提示词增强模型',
   'acestep-v15-base-Q8_0.gguf': '分轨生成模型',
+  // P9：XL（4B）增强档（展示名保持中性，不暴露真实权重名）
+  'acestep-v15-xl-turbo-Q8_0.gguf': '快速生成模型（增强版）',
+  'acestep-v15-xl-sft-Q8_0.gguf': '精修生成模型（增强版）',
+  'acestep-v15-xl-base-Q8_0.gguf': '分轨生成模型（增强版）',
+  'acestep-5Hz-lm-4B-Q8_0.gguf': '提示词增强模型（增强版）',
 })
 
 /** 引擎变体 → 展示名（进度/错误信息里出现，避免暴露内部变体名） */
@@ -81,6 +86,10 @@ export const VARIANT_DISPLAY_NAMES = Object.freeze({
   turbo: '快速生成模型',
   sft: '精修生成模型',
   base: '分轨生成模型',
+  // P9：XL（4B）变体
+  xl_turbo: '快速生成模型（增强版）',
+  xl_sft: '精修生成模型（增强版）',
+  xl_base: '分轨生成模型（增强版）',
 })
 
 /** 引擎根目录：AIAB_ENGINE_DIR（兼容旧 AIAB_ACESTEP_DIR）> 已安装目录 > 旧版目录 */
@@ -103,24 +112,66 @@ export const ACESTEP_MODELS_DIR =
 export const ACESTEP_BACKEND = process.env.GGML_BACKEND || (process.platform === 'darwin' ? 'METAL' : 'CUDA0')
 /** 缺引擎时给用户的自动安装提示 */
 export const PROVISION_HINT = 'node scripts/provision.mjs install --profile essential'
-/** 三种 DiT 的文件名（模型能力按「文件是否存在」真实上报给服务端做任务匹配） */
+/**
+ * 运行时 API 形态（P9）：产品 Windows 侧已升级到上游现代版（acestep.cpp 2026-11-06），
+ * 使用 `--models <dir>` + 异步 job HTTP API；mac/linux 与旧安装仍是 v0.1.0 legacy。
+ * 判定顺序：AIAB_ACESTEP_API 环境变量 > <引擎目录>/runtime.json 的 api 字段 > legacy。
+ */
+function resolveRuntimeApi() {
+  const explicit = String(process.env.AIAB_ACESTEP_API ?? '').trim().toLowerCase()
+  if (explicit === 'legacy' || explicit === 'modern') return explicit
+  try {
+    const marker = JSON.parse(readFileSync(path.join(ACESTEP_DIR, 'runtime.json'), 'utf8'))
+    if (marker?.api === 'modern') return 'modern'
+  } catch {
+    /* 没有 runtime.json：按旧版开发目录处理 */
+  }
+  return 'legacy'
+}
+/** 'legacy'（v0.1.0：--dit/--lm + 同步 API）或 'modern'（--models + 异步 job API） */
+export const RUNTIME_API = resolveRuntimeApi()
+/** 现代运行时支持 XL 4B 系列；legacy 运行时加载 XL 会在推理时崩溃（已实测） */
+export const MODERN_RUNTIME = RUNTIME_API === 'modern'
+/** 计算设备名（现代运行时用 --device 指定）；macOS 用 MTL0，其它默认 CUDA0 */
+export const ACESTEP_DEVICE =
+  process.env.AIAB_ACESTEP_DEVICE ||
+  process.env.ACESTEP_DEVICE ||
+  (process.platform === 'darwin' ? 'MTL0' : 'CUDA0')
+
+/** DiT 文件名（模型能力按「文件是否存在」真实上报给服务端做任务匹配） */
 export const MODEL_FILENAMES = Object.freeze({
   turbo: 'acestep-v15-turbo-Q8_0.gguf',
   sft: 'acestep-v15-sft-Q8_0.gguf',
   base: 'acestep-v15-base-Q8_0.gguf',
+  xl_turbo: 'acestep-v15-xl-turbo-Q8_0.gguf',
+  xl_sft: 'acestep-v15-xl-sft-Q8_0.gguf',
+  xl_base: 'acestep-v15-xl-base-Q8_0.gguf',
 })
-/** 三种 DiT：turbo = text2music，sft = repaint，base = lego（lego 留后续） */
+/** DiT 路径：turbo = text2music，sft = repaint，base = lego；xl_* = 4B 高质量/快速档 */
 export const MODEL_DITS = Object.freeze({
   turbo: path.join(ACESTEP_MODELS_DIR, MODEL_FILENAMES.turbo),
   sft: path.join(ACESTEP_MODELS_DIR, MODEL_FILENAMES.sft),
   base: path.join(ACESTEP_MODELS_DIR, MODEL_FILENAMES.base),
+  xl_turbo: path.join(ACESTEP_MODELS_DIR, MODEL_FILENAMES.xl_turbo),
+  xl_sft: path.join(ACESTEP_MODELS_DIR, MODEL_FILENAMES.xl_sft),
+  xl_base: path.join(ACESTEP_MODELS_DIR, MODEL_FILENAMES.xl_base),
 })
+/** LoRA 适配器目录（现代运行时用 --adapters 扫描；legacy 用 --lora 单路径） */
+export const ADAPTERS_DIR =
+  process.env.AIAB_ADAPTERS_DIR || path.join(DATA_ROOT, 'adapters')
 /** 与 DiT 搭配的辅助模型 */
 export const MODEL_AUX = Object.freeze({
   embedding: path.join(ACESTEP_MODELS_DIR, 'Qwen3-Embedding-0.6B-Q8_0.gguf'),
   vae: path.join(ACESTEP_MODELS_DIR, 'vae-BF16.gguf'),
-  /** 质量档（P7-A）用的 LM：/lm 提示词增强 + 语义 codes */
+  /** 质量档（P7-A）用的 LM：/lm 提示词增强 + 语义 codes（2B 引擎用 1.7B） */
   lm: path.join(ACESTEP_MODELS_DIR, 'acestep-5Hz-lm-1.7B-Q8_0.gguf'),
+  lm17: path.join(ACESTEP_MODELS_DIR, 'acestep-5Hz-lm-1.7B-Q8_0.gguf'),
+  lm4b: path.join(ACESTEP_MODELS_DIR, 'acestep-5Hz-lm-4B-Q8_0.gguf'),
+})
+/** LM 档位 → 文件名/路径（'' = 不需要 LM） */
+export const LM_TIERS = Object.freeze({
+  '1.7B': { file: 'acestep-5Hz-lm-1.7B-Q8_0.gguf', path: MODEL_AUX.lm17 },
+  '4B': { file: 'acestep-5Hz-lm-4B-Q8_0.gguf', path: MODEL_AUX.lm4b },
 })
 
 /** 质量档（P7-A）：/lm → /synth（sft 50 步）。真机实测 20s 音频约 15–25s。 */
@@ -129,8 +180,10 @@ export const QUALITY_GUIDANCE = 1.0
 export const QUALITY_SHIFT = 1.0
 /** P2-A 支持的任务类型所必需的模型文件（base/lego 未开放，不强制要求） */
 const REQUIRED_MODEL_FILES = [ACESTEP_BIN, MODEL_AUX.embedding, MODEL_AUX.vae, MODEL_DITS.turbo, MODEL_DITS.sft]
-/** 合法的引擎变体（服务端 requiredVariant 的取值域） */
-export const ENGINE_VARIANTS = ['turbo', 'sft', 'base']
+/** 合法的引擎变体（服务端 requiredVariant 的取值域；xl_* 仅在 modern 运行时可用） */
+export const ENGINE_VARIANTS = ['turbo', 'sft', 'base', 'xl_turbo', 'xl_sft', 'xl_base']
+/** 现代运行时下可用的 XL 变体（legacy 运行时不支持） */
+export const XL_VARIANTS = ['xl_turbo', 'xl_sft', 'xl_base']
 /** mock 执行器三种任务都能伪造，按契约上报 turbo/sft/base（含 base 才能接到 generate_stem 做 UI 联调） */
 const MOCK_MODEL_VARIANTS = ['turbo', 'sft', 'base']
 /** lego 分轨的合法 arm（base 基座），以及 caption 缺省时的英文描述 */
@@ -443,10 +496,12 @@ export function buildRegisterBody({ name, version = COMPANION_VERSION, executor 
 
 /**
  * 扫描 models 目录，按真实存在的 GGUF 得出本机支持的 DiT 变体（纯函数，exists 可注入便于测试）。
- * 服务端用 capabilities.models 做任务能力匹配；返回顺序固定 turbo/sft/base。
+ * XL 变体只在 modern 运行时（支持 4B DiT）下上报；legacy 运行时下即使文件存在也不上报。
+ * 服务端用 capabilities.models 做任务能力匹配；返回顺序固定 turbo/sft/base/xl_turbo/xl_sft/xl_base。
  */
-export function detectModelVariants({ exists = existsSync, modelsDir = ACESTEP_MODELS_DIR } = {}) {
+export function detectModelVariants({ exists = existsSync, modelsDir = ACESTEP_MODELS_DIR, modern = MODERN_RUNTIME } = {}) {
   return ENGINE_VARIANTS.filter((variant) => {
+    if (!modern && XL_VARIANTS.includes(variant)) return false
     try {
       return Boolean(exists(path.join(modelsDir, MODEL_FILENAMES[variant])))
     } catch {
@@ -455,13 +510,14 @@ export function detectModelVariants({ exists = existsSync, modelsDir = ACESTEP_M
   })
 }
 
-/** capabilities：mock 上报 turbo+sft；acestep 按真实存在的 GGUF 上报模型变体 + GPU 后端。 */
+/** capabilities：mock 上报 turbo+sft；acestep 按真实存在的 GGUF 上报模型变体 + GPU 后端 + 运行时形态。 */
 export function buildCapabilities(executor = 'acestep', { variants } = {}) {
   const tasks = [...TASKS]
   if (executor === 'mock') return { tasks, models: [...MOCK_MODEL_VARIANTS] }
   return {
     tasks,
     gpu: ACESTEP_BACKEND,
+    api: RUNTIME_API,
     models: variants ? [...variants] : detectModelVariants(),
   }
 }
@@ -480,11 +536,30 @@ export function normalizePriority(value) {
   return value === 1 || value === 2 ? value : 0
 }
 
-/** 任务类型 → 需要的 DiT 变体；未知类型返回 undefined（仍交给执行器报错，不做硬校验）。 */
+/** 任务参数里的引擎量级：'2b'（默认，快）或 'xl'（4B，最高质量） */
+export function normalizeEngineTier(params = {}) {
+  return params?.engine === 'xl' ? 'xl' : '2b'
+}
+
+/** 质量档/分轨需要的 LM 档位：XL 引擎用 4B，2B 引擎用 1.7B；快模式不需要 LM（''）。 */
+export function lmTierForTask(type, params = {}, variant = '') {
+  if (type === TASK_TYPE_GENERATE && params?.quality === true) return normalizeEngineTier(params) === 'xl' ? '4B' : '1.7B'
+  // 现代运行时的 lego 走 LM 生成 codes；旧版运行时 stem 历来不需要 --lm，保持原行为
+  if (type === TASK_TYPE_STEM && MODERN_RUNTIME) return normalizeEngineTier(params) === 'xl' ? '4B' : '1.7B'
+  return ''
+}
+
+/** 任务类型 + 引擎档位 → 需要的 DiT 变体；未知类型返回 undefined（仍交给执行器报错，不做硬校验）。 */
 export function inferRequiredVariant(type, params = {}) {
-  // P7-A：质量模式 generate_audio 实际走 sft+LM，派单/校验都按 sft
-  if (type === TASK_TYPE_GENERATE && params?.quality === true) return 'sft'
-  return TASK_VARIANT[type] ?? undefined
+  const xl = normalizeEngineTier(params) === 'xl'
+  if (type === TASK_TYPE_GENERATE) {
+    if (params?.quality === true) return xl ? 'xl_sft' : 'sft'
+    return xl ? 'xl_turbo' : 'turbo'
+  }
+  if (type === TASK_TYPE_REPAINT) return xl ? 'xl_sft' : 'sft'
+  if (type === TASK_TYPE_STEM) return xl ? 'xl_base' : 'base'
+  if (type === TASK_TYPE_COVER) return xl ? 'xl_turbo' : 'turbo'
+  return undefined
 }
 
 /** claim 响应 → 任务信封；204/空响应返回 null。形状不对立刻报错；旧服务端缺 priority/requiredVariant 时补默认值。 */
@@ -744,30 +819,42 @@ export function buildSynthMultipart({ request, audio, fileName = 'source.wav', b
 /* 进度估算 / 取消判定 / 引擎调度（纯函数）                              */
 /* ------------------------------------------------------------------ */
 
-/** 任务类型 → DiT 变体；不支持的类型抛中文错误。 */
-export function variantForTask(type) {
-  const variant = TASK_VARIANT[type]
-  if (!variant) throw new Error(`不支持的任务类型：${type}（当前支持：${TASKS.join('、')}）`)
-  return variant
+/** 任务类型 + 引擎档位 → DiT 变体；不支持的类型抛中文错误。 */
+export function variantForTask(type, params = {}) {
+  if (!TASKS.includes(type)) throw new Error(`不支持的任务类型：${type}（当前支持：${TASKS.join('、')}）`)
+  return inferRequiredVariant(type, params)
+}
+
+/** 适配器所在目录：现代运行时按目录扫描（--adapters），legacy 直接给适配器路径。 */
+export function adapterDirOf(adapterPath) {
+  if (!adapterPath) return ''
+  return MODERN_RUNTIME ? path.dirname(String(adapterPath)) : String(adapterPath)
 }
 
 /**
  * 引擎复用决策（纯函数）：
- * - reuse：同变体 + 同 LoRA 适配器且 ready → 复用（调用方仍需做 /health 探活）；
- * - switch：当前有引擎但变体/适配器不同 → 停旧起新；
+ * - legacy：同变体 + 同 LoRA 适配器 + 同 LM 档位且 ready → 复用；否则停旧起新；
+ * - modern：一个引擎进程按请求选择模型与 LM，只有「适配器目录」变化才需要重启；
  * - start：没有可用引擎（首次 / 崩溃后）。
  */
 export function engineDecision({
+  api = RUNTIME_API,
   currentVariant,
   currentAdapterPath,
-  currentLm = false,
+  currentLm = '',
   state,
   desiredVariant,
   desiredAdapterPath,
-  desiredLm = false,
+  desiredLm = '',
 } = {}) {
-  const sameAdapter = (currentAdapterPath ?? '') === (desiredAdapterPath ?? '')
-  const sameLm = Boolean(currentLm) === Boolean(desiredLm)
+  const sameAdapter = adapterDirOf(currentAdapterPath) === adapterDirOf(desiredAdapterPath)
+  const normalizeLm = (value) => (typeof value === 'string' ? value.trim() : value ? '1.7B' : '')
+  const sameLm = normalizeLm(currentLm) === normalizeLm(desiredLm)
+  if (api === 'modern') {
+    if (state === 'ready' && sameAdapter) return 'reuse'
+    if (currentVariant && state !== 'stopped' && state !== 'crashed') return 'switch'
+    return 'start'
+  }
   if (currentVariant && currentVariant === desiredVariant && sameAdapter && sameLm && state === 'ready') return 'reuse'
   if (
     currentVariant &&
@@ -780,12 +867,13 @@ export function engineDecision({
   return 'start'
 }
 
-/** 引擎展示名（用于任务进度/日志，不暴露内部变体名）。 */
-export function engineLabel(variant, adapterPath, lm = false) {
+/** 引擎展示名（用于任务进度/日志，不暴露内部变体名；LM 档位仍按 P9 逻辑展示 1.7B/4B）。 */
+export function engineLabel(variant, adapterPath, lm = '') {
   if (!variant) return '无'
   const adapterName = adapterPath ? path.basename(String(adapterPath)) : ''
   const base = VARIANT_DISPLAY_NAMES[variant] ?? '生成模型'
-  const suffix = lm ? '（含提示词增强）' : ''
+  const lmTier = typeof lm === 'string' ? lm.trim() : lm ? '1.7B' : ''
+  const suffix = lmTier ? `（含提示词增强 ${lmTier}）` : ''
   return (adapterName ? `${base}+风格适配器(${adapterName})` : base) + suffix
 }
 
@@ -834,33 +922,37 @@ export function estimateProgress({ elapsedMs = 0, estimatedMs = 0, from = 0.3, t
 /**
  * 预计合成耗时（秒，纯函数，仅用于进度估算，不影响正确性）：
  * - repaint：sft 50 步，实测 20s 源音频重绘 6-12s 区间约 14.3s → 10 + 区间*0.8；
- * - generate：turbo 8 步 → 8 + 时长*0.3。
+ * - generate：turbo 8 步 → 8 + 时长*0.3；
+ * - XL（4B）各任务约 1.6–1.9 倍（diffusion 更重，仅为估算）。
  */
 export function estimateGenerationSeconds({ type, params = {} } = {}) {
+  const xl = params?.engine === 'xl'
+  const factor = xl ? (params?.quality === true ? 1.9 : 1.65) : 1
+  const scale = (seconds) => seconds * factor
   if (params?.quality === true) {
     const duration = Number(params?.durationSec)
     const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 30
-    return Math.min(600, Math.max(20, 20 + safeDuration * 1.2))
+    return scale(Math.min(600, Math.max(20, 20 + safeDuration * 1.2)))
   }
   if (type === TASK_TYPE_STEM) {
     // base 50 步；实测 20s 源音频单条 stem 1.7–14.5s，取 10 + 源时长*0.5 作估算
     const duration = Number(params?.sourceDurationSec)
     const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 20
-    return Math.min(300, Math.max(12, 10 + safeDuration * 0.5))
+    return scale(Math.min(300, Math.max(12, 10 + safeDuration * 0.5)))
   }
   if (type === TASK_TYPE_COVER) {
     const duration = Number(params?.sourceDurationSec)
     const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 20
-    return Math.min(300, Math.max(12, 8 + safeDuration * 0.6))
+    return scale(Math.min(300, Math.max(12, 8 + safeDuration * 0.6)))
   }
   if (type === TASK_TYPE_REPAINT) {
     const region = Number(params?.endSec) - Number(params?.startSec)
     const safeRegion = Number.isFinite(region) && region > 0 ? region : 10
-    return Math.min(300, Math.max(12, 10 + safeRegion * 0.8))
+    return scale(Math.min(300, Math.max(12, 10 + safeRegion * 0.8)))
   }
   const duration = Number(params?.durationSec)
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 30
-  return Math.min(300, Math.max(10, 8 + safeDuration * 0.3))
+  return scale(Math.min(300, Math.max(10, 8 + safeDuration * 0.3)))
 }
 
 /** progress 响应是否要求取消（纯函数）。 */
@@ -1074,6 +1166,7 @@ export class EngineManager {
     fetchImpl = (...args) => fetch(...args),
     now = () => Date.now(),
     portRange = [ACESTEP_PORT_MIN, ACESTEP_PORT_MAX],
+    api = RUNTIME_API,
   } = {}) {
     this.idleMs = Math.max(0, Number(idleMs) || 0)
     this.log = log
@@ -1081,10 +1174,11 @@ export class EngineManager {
     this.fetchImpl = fetchImpl
     this.now = now
     this.portRange = portRange
+    this.api = api
     this.child = null
     this.variant = null
     this.adapterPath = null
-    this.lm = false
+    this.lm = ''
     this.state = 'stopped'
     this.port = null
     this.baseUrl = null
@@ -1101,9 +1195,10 @@ export class EngineManager {
   status() {
     return {
       state: this.state,
+      api: this.api,
       variant: this.variant,
       adapterPath: this.adapterPath ?? undefined,
-      lm: this.lm,
+      lm: this.lm || null,
       pid: this.child?.pid ?? null,
       port: this.port,
       warm: this.state === 'ready',
@@ -1114,7 +1209,7 @@ export class EngineManager {
   /** 心跳里上报的引擎信息；没有引擎时返回 undefined（buildAuthBody 会丢弃）。 */
   heartbeatInfo() {
     if (!this.child) return undefined
-    const info = { variant: this.variant, pid: this.child.pid, warm: this.state === 'ready', lm: this.lm }
+    const info = { variant: this.variant, pid: this.child.pid, warm: this.state === 'ready', lm: this.lm || null, api: this.api }
     if (this.adapterPath) info.adapter = path.basename(this.adapterPath)
     return info
   }
@@ -1172,13 +1267,14 @@ export class EngineManager {
     }
   }
 
-  /** 主入口：确保所需变体（+可选 LoRA）就绪，返回 { variant, adapterPath, pid, warm, baseUrl }。 */
-  async ensure(desiredVariant, { adapterPath, signal, onProgress, lm = false } = {}) {
+  /** 主入口：确保所需变体（+可选 LoRA/LM）就绪，返回 { variant, adapterPath, lm, pid, warm, baseUrl }。 */
+  async ensure(desiredVariant, { adapterPath, signal, onProgress, lm = '' } = {}) {
     if (!MODEL_DITS[desiredVariant]) throw new Error(`未知引擎能力：${VARIANT_DISPLAY_NAMES[desiredVariant] ?? '生成模型'}`)
     throwIfAborted(signal)
     const desiredAdapter = adapterPath || null
-    const desiredLm = Boolean(lm)
+    const desiredLm = typeof lm === 'string' ? lm.trim() : lm ? '1.7B' : ''
     const decision = engineDecision({
+      api: this.api,
       currentVariant: this.variant,
       currentAdapterPath: this.adapterPath,
       currentLm: this.lm,
@@ -1216,11 +1312,12 @@ export class EngineManager {
     return engine
   }
 
-  async start(variant, { adapterPath, lm = false, signal, onProgress } = {}) {
+  async start(variant, { adapterPath, lm = '', signal, onProgress } = {}) {
     throwIfAborted(signal)
     const ditPath = MODEL_DITS[variant]
     const adapter = adapterPath || null
-    const useLm = Boolean(lm)
+    const useLm = typeof lm === 'string' ? lm.trim() : lm ? '1.7B' : ''
+    const modern = this.api === 'modern'
     await onProgress?.(0.15, `引擎启动中（${engineLabel(variant, adapter, useLm)}）`)
     throwIfAborted(signal)
     const [portMin, portMax] = this.portRange
@@ -1253,26 +1350,46 @@ export class EngineManager {
       }
       this.logTail = `${this.logTail}${chunk.toString('utf8')}`.slice(-4000)
     }
-    const args = [
-      '--host', '127.0.0.1',
-      '--port', String(port),
-      '--sleep', '300',
-      '--embedding', MODEL_AUX.embedding,
-      '--dit', ditPath,
-      '--vae', MODEL_AUX.vae,
-    ]
-    if (adapter) args.push('--lora', adapter, '--lora-scale', '1.0')
-    if (useLm) {
-      if (!existsSync(MODEL_AUX.lm)) {
+    let args
+    if (modern) {
+      if (!existsSync(ACESTEP_MODELS_DIR)) {
         this.state = 'stopped'
         this.closeLogStream()
-        throw new Error('质量模式需要提示词增强模型，但本机缺少该模型文件：请重新下载“质量增强”能力')
+        throw new Error('现代运行时需要模型目录，但本机缺少模型文件：请重新安装本机引擎')
       }
-      args.push('--lm', MODEL_AUX.lm)
+      args = [
+        '--models', ACESTEP_MODELS_DIR,
+        '--host', '127.0.0.1',
+        '--port', String(port),
+        '--device', ACESTEP_DEVICE,
+      ]
+      const adaptersDir = adapter ? path.dirname(adapter) : ADAPTERS_DIR
+      if (existsSync(adaptersDir)) args.push('--adapters', adaptersDir)
+    } else {
+      args = [
+        '--host', '127.0.0.1',
+        '--port', String(port),
+        '--sleep', '300',
+        '--embedding', MODEL_AUX.embedding,
+        '--dit', ditPath,
+        '--vae', MODEL_AUX.vae,
+      ]
+      if (adapter) args.push('--lora', adapter, '--lora-scale', '1.0')
+      if (useLm) {
+        if (useLm !== '1.7B') throw new Error(`旧版运行时只支持 1.7B 档提示词增强（收到 ${useLm}）；增强档需要现代运行时`)
+        if (!existsSync(MODEL_AUX.lm)) {
+          this.state = 'stopped'
+          this.closeLogStream()
+          throw new Error('质量模式需要提示词增强模型，但本机缺少该模型文件：请重新下载“质量增强”能力')
+        }
+        args.push('--lm', MODEL_AUX.lm)
+      }
     }
-    this.log(`启动 AI 音频生成引擎：variant=${engineLabel(variant, adapter, useLm)} port=${port} 日志=${logPath}`)
-    if (variant === 'base') {
-      this.log('base 变体用于 lego 分轨（generate_stem），冷启动较慢（真机实测 ~36s），请耐心等待…')
+    this.log(`启动 AI 音频生成引擎：api=${this.api} variant=${engineLabel(variant, adapter, useLm)} port=${port} 日志=${logPath}`)
+    if (modern) {
+      this.log('现代运行时：模型按请求按需加载（增强版首次任务约 30–60s），同一进程可切换变体不重启')
+    } else if (variant === 'base') {
+      this.log('分轨生成模型用于 lego 分轨（generate_stem），冷启动较慢（真机实测 ~36s），请耐心等待…')
     }
     let child
     try {
@@ -1300,7 +1417,7 @@ export class EngineManager {
       this.state = 'crashed'
       this.variant = null
       this.adapterPath = null
-      this.lm = false
+      this.lm = ''
       this.port = null
       this.baseUrl = null
       this.closeLogStream()
@@ -1335,7 +1452,7 @@ export class EngineManager {
     this.state = 'stopped'
     this.variant = null
     this.adapterPath = null
-    this.lm = false
+    this.lm = ''
     this.port = null
     this.baseUrl = null
     if (child) {
@@ -1407,7 +1524,7 @@ export function resolveAdapterPath(params = {}) {
 }
 
 /** 领取/复用引擎（引擎启动进度由 EngineManager 经 onProgress 上报 0.15）。 */
-async function acquireEngine({ ctx, engineManager, variant, adapterPath, lm = false }) {
+async function acquireEngine({ ctx, engineManager, variant, adapterPath, lm = '' }) {
   const startedAt = Date.now()
   const engine = await engineManager.ensure(variant, {
     adapterPath,
@@ -1425,6 +1542,14 @@ async function acquireEngine({ ctx, engineManager, variant, adapterPath, lm = fa
 
 function logAdapterUsage(ctx, params, adapterPath) {
   if (!params?.adapterId) return
+  if (isModernRuntime()) {
+    ctx.log(
+      adapterPath
+        ? `LoRA 适配器：adapterId=${params.adapterId} → 请求里 adapter=${path.basename(adapterPath)}`
+        : `LoRA 适配器：adapterId=${params.adapterId}（服务端未下发 adapterPath，按基座执行）`,
+    )
+    return
+  }
   ctx.log(
     adapterPath
       ? `风格适配器：adapterId=${params.adapterId} → 启动引擎时 --lora ${adapterPath}`
@@ -1466,11 +1591,179 @@ export function buildCoverRequest(validated) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 现代运行时（modern API）：请求按模型选择 + 异步 job                     */
+/* ------------------------------------------------------------------ */
+
+/** 当前是否现代运行时（--models + 异步 job API）。 */
+function isModernRuntime() {
+  return RUNTIME_API === 'modern'
+}
+
+/**
+ * 现代运行时：把 DiT/LM 选择（以及 WAV 输出格式）写进 /lm、/synth 请求体。
+ * 纯函数（不改入参），旧运行时原样返回。
+ */
+export function applyModelSelection(payload = {}, { variant, lmTier = '' } = {}) {
+  if (!isModernRuntime()) return payload
+  const next = { ...payload }
+  if (variant && MODEL_FILENAMES[variant]) next.synth_model = MODEL_FILENAMES[variant]
+  if (lmTier && LM_TIERS[lmTier]) next.lm_model = LM_TIERS[lmTier].file
+  next.output_format = 'wav16'
+  return next
+}
+
+/** POST 一个现代运行时异步 job，返回 job id。 */
+async function postAceJob({ baseUrl, path: jobPath, body, contentType, timeoutMs = REQUEST_TIMEOUT_MS, signal }) {
+  const headers = { 'User-Agent': USER_AGENT, 'Content-Type': contentType || 'application/json' }
+  let response
+  try {
+    response = await fetch(`${baseUrl}${jobPath}`, {
+      method: 'POST',
+      headers,
+      body,
+      signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]),
+    })
+  } catch (error) {
+    if (signal?.aborted) throw new CancelledError('任务已取消')
+    if (error?.name === 'TimeoutError') throw new Error(`AI 音频生成引擎 ${jobPath} 提交超时（${Math.round(timeoutMs / 1000)}s）`)
+    throw new Error(`调用 AI 音频生成引擎 ${jobPath} 失败：${fetchFailureDetail(error)}`)
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`AI 音频生成引擎 ${jobPath} 失败（HTTP ${response.status}）：${truncate(text, 300)}`)
+  }
+  let parsed
+  try {
+    parsed = await response.json()
+  } catch {
+    throw new Error(`AI 音频生成引擎 ${jobPath} 返回的不是 JSON（缺少 job id）`)
+  }
+  const jobId = parsed?.id
+  if (!jobId) throw new Error(`AI 音频生成引擎 ${jobPath} 未返回 job id`)
+  return String(jobId)
+}
+
+/** 轮询 job 直到 done/failed/cancelled；超时抛中文错误。 */
+async function waitAceJob({ baseUrl, jobId, timeoutMs, signal, label = '任务', logTail = () => '' }) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    throwIfAborted(signal)
+    let response
+    try {
+      response = await fetch(`${baseUrl}/job?id=${encodeURIComponent(jobId)}`, {
+        signal: AbortSignal.any([AbortSignal.timeout(15_000), ...(signal ? [signal] : [])]),
+      })
+    } catch (error) {
+      if (signal?.aborted) throw new CancelledError('任务已取消')
+      throw new Error(`查询 AI 音频生成引擎 job 失败：${fetchFailureDetail(error)}`)
+    }
+    if (!response.ok) throw new Error(`查询 AI 音频生成引擎 job 失败（HTTP ${response.status}）${aceLogTail(logTail())}`)
+    let status = ''
+    try {
+      status = String((await response.json())?.status ?? '')
+    } catch {
+      status = ''
+    }
+    if (status === 'done') return
+    if (status === 'failed') throw new Error(`AI 音频生成引擎 ${label}失败（job ${jobId}）${aceLogTail(logTail())}`)
+    if (status === 'cancelled') throw new Error(`AI 音频生成引擎 ${label}已取消（job ${jobId}）`)
+    await sleep(1000)
+  }
+  throw new Error(`AI 音频生成引擎 ${label}超时（${Math.round(timeoutMs / 1000)}s）${aceLogTail(logTail())}`)
+}
+
+/** 取现代运行时 job 结果（原始 Response，可能是 multipart/mixed）。 */
+async function fetchAceJobResult({ baseUrl, jobId, timeoutMs = 300_000, signal }) {
+  let response
+  try {
+    response = await fetch(`${baseUrl}/job?id=${encodeURIComponent(jobId)}&result=1`, {
+      signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]),
+    })
+  } catch (error) {
+    if (signal?.aborted) throw new CancelledError('任务已取消')
+    throw new Error(`获取 AI 音频生成引擎 job 结果失败：${fetchFailureDetail(error)}`)
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`获取 AI 音频生成引擎 job 结果失败（HTTP ${response.status}）：${truncate(text, 300)}`)
+  }
+  return response
+}
+
+/** 尽力取消现代运行时 job（失败忽略；取消主要靠杀引擎保证）。 */
+async function cancelAceJob(baseUrl, jobId) {
+  if (!jobId) return
+  try {
+    await fetch(`${baseUrl}/job?id=${encodeURIComponent(jobId)}&cancel=1`, {
+      method: 'POST',
+      headers: { 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 从 multipart/mixed（或裸 WAV）响应里取出 WAV 音频段。 */
+export function extractWavFromMultipart(buffer, contentType = '') {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('AI 音频生成引擎 返回为空')
+  const asWav = (chunk) => chunk.subarray(0, 4).toString('latin1') === 'RIFF'
+  if (!/multipart/i.test(contentType)) {
+    if (asWav(buffer)) return buffer
+    throw new Error(`AI 音频生成引擎 返回的不是 WAV（${buffer.length} 字节，content-type=${contentType || '未知'}）`)
+  }
+  const boundaryMatch = /boundary="?([^";]+)"?/i.exec(contentType)
+  if (!boundaryMatch) throw new Error('AI 音频生成引擎 返回的 multipart 缺少 boundary')
+  const marker = `--${boundaryMatch[1]}`
+  const parts = []
+  let index = buffer.indexOf(marker)
+  while (index >= 0) {
+    const start = index + marker.length
+    const next = buffer.indexOf(marker, start)
+    if (next < 0) break
+    const chunk = buffer.subarray(start, next)
+    const headerEnd = chunk.indexOf('\r\n\r\n')
+    if (headerEnd >= 0) {
+      const body = chunk.subarray(headerEnd + 4)
+      const clean = body.subarray(0, Math.max(0, body.length - 2))
+      if (asWav(clean)) parts.push(clean)
+    }
+    index = next
+  }
+  if (parts.length === 0) throw new Error(`AI 音频生成引擎 multipart 结果里没有 WAV（${buffer.length} 字节）`)
+  return parts[0]
+}
+
 /**
  * 质量档（P7-A）第一步：/lm 提示词增强 + 生成语义 codes。
  * 网络/服务错误转成可读中文；取消沿用 ctx.signal。
+ * 现代运行时走异步 job：POST /lm → 轮询 → GET 结果 JSON。
  */
 async function postLm({ ctx, baseUrl, body, timeoutMs = ACESTEP_LM_TIMEOUT_MS }) {
+  if (isModernRuntime()) {
+    const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), ctx.signal])
+    const jobId = await postAceJob({ baseUrl, path: '/lm', body, timeoutMs: 60_000, signal })
+    try {
+      await waitAceJob({ baseUrl, jobId, timeoutMs, signal, label: '/lm' })
+    } catch (error) {
+      if (ctx.isCanceled?.()) {
+        await cancelAceJob(baseUrl, jobId)
+        throw new CancelledError(ctx.cancelReason?.() ?? '用户取消')
+      }
+      throw error
+    }
+    const response = await fetchAceJobResult({ baseUrl, jobId, timeoutMs: 120_000, signal })
+    let parsed
+    try {
+      parsed = await response.json()
+    } catch {
+      throw new Error('AI 音频生成引擎 /lm 返回的不是 JSON')
+    }
+    const first = Array.isArray(parsed) ? parsed[0] : parsed
+    if (!first || typeof first !== 'object') throw new Error('AI 音频生成引擎 /lm 返回为空')
+    return first
+  }
   let response
   try {
     response = await fetch(`${baseUrl}/lm`, {
@@ -1540,20 +1833,38 @@ async function postSynthWithProgress({
       }
     }
   })()
+  let currentJobId = ''
   try {
-    const headers = { 'User-Agent': USER_AGENT }
-    if (contentType) headers['Content-Type'] = contentType
-    const response = await fetch(`${baseUrl}/synth?wav=1`, {
-      method: 'POST',
-      headers,
-      body,
-      signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ctx.signal, pollAbort.signal]),
-    })
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      throw new Error(`AI 音频生成引擎 /synth 失败（HTTP ${response.status}）：${truncate(text, 300)}`)
+    let file
+    if (isModernRuntime()) {
+      const jobSignal = AbortSignal.any([AbortSignal.timeout(timeoutMs), ctx.signal, pollAbort.signal])
+      currentJobId = await postAceJob({ baseUrl, path: '/synth', body, contentType, timeoutMs: 120_000, signal: jobSignal })
+      await waitAceJob({
+        baseUrl,
+        jobId: currentJobId,
+        timeoutMs,
+        signal: jobSignal,
+        label: '合成',
+        logTail: () => engineManager?.logTail,
+      })
+      const resultResponse = await fetchAceJobResult({ baseUrl, jobId: currentJobId, timeoutMs: 300_000, signal: jobSignal })
+      const buffer = Buffer.from(await resultResponse.arrayBuffer())
+      file = extractWavFromMultipart(buffer, resultResponse.headers.get('content-type') || '')
+    } else {
+      const headers = { 'User-Agent': USER_AGENT }
+      if (contentType) headers['Content-Type'] = contentType
+      const response = await fetch(`${baseUrl}/synth?wav=1`, {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ctx.signal, pollAbort.signal]),
+      })
+      if (!response.ok) {
+        const text = await response.text().catch(() => '')
+        throw new Error(`AI 音频生成引擎 /synth 失败（HTTP ${response.status}）：${truncate(text, 300)}`)
+      }
+      file = Buffer.from(await response.arrayBuffer())
     }
-    const file = Buffer.from(await response.arrayBuffer())
     try {
       readWavInfo(file)
     } catch {
@@ -1562,6 +1873,7 @@ async function postSynthWithProgress({
     return file
   } catch (error) {
     if (canceled || ctx.isCanceled()) {
+      await cancelAceJob(baseUrl, currentJobId)
       await engineManager.kill(ctx.cancelReason())
       throw new CancelledError(ctx.cancelReason())
     }
@@ -1646,32 +1958,45 @@ async function runGenerate(task, ctx, { engineManager }) {
   const params = task.params ?? {}
   const adapterPath = resolveAdapterPath(params)
   const quality = params.quality === true
+  const engineTier = normalizeEngineTier(params)
+  const variant = variantForTask(TASK_TYPE_GENERATE, params)
+  const lmTier = quality ? lmTierForTask(TASK_TYPE_GENERATE, params, variant) : ''
+  if (engineTier === 'xl' && !MODERN_RUNTIME) {
+    throw new Error('XL 引擎需要现代运行时（旧版运行时不支持 4B 模型）；请先安装最新本机引擎')
+  }
   if (quality && adapterPath) {
     throw new Error('质量模式使用精修生成模型，暂不支持同时使用风格适配器：请关闭适配器，或改用快速模式')
   }
-  if (quality && !existsSync(MODEL_AUX.lm)) {
-    throw new Error('质量模式需要提示词增强模型，但本机缺少该模型文件：请重新下载“质量增强”能力')
+  if (quality) {
+    const lmPath = LM_TIERS[lmTier]?.path
+    if (!lmPath || !existsSync(lmPath)) {
+      throw new Error(`质量模式需要提示词增强模型（${lmTier} 档），但本机缺少该模型文件：请重新下载“质量增强”能力`)
+    }
+  }
+  if (!existsSync(MODEL_DITS[variant])) {
+    throw new Error(`缺少${VARIANT_DISPLAY_NAMES[variant] ?? '生成模型'}模型文件，请先安装对应模型档`)
   }
   logAdapterUsage(ctx, params, adapterPath)
-  const variant = quality ? 'sft' : 'turbo'
-  const payload = quality ? buildQualityLmRequest(params) : buildSynthPayload(params)
+  const basePayload = quality ? buildQualityLmRequest(params) : buildSynthPayload(params)
+  const lmPayload = quality ? applyModelSelection(basePayload, { variant, lmTier }) : basePayload
   ctx.log(
-    `执行 generate_audio（${engineLabel(variant, adapterPath, quality)}，${payload.duration}s / ${payload.bpm ?? params.bpm ?? '?'} BPM / ${payload.keyscale ?? params.keyscale ?? '?'}${quality ? '，质量模式：精修 50 步' : ''}）`,
+    `执行 generate_audio（${engineLabel(variant, adapterPath, lmTier)}，${basePayload.duration}s / ${basePayload.bpm ?? params.bpm ?? '?'} BPM / ${basePayload.keyscale ?? params.keyscale ?? '?'}${quality ? `，质量模式：提示词增强(${lmTier})→${VARIANT_DISPLAY_NAMES[variant] ?? '精修生成模型'} ${QUALITY_STEPS} 步` : ''}）`,
   )
   await ctx.progress(0.05, '准备任务')
-  const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath, lm: quality })
+  const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath, lm: lmTier })
   try {
     if (quality) {
-      await ctx.progress(0.3, engine.warm ? '复用常驻引擎（精修 + 提示词增强）' : '开始质量合成（精修 + 提示词增强）')
+      const engineHint = `（${VARIANT_DISPLAY_NAMES[variant] ?? '精修生成模型'} + 提示词增强 ${lmTier}）`
+      await ctx.progress(0.3, engine.warm ? `复用常驻引擎${engineHint}` : `开始质量合成${engineHint}`)
       const lmStartedAt = Date.now()
-      const lmResult = await postLm({ ctx, baseUrl: engine.baseUrl, body: JSON.stringify(payload) })
+      const lmResult = await postLm({ ctx, baseUrl: engine.baseUrl, body: JSON.stringify(lmPayload) })
       const codeLen = typeof lmResult.audio_codes === 'string' ? lmResult.audio_codes.length : 0
       ctx.log(`LM 返回字段：${Object.keys(lmResult).join(',')}（audio_codes ${codeLen} 字符）`)
-      const synthRequest = buildQualitySynthRequest(lmResult, params)
+      const synthRequest = applyModelSelection(buildQualitySynthRequest(lmResult, params), { variant, lmTier })
       ctx.log(
-        `LM 完成（${((Date.now() - lmStartedAt) / 1000).toFixed(1)}s）：bpm=${synthRequest.bpm ?? '?'} key=${synthRequest.keyscale ?? '?'} → 精修 ${QUALITY_STEPS} 步合成`,
+        `LM 完成（${((Date.now() - lmStartedAt) / 1000).toFixed(1)}s）：bpm=${synthRequest.bpm ?? '?'} key=${synthRequest.keyscale ?? '?'} → ${VARIANT_DISPLAY_NAMES[variant] ?? '精修生成模型'} ${QUALITY_STEPS} 步合成`,
       )
-      await ctx.progress(0.4, '合成中（质量模式 50 步）')
+      await ctx.progress(0.4, `合成中（质量模式 ${QUALITY_STEPS} 步）`)
       const estimatedMs = Math.max(20_000, estimateGenerationSeconds({ type: TASK_TYPE_GENERATE, params }) * 1000)
       const file = await postSynthWithProgress({
         ctx,
@@ -1687,7 +2012,10 @@ async function runGenerate(task, ctx, { engineManager }) {
       return { file, fileName: `${sanitizeFileName(task.id)}.wav` }
     }
 
-    await ctx.progress(0.3, engine.warm ? `复用常驻引擎（${engineLabel('turbo', adapterPath)}）` : '开始生成音频（快速模式）')
+    const fastPayload = { ...basePayload }
+    if (variant === 'xl_turbo') fastPayload.shift = 3.0
+    const payload = applyModelSelection(fastPayload, { variant })
+    await ctx.progress(0.3, engine.warm ? `复用常驻引擎（${engineLabel(variant, adapterPath)}）` : `开始生成音频（${VARIANT_DISPLAY_NAMES[variant] ?? '快速生成模型'}）`)
     const estimatedMs = estimateGenerationSeconds({ type: TASK_TYPE_GENERATE, params }) * 1000
     const file = await postSynthWithProgress({
       ctx,
@@ -1709,13 +2037,21 @@ async function runGenerate(task, ctx, { engineManager }) {
 async function runRepaint(task, ctx, { engineManager, serverUrl }) {
   const params = task.params ?? {}
   const adapterPath = resolveAdapterPath(params)
+  const engineTier = normalizeEngineTier(params)
+  const variant = variantForTask(TASK_TYPE_REPAINT, params)
+  if (engineTier === 'xl' && !MODERN_RUNTIME) {
+    throw new Error('XL 引擎需要现代运行时（旧版运行时不支持 4B 模型）；请先安装最新本机引擎')
+  }
+  if (!existsSync(MODEL_DITS[variant])) {
+    throw new Error(`repaint_audio 需要${VARIANT_DISPLAY_NAMES[variant] ?? '生成模型'}模型文件，请先安装对应模型档`)
+  }
   logAdapterUsage(ctx, params, adapterPath)
   // 1) 引擎启动前先做基本参数校验（服务端若已下发 sourceDurationSec，可提前拦住越界区间，省一次下载）
   const serverDuration = Number(params.sourceDurationSec)
   const basicOptions = Number.isFinite(serverDuration) && serverDuration > 0 ? { sourceDurationSec: serverDuration } : {}
   const basic = validateRepaintParams(params, basicOptions)
   if (basic.style) ctx.log(`style=${basic.style}（仅记录，未参与引擎参数）`)
-  ctx.log(`执行 repaint_audio（${engineLabel('sft', adapterPath)}）：source=${basic.sourceAssetId} ${basic.startSec}-${basic.endSec}s`)
+  ctx.log(`执行 repaint_audio（${engineLabel(variant, adapterPath)}）：source=${basic.sourceAssetId} ${basic.startSec}-${basic.endSec}s`)
   await ctx.progress(0.05, '下载源音频')
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: basic.sourceAssetId, ctx })
   try {
@@ -1723,14 +2059,14 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
     // 2) 拿到源时长后再校验 endSec 不越界（这一步仍在启动引擎之前）
     const validated = validateRepaintParams(params, { sourceDurationSec: info.durationSec })
     ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
-    const engine = await acquireEngine({ ctx, engineManager, variant: 'sft', adapterPath: validated.adapterPath })
+    const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath: validated.adapterPath })
     try {
       const regionSec = (validated.endSec - validated.startSec).toFixed(1)
       await ctx.progress(
         0.3,
-        `开始重绘 ${validated.startSec}-${validated.endSec}s（${engineLabel('sft', validated.adapterPath)}，${regionSec}s）`,
+        `开始重绘 ${validated.startSec}-${validated.endSec}s（${engineLabel(variant, validated.adapterPath)}，${regionSec}s）`,
       )
-      const request = buildRepaintRequest(validated)
+      const request = applyModelSelection(buildRepaintRequest(validated), { variant })
       const sourceAudio = readFileSync(source.tempFile)
       const multipart = buildSynthMultipart({
         request,
@@ -1769,21 +2105,32 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
 async function runCover(task, ctx, { engineManager, serverUrl }) {
   const params = task.params ?? {}
   const validated = validateCoverParams(params)
+  const engineTier = normalizeEngineTier(params)
+  const variant = variantForTask(TASK_TYPE_COVER, params)
+  if (engineTier === 'xl' && !MODERN_RUNTIME) {
+    throw new Error('XL 引擎需要现代运行时（旧版运行时不支持 4B 模型）；请先安装最新本机引擎')
+  }
+  if (!existsSync(MODEL_DITS[variant])) {
+    throw new Error(`cover_audio 需要${VARIANT_DISPLAY_NAMES[variant] ?? '生成模型'}模型文件，请先安装对应模型档`)
+  }
   ctx.log(
-    `执行 cover_audio（${engineLabel('turbo')}）：source=${validated.sourceAssetId} strength=${validated.strength.toFixed(2)}`,
+    `执行 cover_audio（${engineLabel(variant)}）：source=${validated.sourceAssetId} strength=${validated.strength.toFixed(2)}`,
   )
   await ctx.progress(0.05, '下载源音频')
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: validated.sourceAssetId, ctx })
   try {
     const info = readWavInfo(source.bytes)
     ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
-    const engine = await acquireEngine({ ctx, engineManager, variant: 'turbo' })
+    const engine = await acquireEngine({ ctx, engineManager, variant })
     try {
-      await ctx.progress(0.15, engine.warm ? '复用常驻引擎（turbo）' : '开始重编（cover）')
-      const request = buildCoverRequest({
-        ...validated,
-        sourceDurationSec: info.durationSec,
-      })
+      await ctx.progress(0.15, engine.warm ? `复用常驻引擎（${variant}）` : `开始重编（cover，${variant}）`)
+      const request = applyModelSelection(
+        buildCoverRequest({
+          ...validated,
+          sourceDurationSec: info.durationSec,
+        }),
+        { variant },
+      )
       const multipart = buildSynthMultipart({
         request,
         audio: source.bytes,
@@ -1820,21 +2167,27 @@ async function runStem(task, ctx, { engineManager, serverUrl }) {
   // 1) 启动引擎/下载源音频前先校验 arm 与 sourceAssetId（非法 arm 直接 failed）
   const validated = validateStemParams(params)
   const adapterPath = validated.adapterPath
+  const engineTier = normalizeEngineTier(params)
+  const variant = variantForTask(TASK_TYPE_STEM, params)
+  if (engineTier === 'xl' && !MODERN_RUNTIME) {
+    throw new Error('XL 引擎需要现代运行时（旧版运行时不支持 4B 模型）；请先安装最新本机引擎')
+  }
   logAdapterUsage(ctx, params, adapterPath)
-  if (!existsSync(MODEL_DITS.base)) {
+  if (!existsSync(MODEL_DITS[variant])) {
     throw new Error('分轨生成需要分轨生成模型，但本机缺少该模型文件：请先下载“分轨能力”')
   }
-  ctx.log(`执行 generate_stem（${engineLabel('base', adapterPath)}，arm=${validated.arm}）：source=${validated.sourceAssetId}`)
+  const lmTier = lmTierForTask(TASK_TYPE_STEM, params)
+  ctx.log(`执行 generate_stem（${engineLabel(variant, adapterPath)}，arm=${validated.arm}）：source=${validated.sourceAssetId}`)
   ctx.log('说明：输出是该 arm 独立生成的 stem（不是源音频+stem 混音），不保证与源音频逐样本对齐')
   await ctx.progress(0.05, '下载源音频')
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: validated.sourceAssetId, ctx })
   try {
     const info = readWavInfo(source.bytes)
     ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
-    const engine = await acquireEngine({ ctx, engineManager, variant: 'base', adapterPath })
+    const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath, lm: lmTier })
     try {
-      await ctx.progress(0.3, `开始拆分 ${validated.arm}（${engineLabel('base', adapterPath)}）`)
-      const request = buildLegoRequest(validated)
+      await ctx.progress(0.3, `开始拆分 ${validated.arm}（${engineLabel(variant, adapterPath)}）`)
+      const request = applyModelSelection(buildLegoRequest(validated), { variant, lmTier })
       const sourceAudio = readFileSync(source.tempFile)
       const multipart = buildSynthMultipart({
         request,
@@ -2246,6 +2599,11 @@ export async function runCompanion(options, { log = createLogger(), executor } =
       (engineManager ? ` engineIdle=${Math.round(engineManager.idleMs / 1000)}s` : ''),
   )
   log(`能力上报：tasks=[${(activeExecutor.capabilities?.tasks ?? []).join(', ')}] models=[${supportedVariants.join(', ')}]`)
+  log(
+    `运行时形态：${RUNTIME_API === 'modern' ? 'modern（--models + 异步 job，支持 XL 4B）' : 'legacy（v0.1.0，仅 2B）'}` +
+      ` · 引擎目录=${ACESTEP_DIR}` +
+      (RUNTIME_API === 'modern' ? ` · 设备=${ACESTEP_DEVICE}` : ''),
+  )
 
   const state = {
     stopping: false,
