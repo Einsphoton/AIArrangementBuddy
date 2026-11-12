@@ -8,10 +8,16 @@ import type { AppSettings, AssetRef, MasterChain, MixPlan, Project, TrackChainSu
 export class ApiError extends Error {
   status: number
   detail?: string
-  constructor(status: number, message: string, detail?: string) {
+  /**
+   * 服务端错误响应体（成功 JSON.parse 时才有）。
+   * P11：安装接口在已有任务时返回 409 { error, jobId, job }，UI 靠它自动接管进行中的任务。
+   */
+  data?: unknown
+  constructor(status: number, message: string, detail?: string, data?: unknown) {
     super(message)
     this.status = status
     this.detail = detail
+    this.data = data
   }
 }
 
@@ -24,13 +30,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     let detail = ''
+    let data: unknown
     try {
-      const body = (await response.json()) as { error?: string; message?: string }
-      detail = body.error ?? body.message ?? ''
+      data = await response.json()
+      const body = (data ?? {}) as { error?: unknown; message?: unknown }
+      detail = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : ''
     } catch {
+      data = undefined
       detail = await response.text().catch(() => '')
     }
-    throw new ApiError(response.status, detail || `请求失败（${response.status}）`, detail)
+    throw new ApiError(response.status, detail || `请求失败（${response.status}）`, detail || undefined, data)
   }
   if (response.status === 204) return undefined as T
   const contentType = response.headers.get('content-type') ?? ''
@@ -804,6 +813,11 @@ export interface ProvisionStatus {
   profiles: ProvisionProfileInfo[]
   missingBytes: number
   notes: string[]
+  /**
+   * P11：最近安装任务（服务端返回前 3 条，按开始时间倒序；旧服务端可能没有）。
+   * 前端状态恢复优先用 getProvisionJobs()，接口不可用时用它兜底。
+   */
+  jobs?: ProvisionJob[]
 }
 
 export interface ProvisionJobStep {
@@ -851,6 +865,14 @@ export function startProvisionInstall(
 
 export function getProvisionJob(jobId: string): Promise<{ job: ProvisionJob }> {
   return request<{ job: ProvisionJob }>(`/api/provision/jobs/${encodeURIComponent(jobId)}`)
+}
+
+/**
+ * P11：最近安装任务（GET /api/provision/jobs，按开始时间倒序）。
+ * 刷新/重开面板时用它找回进行中的任务并续轮询；旧服务端没有该接口时调用方应兜底 status.jobs。
+ */
+export function getProvisionJobs(): Promise<{ jobs: ProvisionJob[] }> {
+  return request<{ jobs: ProvisionJob[] }>('/api/provision/jobs')
 }
 
 export function cancelProvisionJob(jobId: string): Promise<{ ok: boolean }> {

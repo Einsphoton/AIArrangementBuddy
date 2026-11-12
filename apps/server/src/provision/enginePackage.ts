@@ -8,7 +8,7 @@
  *   <outDir>/runtime-archive/<legacy 归档名>        ← Mac/Linux legacy 运行时归档
  *   <outDir>/cuda/<CUDA zip 名>                     ← NVIDIA CUDA 13 redist 压缩包
  *   <outDir>/models/<gguf 名>                       ← 模型
- *   <outDir>/adapters/<adapter tar.gz 名>           ← LoRA 适配器下载缓存
+ *   <outDir>/adapters/<adapter tar.gz 名>           ← LoRA 适配器归档（下载缓存；缓存丢失时从已解压目录回打）
  *   <outDir>/training/code/<归档名>                 ← 训练代码包
  *   <outDir>/training/python/<归档名>               ← 独立 Python 归档
  *   <outDir>/training/datasets/<归档名>             ← 自生成训练数据集
@@ -18,6 +18,8 @@
  * - 工件 key 规则与 `sources.ts` 的 `artifactKey()` 逐字一致（runtime/、cuda/、runtime-archive/、
  *   model/、adapter/、training/code、training/python、training/dataset/<id>、training/checkpoint/<dest>）；
  * - manifest 里的 size / sha256 一律用 `manifest.ts` / `trainingManifest.ts` 里钉死的值；
+ *   唯一例外是 P11 从已解压目录回打的 LoRA 适配器归档（内容由本机实际文件决定，只能用生成文件的
+ *   实际 size / sha256）；
  * - 构建时只校验 size（安装目录里的文件在下载阶段已经校验过 sha256，重复哈希几十 GB 代价太高），
  *   但 `copyLocalArtifact` 在「从离线包装到安装目录」时会严格校验 sha256，防止离线包被篡改/损坏；
  * - 训练数据体量大（约 2–6GB），只有显式 `includeTraining=true` 才打包，默认不随包分发。
@@ -28,6 +30,8 @@ import {
   existsSync,
   linkSync,
   mkdirSync,
+  mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -36,6 +40,7 @@ import {
 } from 'node:fs'
 import type { Stats } from 'node:fs'
 import { copyFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { modelDisplayName } from '@aiab/core'
@@ -59,6 +64,7 @@ import {
   TRAINING_PYTHON,
   type TrainingPlatform,
 } from './trainingManifest.js'
+import { createTarGz } from './tarWriter.js'
 
 /** 离线包清单文件名（固定） */
 export const ENGINE_PACKAGE_MANIFEST = 'engine-package.json'
@@ -658,14 +664,150 @@ interface BuildCandidate {
   sha256?: string
 }
 
+/* ------------------------------------------------------------------ */
+/* LoRA 适配器：从已解压目录回打归档（P11）                              */
+/* ------------------------------------------------------------------ */
+
+/** 适配器解压安装目录名（installer 把归档解压到 `<dataDir>/adapters/<id>/`） */
+const ADAPTERS_DIR_NAME = 'adapters'
+/** 回打归档的 staging 临时目录前缀（建在系统临时目录，不污染输出包目录） */
+const GENERATED_STAGE_PREFIX = 'aiab-engine-package-stage-'
+
+/** staging 出来的归档（size/sha256 都是生成文件的实际值） */
+interface GeneratedArtifact {
+  path: string
+  size: number
+  sha256: string
+}
+
+interface AdapterStaging {
+  /** key（`adapter/<file>`）→ 生成的归档；构建时替换 `packageCandidates` 里的 adapter 源文件 */
+  overrides: Map<string, GeneratedArtifact>
+  /** 清理临时目录（幂等、不抛错） */
+  cleanup: () => void
+}
+
+function emptyStaging(): AdapterStaging {
+  return { overrides: new Map(), cleanup: () => {} }
+}
+
+function statDirectory(target: string): Stats | null {
+  try {
+    const stats = statSync(target)
+    return stats.isDirectory() ? stats : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 递归列出目录下的普通文件（相对路径用 `/`）；跳过子目录以外的条目（软链/特殊文件）与隐藏的
+ * 下载临时文件（`.part` / `.parts.json` 等），并按键名排序保证 tar 输出稳定。
+ */
+function collectDirectoryFiles(root: string, prefix = ''): Array<{ relative: string; absolute: string }> {
+  let entries
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const files: Array<{ relative: string; absolute: string }> = []
+  for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
+    // 忽略下载中断残留，避免把不完整文件打回归档（离线包是被安装器整包信任并解压的）
+    if (entry.name.includes('.part.') || entry.name.endsWith('.parts.json') || entry.name.endsWith('.tmp')) continue
+    const absolute = path.join(root, entry.name)
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) files.push(...collectDirectoryFiles(absolute, relative))
+    else if (entry.isFile()) files.push({ relative, absolute })
+  }
+  return files
+}
+
+/**
+ * 为「已解压安装但归档缓存丢失」的 LoRA 适配器回打 tar.gz。
+ *
+ * 真实机器上安装完成后 `.downloads` 里的适配器归档常被清理，只剩 `<dataDir>/adapters/<id>/`
+ * （adapter.json + adapter_model.safetensors）。这里在 buildEnginePackage 主循环**之前**先做 staging：
+ * 用 `createTarGz` 把 `<id>/` 目录回打成 `adapters/<asset.file>`（包内条目前缀 `<id>/`，与官方归档
+ * 布局一致，安装器解压后仍是 `<dataDir>/adapters/<id>/adapter.json`）。
+ *
+ * 规则（与 task 规格一致）：
+ * - 归档缓存存在 → 保持原行为（用缓存归档 + 清单钉死值），**不回打**；
+ * - 归档不存在但已解压目录存在 → 回打归档，manifest 用生成文件的实际 size/sha256；
+ * - 两者都不存在 → 不处理，交给调用方保持「跳过 + warning」的现有行为；
+ * - 回打失败（路径异常/读失败）→ 记日志后跳过，不中断整个构建。
+ */
+async function stageAdapterArchives(options: {
+  dataDir: string
+  signal?: AbortSignal
+  log?: (message: string) => void
+}): Promise<AdapterStaging> {
+  const downloads = path.join(options.dataDir, PROVISION_DIR_NAME, DOWNLOAD_CACHE_DIR)
+  const adaptersRoot = path.join(options.dataDir, ADAPTERS_DIR_NAME)
+  const pending = ADAPTER_ASSETS.filter((asset) => {
+    if (statFile(path.join(downloads, asset.file))) return false
+    return Boolean(statDirectory(path.join(adaptersRoot, asset.id)))
+  })
+  if (pending.length === 0) return emptyStaging()
+
+  let stageDir: string | null = null
+  const cleanup = (): void => {
+    if (!stageDir) return
+    try {
+      rmSync(stageDir, { recursive: true, force: true })
+    } catch {
+      /* 临时目录清理失败不影响构建结果 */
+    }
+    stageDir = null
+  }
+
+  const overrides = new Map<string, GeneratedArtifact>()
+  for (const asset of pending) {
+    throwIfAborted(options.signal)
+    const sourceDir = path.join(adaptersRoot, asset.id)
+    try {
+      const files = collectDirectoryFiles(sourceDir)
+      if (files.length === 0) {
+        options.log?.('风格适配器目录为空，跳过回打归档')
+        continue
+      }
+      const entries = new Map<string, Buffer>()
+      for (const file of files) {
+        // 包内条目前缀 `<id>/`（与官方归档一致：安装器解压到 data/adapters 后得到 data/adapters/<id>/）
+        entries.set(`${asset.id}/${file.relative}`, readFileSync(file.absolute))
+      }
+      const archive = createTarGz(entries)
+      stageDir ??= mkdtempSync(path.join(tmpdir(), GENERATED_STAGE_PREFIX))
+      const target = path.join(stageDir, asset.file)
+      writeFileSync(target, archive)
+      overrides.set(`adapter/${asset.file}`, {
+        path: target,
+        size: archive.length,
+        sha256: createHash('sha256').update(archive).digest('hex'),
+      })
+      options.log?.(`风格适配器：已从已解压目录回打归档（${(archive.length / 1e6).toFixed(1)}MB）`)
+    } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) {
+        cleanup()
+        throw abortError()
+      }
+      options.log?.(`风格适配器回打归档失败，已跳过（${error instanceof Error ? error.message : String(error)}）`)
+    }
+  }
+  if (overrides.size === 0) cleanup()
+  return { overrides, cleanup }
+}
+
 function packageCandidates(opts: {
   dataDir: string
   platform: ProvisionPlatform
   profiles: ProvisionProfile[]
   includeTraining: boolean
   adapters: boolean
+  /** 回打归档的覆盖项（key = `adapter/<file>`）；未命中时仍用下载缓存 */
+  generated?: Map<string, GeneratedArtifact>
 }): BuildCandidate[] {
-  const { dataDir, platform, profiles, includeTraining, adapters } = opts
+  const { dataDir, platform, profiles, includeTraining, adapters, generated } = opts
   const root = path.join(dataDir, PROVISION_DIR_NAME)
   const downloads = path.join(root, DOWNLOAD_CACHE_DIR)
   const candidates: BuildCandidate[] = []
@@ -716,16 +858,19 @@ function packageCandidates(opts: {
     })
   }
 
-  // 3) LoRA 适配器归档（安装时解压到 data/adapters/<id>/）
+  // 3) LoRA 适配器归档（安装时解压到 data/adapters/<id>/）：
+  //    优先用下载缓存里的归档；缓存丢失时用 buildEnginePackage 提前回打好的归档（size/sha256 用实际值）
   if (adapters) {
     for (const asset of ADAPTER_ASSETS) {
+      const key = `adapter/${asset.file}`
+      const regenerated = generated?.get(key)
       candidates.push({
-        key: `adapter/${asset.file}`,
+        key,
         kind: 'adapter',
         file: `adapters/${asset.file}`,
-        source: path.join(downloads, asset.file),
-        size: asset.size,
-        sha256: asset.sha256,
+        source: regenerated?.path ?? path.join(downloads, asset.file),
+        size: regenerated?.size ?? asset.size,
+        sha256: regenerated?.sha256 ?? asset.sha256,
       })
     }
   }
@@ -807,83 +952,95 @@ function displayCandidateLabel(candidate: { kind: string; key: string; file: str
  *
  * - 找不到 / 大小不符的文件跳过，并汇总到 `warnings`（不中断构建，尽量产出可用包）；
  * - manifest 里的 sha256 用清单钉死值；构建阶段只校验 size（下载阶段已校验过 hash）；
+ *   例外：从已解压目录回打的 LoRA 适配器归档用生成文件的实际 size/sha256；
  * - 输出 `<outDir>/engine-package.json`；已有同名文件会被覆盖（stale 文件不会进 manifest）。
  */
 export async function buildEnginePackage(options: BuildEnginePackageOptions): Promise<BuildEnginePackageResult> {
   const platform = resolvePlatform()
   const outDir = enginePackageDir(options.dataDir, options.outDir)
   const includeTraining = options.includeTraining === true
-  const candidates = packageCandidates({
-    dataDir: options.dataDir,
-    platform,
-    profiles: options.profiles,
-    includeTraining,
-    adapters: options.adapters !== false,
-  })
+  const includeAdapters = options.adapters !== false
   const log = options.log ?? (() => {})
   const warnings: string[] = []
-  mkdirSync(outDir, { recursive: true })
-  options.onProgress?.(0, `准备打包 ${candidates.length} 个文件（平台 ${platform}${includeTraining ? ' + 训练数据' : ''}）`)
+  // 先做 staging：真实机器上适配器往往只剩「已解压目录」，主循环开始前先回打成 tar.gz，
+  // 这样 packageCandidates 里有可用的 source（临时目录在构建结束/失败后统一清理）。
+  const staging = includeAdapters
+    ? await stageAdapterArchives({ dataDir: options.dataDir, signal: options.signal, log })
+    : emptyStaging()
+  try {
+    const candidates = packageCandidates({
+      dataDir: options.dataDir,
+      platform,
+      profiles: options.profiles,
+      includeTraining,
+      adapters: includeAdapters,
+      generated: staging.overrides,
+    })
+    mkdirSync(outDir, { recursive: true })
+    options.onProgress?.(0, `准备打包 ${candidates.length} 个文件（平台 ${platform}${includeTraining ? ' + 训练数据' : ''}）`)
 
-  const files: EnginePackageFile[] = []
-  let copied = 0
-  let linked = 0
-  let bytes = 0
-  let index = 0
-  for (const candidate of candidates) {
+    const files: EnginePackageFile[] = []
+    let copied = 0
+    let linked = 0
+    let bytes = 0
+    let index = 0
+    for (const candidate of candidates) {
+      throwIfAborted(options.signal)
+      index += 1
+      const label = displayCandidateLabel(candidate)
+      const sourceStats = statFile(candidate.source)
+      if (!sourceStats) {
+        warnings.push(`缺文件：${label}（${candidate.source}）`)
+        log(`跳过（缺失）：${label}`)
+        options.onProgress?.(index / candidates.length, `${index}/${candidates.length} · 跳过 ${label}（缺失）`)
+        continue
+      }
+      if (candidate.size > 0 && sourceStats.size !== candidate.size) {
+        warnings.push(`大小不符：${label}（期望 ${candidate.size}，实际 ${sourceStats.size}）`)
+        log(`跳过（大小不符）：${label}`)
+        options.onProgress?.(index / candidates.length, `${index}/${candidates.length} · 跳过 ${label}（大小不符）`)
+        continue
+      }
+      const dest = path.join(outDir, ...candidate.file.split('/'))
+      const outcome = await copyArtifact(
+        { path: candidate.source, size: candidate.size, sha256: candidate.sha256, origin: 'cache' },
+        dest,
+        { verifySha: false, signal: options.signal, log },
+      )
+      if (outcome === 'failed') {
+        warnings.push(`复制失败：${label}`)
+        options.onProgress?.(index / candidates.length, `${index}/${candidates.length} · 失败 ${label}`)
+        continue
+      }
+      if (outcome === 'linked') linked += 1
+      else copied += 1
+      bytes += candidate.size
+      files.push({ key: candidate.key, kind: candidate.kind, file: candidate.file, size: candidate.size, sha256: candidate.sha256 })
+      options.onProgress?.(
+        index / candidates.length,
+        `${index}/${candidates.length} · ${label}（${(candidate.size / 1e6).toFixed(1)}MB）`,
+      )
+    }
+
     throwIfAborted(options.signal)
-    index += 1
-    const label = displayCandidateLabel(candidate)
-    const sourceStats = statFile(candidate.source)
-    if (!sourceStats) {
-      warnings.push(`缺文件：${label}（${candidate.source}）`)
-      log(`跳过（缺失）：${label}`)
-      options.onProgress?.(index / candidates.length, `${index}/${candidates.length} · 跳过 ${label}（缺失）`)
-      continue
+    const manifest: EnginePackageManifest = {
+      schema: 1,
+      createdAt: new Date().toISOString(),
+      platform,
+      label: `${platform} · ${options.profiles.join(',')}${includeTraining ? ' · training' : ''}`,
+      files,
     }
-    if (candidate.size > 0 && sourceStats.size !== candidate.size) {
-      warnings.push(`大小不符：${label}（期望 ${candidate.size}，实际 ${sourceStats.size}）`)
-      log(`跳过（大小不符）：${label}`)
-      options.onProgress?.(index / candidates.length, `${index}/${candidates.length} · 跳过 ${label}（大小不符）`)
-      continue
-    }
-    const dest = path.join(outDir, ...candidate.file.split('/'))
-    const outcome = await copyArtifact(
-      { path: candidate.source, size: candidate.size, sha256: candidate.sha256, origin: 'cache' },
-      dest,
-      { verifySha: false, signal: options.signal, log },
-    )
-    if (outcome === 'failed') {
-      warnings.push(`复制失败：${label}`)
-      options.onProgress?.(index / candidates.length, `${index}/${candidates.length} · 失败 ${label}`)
-      continue
-    }
-    if (outcome === 'linked') linked += 1
-    else copied += 1
-    bytes += candidate.size
-    files.push({ key: candidate.key, kind: candidate.kind, file: candidate.file, size: candidate.size, sha256: candidate.sha256 })
-    options.onProgress?.(
-      index / candidates.length,
-      `${index}/${candidates.length} · ${label}（${(candidate.size / 1e6).toFixed(1)}MB）`,
-    )
+    const manifestPath = path.join(outDir, ENGINE_PACKAGE_MANIFEST)
+    const tempPath = `${manifestPath}.tmp`
+    writeFileSync(tempPath, JSON.stringify(manifest, null, 2), 'utf8')
+    renameSync(tempPath, manifestPath)
+    const warningText = warnings.length > 0 ? `，${warnings.length} 个文件被跳过` : ''
+    log(`离线包已生成：${manifestPath}（${files.length} 个文件，${(bytes / 1e9).toFixed(2)}GB${warningText}）`)
+    options.onProgress?.(1, `完成：${files.length} 个文件 / ${(bytes / 1e9).toFixed(2)}GB${warningText}`)
+    return { dir: outDir, manifest, copied, linked, bytes, warnings }
+  } finally {
+    staging.cleanup()
   }
-
-  throwIfAborted(options.signal)
-  const manifest: EnginePackageManifest = {
-    schema: 1,
-    createdAt: new Date().toISOString(),
-    platform,
-    label: `${platform} · ${options.profiles.join(',')}${includeTraining ? ' · training' : ''}`,
-    files,
-  }
-  const manifestPath = path.join(outDir, ENGINE_PACKAGE_MANIFEST)
-  const tempPath = `${manifestPath}.tmp`
-  writeFileSync(tempPath, JSON.stringify(manifest, null, 2), 'utf8')
-  renameSync(tempPath, manifestPath)
-  const warningText = warnings.length > 0 ? `，${warnings.length} 个文件被跳过` : ''
-  log(`离线包已生成：${manifestPath}（${files.length} 个文件，${(bytes / 1e9).toFixed(2)}GB${warningText}）`)
-  options.onProgress?.(1, `完成：${files.length} 个文件 / ${(bytes / 1e9).toFixed(2)}GB${warningText}`)
-  return { dir: outDir, manifest, copied, linked, bytes, warnings }
 }
 
 /** 判断文件是否存在于某个目录下（供 UI/CLI 快速展示；内部工具） */

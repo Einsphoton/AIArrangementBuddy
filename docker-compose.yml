@@ -5,6 +5,11 @@
 #   docker compose down         停止（数据保留在卷里）
 #
 # 数据（工程 / 设置 / 音色库）保存在命名卷 aiab-data 中，容器重建不丢。
+#
+# 预置 AI 引擎（模型 + LoRA 适配器，安装零下载）：
+#   构建前先 node scripts/build-docker-bundle.mjs --profiles essential --no-build
+#   把离线包生成到 docker/engine-package/，再 docker compose up -d --build。
+#   详见 docs/DOCKER_ENGINE_BUNDLE.md
 
 services:
   aiab:
@@ -20,6 +25,15 @@ services:
       - aiab-data:/data
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      # 离线引擎包目录（镜像内置 docker/engine-package → /app/engine-package）。
+      # - 想改用数据卷里的离线包：改成 /data/engine-package（注意「卷覆盖」：卷里没有时安装会回退网络）
+      # - 设置页「离线包目录」填了值时，优先级高于这个环境变量
+      AIAB_ENGINE_PACKAGE_DIR: ${AIAB_ENGINE_PACKAGE_DIR:-/app/engine-package}
+      # 离线包已覆盖运行时/模型/LoRA 时不会走网络；未覆盖的部分（如训练数据、新档位）仍可走国内镜像：
+      # AIAB_HF_MIRROR: https://hf-mirror.com
+      # AIAB_GITHUB_MIRROR: https://ghfast.top/
+      # 局域网给其它机器做「服务器助攻」（/api/provision/mirror/*）时可设访问令牌：
+      # AIAB_MIRROR_TOKEN: change-me
       # 如需让容器内的 Agent 调用宿主机服务（如 Ollama），可打开：
       #   AIAB_OLLAMA_BASE: http://host.docker.internal:11434/v1
     healthcheck:

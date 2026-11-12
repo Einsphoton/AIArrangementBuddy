@@ -9,8 +9,10 @@ import { createPortal } from 'react-dom'
 import { Check, CheckCircle2, Copy, Download, HardDriveDownload, LoaderCircle, TriangleAlert, X } from 'lucide-react'
 import { AI_ENGINE_RUNTIME_NAME } from '@aiab/core'
 import {
+  ApiError,
   cancelProvisionJob,
   getProvisionJob,
+  getProvisionJobs,
   getProvisionStatus,
   startProvisionInstall,
   type ProvisionJob,
@@ -23,6 +25,85 @@ import { cn } from '../../lib/format'
 
 const PROFILE_ORDER: ProvisionProfileId[] = ['essential', 'quality', 'stems', 'xl']
 const POLL_MS = 1200
+/** 轮询连续失败上限：服务端重启/断网时短暂重试，超过后才把错误抛到面板 */
+const MAX_POLL_FAILURES = 5
+/** P11：记住最近一次安装任务 id（sessionStorage；刷新/重开面板后据此恢复进度） */
+const LAST_JOB_KEY = 'aiab:provision:lastJobId'
+/**
+ * P11：同一个任务的完成提示只弹一次。
+ * TopBar 的 trigger 实例与 App 的 global 宿主都会恢复并轮询同一任务，靠这个模块级集合去重
+ * （只是通知去重，不保存组件状态，各实例的 job/进度仍各自维护）。
+ */
+const announcedJobIds = new Set<string>()
+
+/** P11：判断任务是否已结束（done/failed/canceled） */
+function isJobRunning(job: ProvisionJob | null): boolean {
+  return job?.status === 'running'
+}
+
+/** 读取 sessionStorage 里记住的任务 id（隐私模式/被禁用时静默退化） */
+function readRememberedJobId(): string | null {
+  try {
+    const value = window.sessionStorage.getItem(LAST_JOB_KEY)
+    return value && value.trim() ? value.trim() : null
+  } catch {
+    return null
+  }
+}
+
+/** 记住/清除最近任务 id（清除不存在/过期的任务是调用方责任） */
+function rememberJobId(jobId: string | null): void {
+  try {
+    if (jobId) window.sessionStorage.setItem(LAST_JOB_KEY, jobId)
+    else window.sessionStorage.removeItem(LAST_JOB_KEY)
+  } catch {
+    /* sessionStorage 不可用：退化为纯内存状态，不影响下载本身 */
+  }
+}
+
+/**
+ * P11：从 409 冲突响应里取出「已在进行的任务」。
+ * 服务端契约为 409 { error, jobId, job }；这里兼容只带 job、或只带 jobId 的旧/新实现。
+ */
+function conflictJob(error: unknown): ProvisionJob | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null
+  const body = (error.data ?? null) as { jobId?: unknown; job?: unknown } | null
+  if (!body || typeof body !== 'object') return null
+  const candidate = (body.job ?? null) as ProvisionJob | null
+  if (candidate && typeof candidate === 'object' && typeof candidate.id === 'string' && candidate.status) {
+    return Array.isArray(candidate.steps) ? candidate : { ...candidate, steps: [] }
+  }
+  if (typeof body.jobId === 'string' && body.jobId.trim()) {
+    /* 只有 id：先建一个占位任务，紧接着轮询会用服务端的真实进度覆盖它 */
+    return {
+      id: body.jobId.trim(),
+      status: 'running',
+      profiles: [],
+      steps: [],
+      progress: 0,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+  }
+  return null
+}
+
+/** 最后一条步骤说明（下载源 / 实时 MB/s / 失败原因），用于展示上次安装的收尾信息 */
+function lastStepMessage(job: ProvisionJob): string | null {
+  for (let index = job.steps.length - 1; index >= 0; index -= 1) {
+    const message = job.steps[index]?.message?.trim()
+    if (message) return message
+  }
+  return null
+}
+
+/** 任务状态中文文案（data-provision-job-status 仍保留服务端原始英文值） */
+const JOB_STATUS_LABELS: Record<ProvisionJob['status'], string> = {
+  running: '安装中',
+  done: '安装完成',
+  failed: '安装失败',
+  canceled: '已取消',
+}
 
 /** 步骤状态的中文文案（data-provision-step-status 仍保留原始英文值，自动化脚本依赖） */
 const STEP_STATUS_LABELS: Record<ProvisionJobStep['status'], string> = {
@@ -121,7 +202,21 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
   const [reasonTitle, setReasonTitle] = useState<string | null>(null)
   /** AI 指定要安装的 profile（不被「建议选择」覆盖；空数组 = 明确不预选） */
   const [requestedProfiles, setRequestedProfiles] = useState<ProvisionProfileId[] | null>(null)
+  /** P11：当前 job 是刷新/重开后恢复的（用于面板提示「已恢复上次进度」+ data-provision-restored） */
+  const [restored, setRestored] = useState(false)
   const pollTimer = useRef<number | null>(null)
+  /** 轮询代次：重新接管任务时 +1，让仍挂在事件队列里的旧 tick 自动作废 */
+  const pollToken = useRef(0)
+  const pollFailures = useRef(0)
+  /** 与 state 同步的最新 job（供恢复流程判断「是否已有更新的任务」） */
+  const jobRef = useRef<ProvisionJob | null>(null)
+  const restoreInFlight = useRef(false)
+
+  /** 统一写 job：同步 ref，避免恢复与 start 之间的竞态读到旧值 */
+  const applyJob = useCallback((next: ProvisionJob | null) => {
+    jobRef.current = next
+    setJob(next)
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -134,13 +229,181 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
     }
   }, [])
 
+  /** 停止轮询（旧 tick 因 token 变化自动作废） */
+  const stopPolling = useCallback(() => {
+    pollToken.current += 1
+    pollFailures.current = 0
+    if (pollTimer.current !== null) {
+      window.clearTimeout(pollTimer.current)
+      pollTimer.current = null
+    }
+  }, [])
+
+  /**
+   * 轮询单个安装任务。
+   * P11：start() 与 restoreJob() 共用同一套轮询；任务结束（done/failed/canceled）时停止轮询
+   * 并把最终状态写回 state（不清空），这样面板关掉再打开/刷新后仍能看到结果。
+   */
+  const pollJob = useCallback(
+    (jobId: string) => {
+      stopPolling()
+      const token = pollToken.current
+      const tick = async (): Promise<void> => {
+        if (token !== pollToken.current) return
+        /* 定时器已触发：清掉 id，失败时 restoreJob 才知道需要重新起轮询 */
+        pollTimer.current = null
+        try {
+          const { job: latest } = await getProvisionJob(jobId)
+          if (token !== pollToken.current) return
+          pollFailures.current = 0
+          applyJob(latest)
+          if (latest.status === 'running') {
+            rememberJobId(latest.id)
+            setError(null)
+            pollTimer.current = window.setTimeout(() => void tick(), POLL_MS)
+            return
+          }
+          pollTimer.current = null
+          rememberJobId(latest.id)
+          if (latest.status === 'done') {
+            setError(null)
+            setReason(null)
+            setReasonTitle(null)
+            setRequestedProfiles(null)
+            void refresh()
+            const announceKey = `done:${latest.id}`
+            /* 两个实例可能同时恢复同一任务：完成提示/事件只发一次 */
+            if (!announcedJobIds.has(announceKey)) {
+              announcedJobIds.add(announceKey)
+              pushToast('success', '本机引擎安装完成，可以开始生成音频了')
+              window.dispatchEvent(
+                new CustomEvent('aiab:provision-done', { detail: { jobId: latest.id, profiles: latest.profiles } }),
+              )
+            }
+          } else if (latest.status === 'failed') {
+            setError(latest.error ?? '安装失败')
+            void refresh()
+          } else {
+            /* canceled */
+            setError('已取消安装')
+            void refresh()
+          }
+        } catch (err) {
+          if (token !== pollToken.current) return
+          if (err instanceof ApiError && err.status === 404) {
+            /* 任务已不存在（服务端重启/清理）：清掉记忆，避免反复轮询一个死 id */
+            rememberJobId(null)
+            applyJob(null)
+            return
+          }
+          pollFailures.current += 1
+          if (pollFailures.current >= MAX_POLL_FAILURES) {
+            setError(err instanceof Error ? err.message : '查询安装进度失败')
+            return
+          }
+          pollTimer.current = window.setTimeout(() => void tick(), POLL_MS)
+        }
+      }
+      pollTimer.current = window.setTimeout(() => void tick(), POLL_MS)
+    },
+    [applyJob, pushToast, refresh, stopPolling],
+  )
+
+  /**
+   * P11：恢复安装状态（刷新页面 / 重新打开面板时调用）。顺序：
+   * 1) sessionStorage 记住的 jobId → getProvisionJob(id)（404 = 已过期，清掉记忆继续下一步）；
+   * 2) GET /api/provision/jobs 里最新的 running 任务（旧服务端没有该接口时退回 status.jobs）；
+   * 3) 都没有进行中任务时，把最近一条历史任务（done/failed/canceled）作为「上次安装」展示。
+   * 恢复到的 running 任务会重启轮询继续显示进度；历史任务不会自动打开弹窗、也不会再弹完成 toast。
+   * 注意：trigger（TopBar）与 global（App 宿主）两个实例各自独立恢复，不依赖任何全局单例。
+   */
+  const restoreJob = useCallback(async (): Promise<void> => {
+    if (restoreInFlight.current) return
+    /* 本实例已接管一个进行中的任务：只确保轮询在跑，不覆盖（避免 mount 恢复与 start 竞争） */
+    const current = jobRef.current
+    if (current && isJobRunning(current)) {
+      rememberJobId(current.id)
+      if (pollTimer.current === null) pollJob(current.id)
+      return
+    }
+    restoreInFlight.current = true
+    try {
+      let found: ProvisionJob | null = null
+      const remembered = readRememberedJobId()
+      if (remembered) {
+        try {
+          const { job: latest } = await getProvisionJob(remembered)
+          found = latest
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            rememberJobId(null)
+          } else {
+            /* 服务端暂时不可用：保留记忆，下次打开面板/刷新再试 */
+            return
+          }
+        }
+      }
+      if (!found) {
+        let jobs: ProvisionJob[] = []
+        try {
+          const result = await getProvisionJobs()
+          jobs = Array.isArray(result?.jobs) ? result.jobs : []
+        } catch {
+          /* 旧服务端没有 /api/provision/jobs：用 status.jobs（前 3 条）兜底 */
+          try {
+            const currentStatus = await getProvisionStatus()
+            jobs = Array.isArray(currentStatus?.jobs) ? currentStatus.jobs : []
+          } catch {
+            jobs = []
+          }
+        }
+        if (jobs.length === 0) return
+        const runningJob = jobs.find((item) => item.status === 'running') ?? null
+        const latestJob = [...jobs].sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0))[0] ?? null
+        found = runningJob ?? latestJob
+      }
+      if (!found) return
+      /* 恢复请求期间用户可能已点「开始下载」：以本实例更新的 running 任务为准，不覆盖 */
+      const active = jobRef.current
+      if (active && isJobRunning(active) && active.id !== found.id) return
+      setRestored(true)
+      rememberJobId(found.id)
+      applyJob(found)
+      if (found.status === 'running') {
+        setError(null)
+        pollJob(found.id)
+      } else {
+        stopPolling()
+        /* 历史任务只做「上次安装」展示：不自动打开弹窗、不再弹完成 toast */
+        setError(found.status === 'failed' ? (found.error ?? '上次安装失败') : null)
+      }
+    } finally {
+      restoreInFlight.current = false
+    }
+  }, [applyJob, pollJob, stopPolling])
+
   useEffect(() => {
     void refresh()
   }, [refresh])
 
+  /* P11：组件挂载即恢复（页面刷新后自动接管；两个实例各跑一次） */
+  const didMountRestore = useRef(false)
+  useEffect(() => {
+    if (didMountRestore.current) return
+    didMountRestore.current = true
+    void restoreJob()
+  }, [restoreJob])
+
+  /* P11：每次打开面板再恢复一次，保证关掉再打开也能看到进度/上次结果 */
+  useEffect(() => {
+    if (!open) return
+    void restoreJob()
+  }, [open, restoreJob])
+
   useEffect(() => {
     return () => {
-      if (pollTimer.current) window.clearTimeout(pollTimer.current)
+      pollToken.current += 1
+      if (pollTimer.current !== null) window.clearTimeout(pollTimer.current)
     }
   }, [])
 
@@ -186,32 +449,24 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
     setError(null)
     try {
       const result = await startProvisionInstall(selected, { adapters: withAdapters })
-      setJob(result.job)
-      const tick = async () => {
-        try {
-          const { job: latest } = await getProvisionJob(result.jobId)
-          setJob(latest)
-          if (latest.status === 'running') {
-            pollTimer.current = window.setTimeout(() => void tick(), POLL_MS)
-            return
-          }
-          if (latest.status === 'done') {
-            pushToast('success', '本机引擎安装完成，可以开始生成音频了')
-            setReason(null)
-            setReasonTitle(null)
-            setRequestedProfiles(null)
-            void refresh()
-            window.dispatchEvent(new CustomEvent('aiab:provision-done', { detail: { jobId: latest.id, profiles: selected } }))
-          } else {
-            setError(latest.error ?? (latest.status === 'canceled' ? '已取消安装' : '安装失败'))
-          }
-        } catch (err) {
-          setError(err instanceof Error ? err.message : '查询安装进度失败')
-        }
-      }
-      pollTimer.current = window.setTimeout(() => void tick(), POLL_MS)
+      setRestored(false)
+      rememberJobId(result.jobId)
+      if (result.job) applyJob(result.job)
+      pollJob(result.jobId)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '启动安装失败')
+      /* P11：409 = 服务端已有进行中的安装任务 → 直接接管，不显示红色错误 */
+      const taken = conflictJob(err)
+      if (taken) {
+        setRestored(true)
+        rememberJobId(taken.id)
+        applyJob(taken)
+        setError(null)
+        pushToast('info', '已接入正在进行的下载')
+        if (taken.status === 'running') pollJob(taken.id)
+        else if (taken.status === 'failed') setError(taken.error ?? '上次安装失败')
+      } else {
+        setError(err instanceof Error ? err.message : '启动安装失败')
+      }
     } finally {
       setStarting(false)
     }
@@ -241,10 +496,13 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
   const essentialReady = status?.profiles?.find((item) => item.id === 'essential')?.ready === true
   const adapters = status?.adapters ?? []
   const missingAdapters = adapters.filter((adapter) => !adapter.installed).length
-  const hidden = !status || (essentialReady && status.runtime.installed && missingAdapters === 0) || !status.supported
+  const running = job?.status === 'running'
+  /* P11：有进行中的安装时入口常驻，刷新后能重新打开面板接着看进度 */
+  const hidden =
+    !running && (!status || (essentialReady && status.runtime.installed && missingAdapters === 0) || !status.supported)
   if (hidden && !open) return null
 
-  const running = job?.status === 'running'
+  const lastMessage = job ? lastStepMessage(job) : null
   const profiles = status?.profiles ?? PROFILE_ORDER.map((id) => ({
     id,
     label: id,
@@ -259,12 +517,21 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
         <button
           type="button"
           data-provision-trigger
+          data-provision-trigger-status={job?.status}
           className="btn btn-ghost h-8 shrink-0 gap-1.5 px-2 text-[11px]"
-          title={`本机 AI 引擎未安装：点击自动下载（平台 ${status?.platform ?? '检测中'}，缺 ${humanBytes(status?.missingBytes ?? 0)}）`}
+          title={
+            running
+              ? `本机 AI 引擎正在安装：点击查看下载进度（平台 ${status?.platform ?? '检测中'}）`
+              : `本机 AI 引擎未安装：点击自动下载（平台 ${status?.platform ?? '检测中'}，缺 ${humanBytes(status?.missingBytes ?? 0)}）`
+          }
           onClick={() => setOpen(true)}
         >
-          <HardDriveDownload size={13} className="text-warning" />
-          <span className="hidden min-[1280px]:inline">安装本机引擎</span>
+          {running ? (
+            <LoaderCircle size={13} className="animate-spin text-accent" />
+          ) : (
+            <HardDriveDownload size={13} className="text-warning" />
+          )}
+          <span className="hidden min-[1280px]:inline">{running ? '安装中…' : '安装本机引擎'}</span>
         </button>
       )}
 
@@ -476,11 +743,14 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                 )}
 
                 {job && (
-                  <div className="mt-2.5 rounded-lg border border-line bg-bg-soft px-2.5 py-2">
+                  <div
+                    data-provision-job-status={job.status}
+                    data-provision-restored={restored ? 'true' : undefined}
+                    className="mt-2.5 rounded-lg border border-line bg-bg-soft px-2.5 py-2"
+                  >
                     <div className="flex items-center gap-2 text-[10px]">
-                      <span className="text-ink-2">
-                        {job.status === 'done' ? '安装完成' : job.status === 'failed' ? '安装失败' : job.status === 'canceled' ? '已取消' : '安装中'}
-                      </span>
+                      <span className="text-ink-2">{JOB_STATUS_LABELS[job.status]}</span>
+                      {restored && <span className="text-[9px] text-accent-soft">已恢复上次进度</span>}
                       <span className="ml-auto font-mono text-ink-4" data-provision-progress={Math.round(job.progress * 100)}>
                         {Math.round(job.progress * 100)}%
                       </span>
@@ -491,6 +761,12 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                         style={{ width: `${Math.round(job.progress * 100)}%` }}
                       />
                     </div>
+                    {/* 结束态补一行最后 message（下载源/实时速度/失败原因）：面板关掉再打开也能知道停在哪一步 */}
+                    {job.status !== 'running' && lastMessage && (
+                      <p data-provision-job-message className="mt-1 truncate text-[9px] text-ink-4" title={lastMessage}>
+                        最后状态：{lastMessage}
+                      </p>
+                    )}
                     <div className="mt-1.5 space-y-0.5">
                       {job.steps.map((step) => (
                         <div key={step.key} data-provision-step data-provision-step-status={step.status} className="flex items-start gap-1.5 text-[9px]">

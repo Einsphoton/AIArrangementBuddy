@@ -84,13 +84,26 @@ const RETRY_MAX_DELAY_MS = 2000
 class DownloadHttpError extends Error {
   readonly status: number
   readonly retryable: boolean
+  /** 429 响应里的 Retry-After（毫秒），用于让重试等待更合理 */
+  readonly retryAfterMs?: number
 
-  constructor(status: number, message: string, retryable = false) {
+  constructor(status: number, message: string, retryable = false, retryAfterMs?: number) {
     super(message)
     this.name = 'DownloadHttpError'
     this.status = status
     this.retryable = retryable
+    if (retryAfterMs && retryAfterMs > 0) this.retryAfterMs = retryAfterMs
   }
+}
+
+/** 解析 Retry-After（秒数或 HTTP 日期）；失败返回 0，上限 30s */
+function parseRetryAfterMs(value: string | null): number {
+  if (!value) return 0
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30_000)
+  const timestamp = Date.parse(value)
+  if (Number.isFinite(timestamp)) return Math.max(0, Math.min(timestamp - Date.now(), 30_000))
+  return 0
 }
 
 /** HTTP 状态码是否值得重试（限流 / 服务端临时不可用） */
@@ -518,7 +531,12 @@ async function attemptSingleSource(options: DownloadOptions, source: DownloadSou
     await discardBody(response)
     const status = response.status
     const hint = isRetryableStatus(status) ? '（服务器暂时不可用，请稍后重试）' : ''
-    throw new DownloadHttpError(status, `下载失败（HTTP ${status}）${hint}：源「${source.label}」${source.url}`)
+    throw new DownloadHttpError(
+      status,
+      `下载失败（HTTP ${status}）${hint}：源「${source.label}」${source.url}`,
+      isRetryableStatus(status),
+      parseRetryAfterMs(response.headers.get('retry-after')),
+    )
   }
   // 续传响应必须严格匹配 Range 请求：否则（无 sha256 时）会把错误字节 append 成坏文件
   if (startOffset > 0 && response.status === 206) {
@@ -588,14 +606,32 @@ async function downloadSingleConnection(options: DownloadOptions, sources: Downl
   const log = options.log ?? (() => {})
   const failures: string[] = []
   const causes: unknown[] = []
-  for (const source of sources) {
+  const health = ensureSourceHealth(sources)
+  // 优先尝试未冷却/失败少的源（例如国内直连不通的官方源会被跳过，避免每个文件白等一次超时）
+  const now = Date.now()
+  const ordered = [...sources].sort((a, b) => {
+    const ha = sourceHealthOf(health, a)
+    const hb = sourceHealthOf(health, b)
+    const coolingA = ha.cooldownUntil > now ? 1 : 0
+    const coolingB = hb.cooldownUntil > now ? 1 : 0
+    if (coolingA !== coolingB) return coolingA - coolingB
+    if (ha.failures !== hb.failures) return ha.failures - hb.failures
+    return sources.indexOf(a) - sources.indexOf(b)
+  })
+  for (const source of ordered) {
     throwIfAborted(options.signal)
     try {
-      return await attemptSingleSource(options, source, attemptInfo)
+      const result = await attemptSingleSource(options, source, attemptInfo)
+      markSourceSuccess(health, source)
+      return result
     } catch (error) {
       if (options.signal?.aborted || isAbortError(error)) throw error
       failures.push(`源「${source.label}」：${errorMessage(error)}`)
       causes.push(error)
+      const status = error instanceof DownloadHttpError ? error.status : null
+      if (status !== 404 && status !== 403 && status !== 410) {
+        markSourceFailure(health, source, error instanceof DownloadHttpError ? (error.retryAfterMs ?? 0) : 0)
+      }
       log(`源「${source.label}」失败：${errorMessage(error)}；换下一个源`)
     }
   }
@@ -612,6 +648,96 @@ async function downloadSingleConnection(options: DownloadOptions, sources: Downl
 /* 分片并发下载（Range + 跨运行续传 + 逐段换源重试）                    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 源健康度：跨文件共享（一次安装里，某个镜像连不上/被限流后，后续文件不再反复踩坑）。
+ * 只记录「网络级」状态；404（某个文件在镜像上不存在）属于单文件问题，由分片上下文单独判死。
+ * 冷却时间到期后会重新尝试，网络恢复/换代理后无需重启进程。
+ */
+interface SourceHealth {
+  failures: number
+  cooldownUntil: number
+}
+
+type SourceHealthMap = Map<string, SourceHealth>
+
+/** 进程级共享的健康度表（key = label + url） */
+const sharedSourceHealth: SourceHealthMap = new Map()
+
+function sourceKey(source: DownloadSource): string {
+  return `${source.label}\u0000${source.url}`
+}
+
+function ensureSourceHealth(sources: DownloadSource[]): SourceHealthMap {
+  for (const source of sources) {
+    if (!sharedSourceHealth.has(sourceKey(source))) sharedSourceHealth.set(sourceKey(source), { failures: 0, cooldownUntil: 0 })
+  }
+  return sharedSourceHealth
+}
+
+/** 测试用：清空源健康度 */
+export function clearSourceHealth(): void {
+  sharedSourceHealth.clear()
+}
+
+function sourceHealthOf(health: SourceHealthMap, source: DownloadSource): SourceHealth {
+  let state = health.get(sourceKey(source))
+  if (!state) {
+    state = { failures: 0, cooldownUntil: 0 }
+    health.set(sourceKey(source), state)
+  }
+  return state
+}
+
+/**
+ * 记录网络级源失败：网络错误 / 5xx 指数冷却，429 按 Retry-After（至少 3s）。
+ * 返回给日志的冷却说明；404/403 由调用方按「单文件无此文件」处理，不走这里。
+ */
+function markSourceFailure(health: SourceHealthMap, source: DownloadSource, retryAfterMs = 0): string {
+  const state = sourceHealthOf(health, source)
+  state.failures += 1
+  let cooldownMs = Math.min(500 * 2 ** Math.min(state.failures, 5), 8000)
+  // 连续失败的源（例如国内直连不通的官方源）拉长冷却，避免后续每个文件都先白等一次超时
+  if (state.failures >= 3) cooldownMs = Math.max(cooldownMs, 60_000)
+  if (state.failures >= 5) cooldownMs = Math.max(cooldownMs, 120_000)
+  if (retryAfterMs > 0) cooldownMs = Math.max(cooldownMs, retryAfterMs)
+  state.cooldownUntil = Date.now() + cooldownMs
+  return `（冷却 ${Math.max(1, Math.round(cooldownMs / 1000))}s）`
+}
+
+function markSourceSuccess(health: SourceHealthMap, source: DownloadSource): void {
+  health.set(sourceKey(source), { failures: 0, cooldownUntil: 0 })
+}
+
+/**
+ * 为某个分片挑源：
+ * - 只在「健康（未冷却、本文件未判死）」的源之间按段轮换，多个可用源可聚合带宽；
+ * - 全部源都在冷却时短暂等待最少冷却时间再继续，避免 429 限流时疯狂重试导致更慢；
+ * - 404/不支持 Range 的源在本文件内不再参与。
+ */
+async function pickSegmentSource(context: SegmentContext, segmentIndex: number, attempt: number): Promise<DownloadSource> {
+  const now = Date.now()
+  const nonDead = context.sources.filter((source) => !context.deadSources.has(sourceKey(source)))
+  const usable = nonDead.filter((source) => sourceHealthOf(context.health, source).cooldownUntil <= now)
+  if (usable.length > 0) {
+    const ranked = [...usable].sort((a, b) => {
+      const ha = sourceHealthOf(context.health, a)
+      const hb = sourceHealthOf(context.health, b)
+      if (ha.failures !== hb.failures) return ha.failures - hb.failures
+      return context.sources.indexOf(a) - context.sources.indexOf(b)
+    })
+    return ranked[(segmentIndex + attempt) % ranked.length]
+  }
+  if (nonDead.length === 0) {
+    if (context.noRangeSources.size > 0) throw new RangeUnsupportedError('所有可用下载源都不支持 Range 分段下载')
+    throw new Error('所有下载源都不可用（404/403 或该文件在镜像上不存在）')
+  }
+  const earliest = Math.min(...nonDead.map((source) => sourceHealthOf(context.health, source).cooldownUntil))
+  const waitMs = Math.max(120, Math.min(earliest - now, 3000))
+  context.options.log?.(`分片 ${segmentIndex}：下载源被限流/冷却中，${(waitMs / 1000).toFixed(1)}s 后继续`)
+  await sleep(waitMs, context.signal)
+  return nonDead[segmentIndex % nonDead.length]
+}
+
 interface SegmentContext {
   options: DownloadOptions
   sources: DownloadSource[]
@@ -626,10 +752,16 @@ interface SegmentContext {
   /** 整文件累计已完成字节（回调用） */
   totalReceived: () => number
   persistState: () => void
+  /** 跨文件共享的源健康度（限流/网络失败） */
+  health: SourceHealthMap
+  /** 本文件里 404/403 的源（某个文件在镜像上不存在，换源但不要污染其它文件） */
+  deadSources: Set<string>
+  /** 本文件里不支持 Range 的源（整文件回退单连接） */
+  noRangeSources: Set<string>
 }
 
 async function downloadSegment(context: SegmentContext, segment: SegmentPlan): Promise<void> {
-  const { options, sources, dest, size, signal } = context
+  const { options, sources, dest, size, signal, health } = context
   const fetchImpl = options.fetchImpl ?? fetch
   const index = segment.index
   const length = segment.end - segment.start + 1
@@ -648,10 +780,10 @@ async function downloadSegment(context: SegmentContext, segment: SegmentPlan): P
   const failures: string[] = []
   let lastCause: unknown
   let rangeUnsupportedCount = 0
-  const maxAttempts = Math.max(2, sources.length * 2)
+  const maxAttempts = Math.max(6, sources.length * 4)
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     throwIfAborted(signal)
-    const source = sources[(index + attempt) % sources.length]
+    const source = await pickSegmentSource(context, index, attempt)
     const from = segment.start + received
     const headers: Record<string, string> = {
       'User-Agent': 'aiab-provision/2',
@@ -663,31 +795,43 @@ async function downloadSegment(context: SegmentContext, segment: SegmentPlan): P
     } catch (error) {
       if (signal.aborted || isAbortError(error)) throw error
       lastCause = error
-      failures.push(`源「${source.label}」请求失败（${errorMessage(error)}）`)
+      const note = markSourceFailure(health, source)
+      failures.push(`源「${source.label}」请求失败（${errorMessage(error)}）${note}`)
       context.tracker.update(context.totalReceived(), context.summary, context.segmentCount)
       continue
     }
     if (response.status === 416) {
       // 分片请求越界（常见于源端文件被替换/分片状态过期）：丢掉该段已完成字节，换源从头下这一段
       await discardBody(response)
+      const note = markSourceFailure(health, source)
       if (received > 0) {
         rmSync(segPath, { force: true })
         received = 0
         context.receivedBySegment[index] = 0
         context.tracker.update(context.totalReceived(), context.summary, context.segmentCount)
       }
-      failures.push(`源「${source.label}」拒绝 Range（HTTP 416）`)
+      failures.push(`源「${source.label}」拒绝 Range（HTTP 416）${note}`)
       continue
     }
     if (response.status === 200) {
       await discardBody(response)
       rangeUnsupportedCount += 1
+      // 该源不支持分片：分片流程不再用它（所有源都不支持时整文件回退单连接）
+      context.noRangeSources.add(sourceKey(source))
       failures.push(`源「${source.label}」不支持 Range`)
       continue
     }
     if (response.status !== 206) {
       await discardBody(response)
-      failures.push(`源「${source.label}」HTTP ${response.status}`)
+      const status = response.status
+      if (status === 404 || status === 403 || status === 410) {
+        context.deadSources.add(sourceKey(source))
+        failures.push(`源「${source.label}」HTTP ${status}（该源无此文件，已跳过）`)
+        continue
+      }
+      const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'))
+      const note = markSourceFailure(health, source, retryAfterMs)
+      failures.push(`源「${source.label}」HTTP ${status}${note}`)
       continue
     }
     // Range 响应必须严格匹配请求：Content-Range 起点/终点/总大小不对就拒绝（避免拼出坏文件）
@@ -695,7 +839,8 @@ async function downloadSegment(context: SegmentContext, segment: SegmentPlan): P
     const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange)
     if (!match) {
       await discardBody(response)
-      failures.push(`源「${source.label}」Content-Range 非法（${contentRange || '空'}）`)
+      const note = markSourceFailure(health, source)
+      failures.push(`源「${source.label}」Content-Range 非法（${contentRange || '空'}）${note}`)
       continue
     }
     const rangeStart = Number(match[1])
@@ -703,7 +848,8 @@ async function downloadSegment(context: SegmentContext, segment: SegmentPlan): P
     const rangeTotal = match[3] === '*' ? null : Number(match[3])
     if (rangeStart !== from || rangeEnd < from || rangeEnd > segment.end || (rangeTotal !== null && rangeTotal !== size)) {
       await discardBody(response)
-      failures.push(`源「${source.label}」Content-Range 不符（期望 ${from}-${segment.end}/${size}，实际 ${contentRange}）`)
+      const note = markSourceFailure(health, source)
+      failures.push(`源「${source.label}」Content-Range 不符（期望 ${from}-${segment.end}/${size}，实际 ${contentRange}）${note}`)
       continue
     }
     if (!response.body) {
@@ -714,9 +860,12 @@ async function downloadSegment(context: SegmentContext, segment: SegmentPlan): P
     const contentLength = Number(response.headers.get('content-length') ?? 0)
     if (contentLength > 0 && contentLength !== expected) {
       await discardBody(response)
-      failures.push(`源「${source.label}」Content-Length 与 Content-Range 不一致`)
+      const note = markSourceFailure(health, source)
+      failures.push(`源「${source.label}」Content-Length 与 Content-Range 不一致${note}`)
       continue
     }
+    // 响应头全部校验通过：该源可用，清零失败计数
+    markSourceSuccess(health, source)
     const before = fileSize(segPath)
     const target = before + expected
     try {
@@ -732,7 +881,8 @@ async function downloadSegment(context: SegmentContext, segment: SegmentPlan): P
     } catch (error) {
       if (signal.aborted || isAbortError(error)) throw error
       lastCause = error
-      failures.push(`源「${source.label}」网络中断（${errorMessage(error)}）`)
+      const note = markSourceFailure(health, source)
+      failures.push(`源「${source.label}」网络中断（${errorMessage(error)}）${note}`)
       received = refreshReceived()
       context.tracker.update(context.totalReceived(), context.summary, context.segmentCount)
       continue
@@ -836,6 +986,9 @@ async function downloadSegmented(
     receivedBySegment,
     totalReceived,
     persistState: () => persistState(),
+    health: ensureSourceHealth(sources),
+    deadSources: new Set<string>(),
+    noRangeSources: new Set<string>(),
   }
 
   try {
@@ -951,7 +1104,9 @@ export async function downloadFile(options: DownloadOptions): Promise<DownloadRe
       if (normalized.signal?.aborted || isAbortError(error)) throw error
       const retryable = isRetryableDownloadError(error)
       if (!retryable || attempt >= attempts) break
-      const delayMs = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS)
+      const backoffMs = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS)
+      const retryAfterMs = error instanceof DownloadHttpError ? (error.retryAfterMs ?? 0) : 0
+      const delayMs = Math.max(backoffMs, retryAfterMs)
       const nextAttempt = Math.min(attempt + 1, attempts)
       log(`下载失败（${errorMessage(error)}），${delayMs}ms 后重试（第 ${nextAttempt}/${attempts} 次尝试）`)
       await sleep(delayMs, normalized.signal)

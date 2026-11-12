@@ -9,6 +9,8 @@
  *   文件缺失时跳过并汇总 warnings；readEnginePackage 读回；
  * - findLocalArtifact：离线包优先于已安装目录缓存、未知/穿越 key 返回 null、自定义包目录；
  * - copyLocalArtifact：硬链接/复制成功、sha256 不符删除 dest 返回 false、size 不符 false、Abort 抛 AbortError；
+ * - P11：createTarGz（ustar/gzip 写入）往返 + 非法路径拒绝；适配器只有已解压目录（无 .downloads 归档）时
+ *   buildEnginePackage 回打 adapters/<file>.tar.gz（manifest 用实际 size/sha256）且安装器解压语义一致；
  * - listMirrorFiles / resolveMirrorFile：package+cache 合并、training=false 过滤、目录穿越全拒；
  * - HTTP 路由（Fastify inject，临时 DATA_DIR）：status.download 字段、mirror manifest 开启/关闭/令牌、
  *   file Range 206 / HEAD / 416 / 401 / 404、sources 配置与（可选）探测、package build 异步任务；
@@ -67,6 +69,9 @@ const TMP = mkdtempSync(path.join(tmpdir(), 'aiab-engine-package-'))
 const DATA_A = path.join(TMP, 'data-a')
 const DATA_B = path.join(TMP, 'data-b')
 const DATA_C = path.join(TMP, 'data-c')
+/** P11：只有已解压适配器目录（无 .downloads 归档）/ 归档与解压目录并存 */
+const DATA_D = path.join(TMP, 'data-d')
+const DATA_E = path.join(TMP, 'data-e')
 /** 路由测试固定用 DATA_A（config.ts 在 import 时读 DATA_DIR） */
 process.env.DATA_DIR = DATA_A
 process.env.LOG_LEVEL = 'error'
@@ -88,6 +93,8 @@ for (const name of [
 const engine = await import('../apps/server/src/provision/enginePackage.ts')
 const manifest = await import('../apps/server/src/provision/manifest.ts')
 const trainingManifest = await import('../apps/server/src/provision/trainingManifest.ts')
+const tarWriter = await import('../apps/server/src/provision/tarWriter.ts')
+const untar = await import('../apps/server/src/provision/untar.ts')
 const { buildServer } = await import('../apps/server/src/index.ts')
 
 /** CLI 纯函数（scripts/provision.mjs 有 isMain 保护，被 import 时不会执行 CLI 主流程） */
@@ -113,6 +120,8 @@ const {
   TRAINING_CHECKPOINTS,
   TRAINING_PYTHON,
 } = trainingManifest
+const { createTarGz } = tarWriter
+const { extractTarGz, extractTarGzFileToDir } = untar
 
 const PLATFORM = resolvePlatform()
 const TRAINING_PLATFORM = process.platform === 'darwin' ? 'darwin-arm64' : process.platform === 'win32' ? 'win32-x64' : 'linux-x64'
@@ -206,8 +215,27 @@ function createInstalledFixture(dataDir, options = {}) {
   return ace
 }
 
-/** 一个带真实内容的小离线包（用来验证 package 优先 + copyLocalArtifact 正常成功） */
-function createSmallPackage(dataDir) {
+/**
+ * 伪造「已解压安装的 LoRA 适配器」：`<dataDir>/adapters/<id>/{adapter.json, adapter_config.json,
+ * adapter_model.safetensors}`（真实机器上安装完成后通常只剩这个目录，`.downloads` 归档被清理）。
+ */
+function writeExtractedAdapters(dataDir) {
+  const root = path.join(dataDir, 'adapters')
+  for (const asset of ADAPTER_ASSETS) {
+    const base = path.join(root, asset.id)
+    mkdirSync(base, { recursive: true })
+    writeFileSync(
+      path.join(base, 'adapter.json'),
+      JSON.stringify({ id: asset.id, name: asset.name, baseModel: 'acestep-v15-turbo', rank: 8 }, null, 2),
+      'utf8',
+    )
+    writeFileSync(path.join(base, 'adapter_config.json'), JSON.stringify({ r: 8, alpha: 16 }, null, 2), 'utf8')
+    writeFileSync(path.join(base, 'adapter_model.safetensors'), Buffer.alloc(2048, (asset.id.charCodeAt(0) % 251) + 1))
+  }
+  return root
+}
+
+/** 一个带真实内容的小离线包（用来验证 package 优先 + copyLocalArtifact 正常成功） */function createSmallPackage(dataDir) {
   const packageDir = path.join(dataDir, 'engine-package')
   mkdirSync(packageDir, { recursive: true })
   const content = Buffer.from('P10-B offline package tiny model payload\n'.repeat(64))
@@ -232,7 +260,7 @@ function authHeaders(token) {
 }
 
 try {
-  console.log(`\nP10-B 服务器离线包 + 镜像分发验收（平台 ${PLATFORM}）\n`)
+  console.log(`\nP10-B/P11 服务器离线包 + 镜像分发 + LoRA 回打验收（平台 ${PLATFORM}）\n`)
 
   /* ---------------- 1. 构建离线包（完整：essential + xl + 训练数据） ---------------- */
   createInstalledFixture(DATA_A, { training: true })
@@ -343,6 +371,106 @@ try {
     assert(partial.manifest.files.length > 0, '其它文件仍应打包成功')
     for (const key of keys) assert(expectedArtifacts(['essential'], false).has(key), `清单里出现非计划文件：${key}`)
     return `${partial.manifest.files.length} 个文件，跳过 ${partial.warnings.length} 个`
+  })
+
+  /* ---------------- 2b. P11：tar.gz 写入 + 适配器回打归档 ---------------- */
+  await check('createTarGz：ustar/gzip 往返（含 prefix 拆分）、确定性、非法路径拒绝', () => {
+    const entries = new Map([
+      ['jrpg_v1/adapter.json', Buffer.from('{"id":"jrpg_v1","rank":8}')],
+      ['jrpg_v1/adapter_model.safetensors', Buffer.alloc(700, 0x5a)],
+      ['empty.bin', Buffer.alloc(0)],
+    ])
+    // 超过 100 字节、但可拆成 prefix（≤155）+ name（≤100）的路径
+    const longName = `${'a'.repeat(60)}/${'b'.repeat(60)}/c.bin`
+    entries.set(longName, Buffer.from('prefix-split'))
+    const first = createTarGz(entries, { mtime: 0 })
+    const second = createTarGz(
+      [...entries].map(([name, data]) => ({ name, data })),
+      { mtime: 0 },
+    )
+    assert(first.equals(second), '同样输入 + 同样 mtime 应产出完全一致的字节（确定性）')
+    const roundtrip = extractTarGz(first)
+    assertEqual([...roundtrip.keys()].sort(), [...entries.keys()].sort(), '往返后条目名集合')
+    for (const [name, data] of entries) assert(roundtrip.get(name).equals(data), `${name} 内容不一致`)
+    for (const bad of ['../escape', '/abs/path', 'a/../../b', '']) {
+      let thrown = null
+      try {
+        createTarGz(new Map([[bad, Buffer.from('x')]]))
+      } catch (error) {
+        thrown = error
+      }
+      assert(thrown, `非法条目名应抛错：${bad}`)
+    }
+    let longThrown = null
+    try {
+      createTarGz(new Map([[`single-${'x'.repeat(120)}`, Buffer.from('x')]]))
+    } catch (error) {
+      longThrown = error
+    }
+    assert(longThrown, '单段超过 100 字节且无法用 prefix 拆分时应抛错')
+    return `${roundtrip.size} 个条目 / ${first.length}B`
+  })
+
+  await check('buildEnginePackage：适配器只剩已解压目录 → 回打 tar.gz，manifest 用实际 size/sha256，解压语义一致', async () => {
+    // DATA_D：运行时/模型已装、适配器归档缺失（omitAdapters），只剩 data/adapters/<id>/
+    createInstalledFixture(DATA_D, { omitAdapters: true })
+    writeExtractedAdapters(DATA_D)
+    const pkgDir = path.join(TMP, 'package-extracted-adapters')
+    const result = await buildEnginePackage({ dataDir: DATA_D, outDir: pkgDir, profiles: ['essential'] })
+    assertEqual(result.linked + result.copied, result.manifest.files.length, 'linked+copied 必须等于文件数')
+    assert(
+      !result.warnings.some((warning) => warning.includes('风格适配器')),
+      `适配器不应被跳过：${result.warnings.join('；')}`,
+    )
+    assertEqual(result.manifest.files.length, expectedArtifacts(['essential'], false).size, '文件数')
+
+    const installDir = path.join(TMP, 'extracted-adapters-install', 'adapters')
+    let generatedBytes = 0
+    for (const asset of ADAPTER_ASSETS) {
+      const key = `adapter/${asset.file}`
+      const entry = result.manifest.files.find((file) => file.key === key)
+      assert(entry, `缺适配器 key：${key}`)
+      assertEqual(entry.file, `adapters/${asset.file}`, `${asset.id} 包内路径`)
+      const archivePath = path.join(pkgDir, ...entry.file.split('/'))
+      assert(existsSync(archivePath), `${asset.id} 包内缺少回打的归档`)
+      const archive = readFileSync(archivePath)
+      generatedBytes += archive.length
+      assertEqual(entry.size, archive.length, `${asset.id} manifest size 必须是生成文件实际值`)
+      assertEqual(entry.sha256, sha256(archive), `${asset.id} manifest sha256 必须是生成文件实际值`)
+      assert(
+        entry.size !== asset.size || entry.sha256 !== asset.sha256,
+        `${asset.id} 不应沿用清单钉死值（归档由本机已解压目录回打）`,
+      )
+      // 包内归档布局与官方一致：<id>/adapter.json + <id>/adapter_model.safetensors
+      const entriesMap = extractTarGz(archive)
+      assert(entriesMap.has(`${asset.id}/adapter.json`), `${asset.id} 归档缺 adapter.json`)
+      assert(entriesMap.has(`${asset.id}/adapter_model.safetensors`), `${asset.id} 归档缺权重文件`)
+      assertEqual(JSON.parse(entriesMap.get(`${asset.id}/adapter.json`).toString('utf8')).id, asset.id, `${asset.id} adapter.json id`)
+      // 安装器语义：findLocalArtifact 命中离线包 → copyLocalArtifact 拷出 → 解压到 data/adapters
+      const artifact = findLocalArtifact(DATA_D, key, pkgDir)
+      assert(artifact && artifact.origin === 'package', `${asset.id} 应从离线包命中（origin=package）`)
+      assertEqual(artifact.size, archive.length, `${asset.id} 离线包命中 size`)
+      const copiedArchive = path.join(TMP, 'extracted-adapters-install', asset.file)
+      assert(await copyLocalArtifact(artifact, copiedArchive), `${asset.id} 离线包归档应可拷出（sha256 校验通过）`)
+      extractTarGzFileToDir(copiedArchive, installDir)
+      assert(existsSync(path.join(installDir, asset.id, 'adapter.json')), `${asset.id} 解压后应有 data/adapters/<id>/adapter.json`)
+      assert(
+        existsSync(path.join(installDir, asset.id, 'adapter_model.safetensors')),
+        `${asset.id} 解压后应有 data/adapters/<id>/adapter_model.safetensors`,
+      )
+    }
+
+    // 归档缓存优先：DATA_E 同时有 .downloads 归档与已解压目录 → 不回打，manifest 仍用清单钉死值
+    createInstalledFixture(DATA_E, {})
+    writeExtractedAdapters(DATA_E)
+    const priority = await buildEnginePackage({ dataDir: DATA_E, outDir: path.join(TMP, 'package-adapter-priority'), profiles: ['essential'] })
+    for (const asset of ADAPTER_ASSETS) {
+      const entry = priority.manifest.files.find((file) => file.key === `adapter/${asset.file}`)
+      assert(entry, `${asset.id}（有归档缓存）缺 key`)
+      assertEqual(entry.size, asset.size, `${asset.id} 有归档缓存时应沿用清单钉死 size`)
+      assertEqual(entry.sha256, asset.sha256, `${asset.id} 有归档缓存时应沿用清单钉死 sha256`)
+    }
+    return `${ADAPTER_ASSETS.length} 个适配器回打归档 / ${generatedBytes}B`
   })
 
   /* ---------------- 3. findLocalArtifact ---------------- */

@@ -1,9 +1,17 @@
 # =============================================================================
 # AI 编曲伴侣 —— 单容器镜像（多阶段构建）
 #
-#   docker compose up -d                      # 推荐
-#   docker build -t ai-arrangement-buddy .    # 手动构建
+#   docker compose up -d                                   # 推荐
+#   docker build -t ai-arrangement-buddy .                 # 手动构建
 #   docker run -d --name aiab -p 8787:8787 -v aiab-data:/data ai-arrangement-buddy
+#
+# 预置 AI 引擎（模型 + LoRA 适配器 + 可选训练数据，完全离线）：
+#   1) 在「已装好引擎」的机器上先跑：node scripts/build-docker-bundle.mjs --profiles essential --no-build
+#      （XL/训练数据：--profiles essential,xl --training；详见 docs/DOCKER_ENGINE_BUNDLE.md）
+#   2) 离线包生成到 docker/engine-package/（仓库只带占位 README.md，避免 COPY 失败）
+#   3) docker build / docker compose up -d 时随构建上下文进镜像的 /app/engine-package
+#   容器内安装引擎时直接本地命中（硬链接/复制），不再从 HF / GitHub 下载。
+#   注意镜像体积会相应增加（基础包 ~3.4GB 起，XL + 训练数据可到 30GB+）。
 #
 # 说明：
 # - builder 阶段安装依赖并构建前端 + 后端；
@@ -60,6 +68,17 @@ COPY --from=builder /out/server/src ./apps/server/src
 # 前端静态资源 + 音色库下载脚本
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 COPY --from=builder /app/scripts/fetch-soundfonts.mjs ./scripts/fetch-soundfonts.mjs
+
+# ------------------------- 预置 AI 引擎离线包（可选） -------------------------
+# 构建前用 node scripts/build-docker-bundle.mjs 把离线包生成到 docker/engine-package/。
+# 仓库自带占位 README.md，所以即使没生成离线包，COPY 也不会因为目录不存在而失败
+# （此时 /app/engine-package 里只有 README.md，安装器发现没有 engine-package.json 会自动回退网络下载）。
+# 想用别的目录：docker build --build-arg ENGINE_PACKAGE_DIR=docker/engine-package-xl .
+ARG ENGINE_PACKAGE_DIR=docker/engine-package
+COPY ${ENGINE_PACKAGE_DIR}/ ./engine-package/
+# enginePackageDir() 的优先级：设置里的离线包目录 > 本环境变量 > <数据卷>/engine-package。
+# 离线包放在镜像里（而不是 /data 卷）可以跟着镜像一起分发，容器重建后依然在。
+ENV AIAB_ENGINE_PACKAGE_DIR=/app/engine-package
 
 RUN mkdir -p /data/soundfonts /data/projects /data/agent-workspace \
  && chown -R node:node /app /data

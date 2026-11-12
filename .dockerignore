@@ -8,9 +8,13 @@ data
 .git
 .gitignore
 .verify
+.verify-*
 docs
 screenshots
 apps/web/public/soundfonts
 .env
 .env.*
 .DS_Store
+# 注意：不要忽略 docker/ —— docker/engine-package/ 里的离线引擎包（模型 + LoRA 适配器）
+# 要随构建上下文发送给 Dockerfile 的 runtime 阶段（COPY ${ENGINE_PACKAGE_DIR}/ ./engine-package/）。
+# 它体积大（~3.4GB～30GB+）但只影响 docker build 的上下文/镜像大小，不影响本地开发。

@@ -28,6 +28,11 @@ export const MODEL_DISPLAY_NAMES: Readonly<Record<string, string>> = {
   'acestep-v15-sft-Q8_0.gguf': '精修生成模型',
   'acestep-5Hz-lm-1.7B-Q8_0.gguf': '提示词增强模型',
   'acestep-v15-base-Q8_0.gguf': '分轨生成模型',
+  // P9 XL（4B）档：与标准档同名的能力用「（增强版）」区分，界面不暴露真实权重文件名
+  'acestep-v15-xl-turbo-Q8_0.gguf': '快速生成模型（增强版）',
+  'acestep-v15-xl-sft-Q8_0.gguf': '精修生成模型（增强版）',
+  'acestep-v15-xl-base-Q8_0.gguf': '分轨生成模型（增强版）',
+  'acestep-5Hz-lm-4B-Q8_0.gguf': '提示词增强模型（增强版）',
 }
 
 /** 引擎变体（内部 id：turbo / sft / base / xl_*）→ 界面展示名 */

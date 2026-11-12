@@ -62,6 +62,13 @@ P10 针对这三点做了三件事：**国内镜像源**、**多源分片并发�
 
 分片数由 **设置 → 引擎下载 → 分片并发**（`concurrency`，0–16，默认 4）控制：`0/1` = 单连接。国内实测：单连接几十 KB/s 的线路，4 路并发通常能到 1–5MB/s（取决于线路与镜像）。
 
+P11 起下载器还会做「**源健康度**」管理（无需配置）：
+
+1. **分片只在健康源之间轮换**：某个源返回 429 限流 / 5xx / 连接失败时，会按 `Retry-After`（没有则指数退避）冷却 —— 连续失败 3 次冷却 60s、5 次冷却 120s；冷却期内新分片**全部走健康源**，不会再往不可用源上白发请求等超时。404/403 表示「这个镜像没有该文件」，只对该文件跳过该源，不影响其它文件的源选择。
+2. **单连接路径同样跳过冷却中的源**，且同一安装过程内**所有文件共享源健康度**（前一个文件被限流，后一个文件会直接避开该源一段时间）。
+3. **进度消息**新增「N 线程 · 预计剩余 M 分钟」（运行时 / 模型 / 适配器 / 训练资产都有），方便判断还要等多久。
+4. **并发建议**：国内网络默认 4 线程通常就能跑满常见百兆宽带；链路更好可调到 6–8。如果镜像持续 429，说明触发了镜像限流 —— 降低线程数，或改用 **Docker 内置离线包**（[DOCKER_ENGINE_BUNDLE.md](./DOCKER_ENGINE_BUNDLE.md)）彻底不下载。
+
 ### 2.4 服务器离线包 + 镜像分发
 
 - **生成**：任意一台已装好引擎的机器，在 设置 → 引擎下载 里点「生成服务器离线包」，或命令行 `node scripts/provision.mjs package`。
@@ -72,6 +79,10 @@ P10 针对这三点做了三件事：**国内镜像源**、**多源分片并发�
 离线包文件 key 规则（全项目统一）：`runtime/<文件名>`、`cuda/<CUDA zip 名>`、`runtime-archive/<legacy 归档名>`、`model/<gguf 名>`、`adapter/<adapter 归档名>`、`training/code`、`training/python`、`training/dataset/<id>`、`training/checkpoint/<dest>`。
 
 > 训练数据（代码 / Python / 数据集 / 检查点）体量大，**默认不打进离线包**；需要时加 `--training`。
+>
+> 想让离线包**直接随镜像分发**（部署后安装零下载、镜像内即带模型 + LoRA）？
+> 见 [DOCKER_ENGINE_BUNDLE.md](./DOCKER_ENGINE_BUNDLE.md)：`node scripts/build-docker-bundle.mjs` 一键生成
+> `docker/engine-package` 再 `docker build`，省掉手工 `docker cp`；也修掉了「LoRA 归档缓存被清理 → 离线包缺适配器」的缺口（从 `data/adapters/<id>/` 回打 tar.gz）。
 
 ---
 
@@ -124,6 +135,7 @@ node scripts/provision.mjs package --profiles essential --training
 也可以直接在 UI 里点：**设置 → 引擎下载 → 生成服务器离线包**（默认只含基础档），面板会显示进度。
 
 打包只会**复制已安装目录里存在的文件**，缺失项跳过并汇总 warnings；`engine-package.json` 里记录每个文件的 `key / file / size / sha256`。
+LoRA 适配器如果下载缓存（`audio-engine/.downloads/*.tar.gz`）已被清理、只剩 `data/adapters/<id>/` 解压目录，P11 起会**自动回打成归档**再打进包（`size/sha256` 用生成文件的实际值），离线包不会因为缓存被清理而缺风格适配器。
 
 ### 4.2 部署
 
@@ -143,6 +155,9 @@ Docker 部署时挂到命名卷里（默认 `/data`）：
 ```bash
 docker cp D:\aiab-package\. aiab:/data/engine-package/
 ```
+
+> 更推荐把离线包**打进镜像**（一键生成 + `docker build`，部署后安装零下载，不用手工 `docker cp`）：
+> 见 [DOCKER_ENGINE_BUNDLE.md](./DOCKER_ENGINE_BUNDLE.md)。
 
 之后服务器上的应用安装引擎时：只要 `useLocalPackage` 开启（默认）且文件 sha256 匹配，就直接本地硬链接/复制，**不产生下载流量**。
 

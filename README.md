@@ -131,6 +131,18 @@ docker build -t ai-arrangement-buddy:latest .
 docker run -d --name aiab -p 8787:8787 -v aiab-data:/data ai-arrangement-buddy:latest
 ```
 
+**想让镜像自带 AI 引擎（模型 + LoRA 适配器，安装零下载）？**
+在一台已装好引擎的机器上先生成离线包，再构建镜像：
+
+```bash
+node scripts/build-docker-bundle.mjs --profiles essential --no-build   # 生成 docker/engine-package（实测约 4.35GB）
+docker build -t ai-arrangement-buddy:bundled .                         # 或 docker compose up -d --build
+```
+
+镜像内是 `/app/engine-package`（环境变量 `AIAB_ENGINE_PACKAGE_DIR`），安装引擎时直接本地命中、不走网络；
+局域网其它 GPU 机器还可用 `node scripts/provision.mjs fetch --from http://<nas>:8787` 从这台服务器拉。
+XL 档 / 训练数据、体积与排障详见 [docs/DOCKER_ENGINE_BUNDLE.md](docs/DOCKER_ENGINE_BUNDLE.md)。
+
 ### 方式二：macOS 双击启动
 
 1. 解压 / 克隆本仓库

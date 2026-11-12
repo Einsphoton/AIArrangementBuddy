@@ -130,6 +130,17 @@ export function speedText(speedBps: number | undefined): string {
   return speedBps && Number.isFinite(speedBps) ? ` · ${(speedBps / (1024 * 1024)).toFixed(1)}MB/s` : ''
 }
 
+/** 进度消息里的并发线程数 / 预计剩余时间（体积大、用户最关心「还要多久」） */
+export function etaText(speedBps: number | undefined, remainingBytes: number, segments?: number): string {
+  const threads = segments && segments > 1 ? ` · ${segments} 线程` : ''
+  if (!speedBps || !Number.isFinite(speedBps) || speedBps <= 0 || remainingBytes <= 0) return threads
+  const seconds = remainingBytes / speedBps
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 24 * 3600) return threads
+  const minutes = Math.max(1, Math.round(seconds / 60))
+  if (minutes >= 60) return `${threads} · 预计剩余 ${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+  return `${threads} · 预计剩余 ${minutes} 分钟`
+}
+
 /**
  * 创建下载上下文：
  * - 不传 download（旧调用/离线测试）→ DIRECT 配置：纯官方 URL + 单连接，行为与 P9 一致；
@@ -610,10 +621,10 @@ async function installModernRuntime(
       {
         force: options.force,
         attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
-        onProgress: ({ received, speedBps }) => {
+        onProgress: ({ received, speedBps, segments }) => {
           reportProgress(
             received,
-            `下载 ${file.name}（${(received / 1e6).toFixed(1)}/${(file.size / 1e6).toFixed(1)}MB${speedText(speedBps)}）`,
+            `下载 ${file.name}（${(received / 1e6).toFixed(1)}/${(file.size / 1e6).toFixed(1)}MB${speedText(speedBps)}${etaText(speedBps, Math.max(0, file.size - received), segments)}）`,
           )
         },
       },
@@ -634,10 +645,10 @@ async function installModernRuntime(
       {
         force: options.force,
         attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
-        onProgress: ({ received, speedBps }) => {
+        onProgress: ({ received, speedBps, segments }) => {
           reportProgress(
             received,
-            `下载 CUDA 组件 ${asset.archive}（${(received / 1e6).toFixed(0)}/${(asset.size / 1e6).toFixed(0)}MB${speedText(speedBps)}）`,
+            `下载 CUDA 组件 ${asset.archive}（${(received / 1e6).toFixed(0)}/${(asset.size / 1e6).toFixed(0)}MB${speedText(speedBps)}${etaText(speedBps, Math.max(0, asset.size - received), segments)}）`,
           )
         },
       },
@@ -722,11 +733,11 @@ async function installLegacyRuntime(
     {
       force: options.force,
       attempts: RUNTIME_DOWNLOAD_ATTEMPTS,
-      onProgress: ({ received, total, speedBps }) => {
+      onProgress: ({ received, total, speedBps, segments }) => {
         const ratio = total > 0 ? received / total : 0
         options.onProgress?.(
           ratio * 0.7,
-          `下载运行时 ${(received / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)}MB${speedText(speedBps)}`,
+          `下载运行时 ${(received / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)}MB${speedText(speedBps)}${etaText(speedBps, Math.max(0, total - received), segments)}`,
         )
       },
     },
@@ -826,11 +837,11 @@ export async function installModels(options: InstallModelsOptions): Promise<{ in
       target,
       {
         attempts: MODEL_DOWNLOAD_ATTEMPTS,
-        onProgress: ({ received, speedBps }) => {
+        onProgress: ({ received, speedBps, segments }) => {
           const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
           options.onProgress?.(
             ratio,
-            `下载 ${file.name}（${((doneBytes + received) / 1e9).toFixed(2)}/${(totalBytes / 1e9).toFixed(2)}GB${speedText(speedBps)}）`,
+            `下载 ${file.name}（${((doneBytes + received) / 1e9).toFixed(2)}/${(totalBytes / 1e9).toFixed(2)}GB${speedText(speedBps)}${etaText(speedBps, Math.max(0, totalBytes - doneBytes - received), segments)}）`,
           )
         },
       },
@@ -880,11 +891,11 @@ export async function installAdapters(options: InstallAdaptersOptions): Promise<
       archivePath,
       {
         attempts: ADAPTER_DOWNLOAD_ATTEMPTS,
-        onProgress: ({ received, speedBps }) => {
+        onProgress: ({ received, speedBps, segments }) => {
           const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
           options.onProgress?.(
             ratio,
-            `下载适配器 ${asset.id}（${((doneBytes + received) / 1e6).toFixed(1)}/${(totalBytes / 1e6).toFixed(1)}MB${speedText(speedBps)}）`,
+            `下载适配器 ${asset.id}（${((doneBytes + received) / 1e6).toFixed(1)}/${(totalBytes / 1e6).toFixed(1)}MB${speedText(speedBps)}${etaText(speedBps, Math.max(0, totalBytes - doneBytes - received), segments)}）`,
           )
         },
       },
@@ -949,6 +960,7 @@ function updateJob(id: string, patch: Partial<ProvisionJob>): void {
     }, 0)
     job.progress = Math.round((sum / stepsTotal) * 1000) / 1000
   }
+  schedulePersistJobs()
 }
 
 export function getProvisionJob(id: string): ProvisionJob | null {
@@ -963,6 +975,79 @@ export function cancelProvisionJob(id: string): boolean {
   if (id !== activeJobId || !activeAbort) return false
   activeAbort.abort()
   return true
+}
+
+/** 当前正在运行的安装任务（前端再次点下载 / 重开面板时用它接管） */
+export function getActiveProvisionJob(): ProvisionJob | null {
+  if (!activeJobId) return null
+  const job = jobs.get(activeJobId)
+  return job && job.status === 'running' ? job : null
+}
+
+/* ------------------------------------------------------------------ */
+/* 任务持久化：服务端重启 / 页面刷新后仍能看到最近任务                   */
+/* ------------------------------------------------------------------ */
+
+const MAX_PERSISTED_JOBS = 10
+let persistDataDir: string | null = null
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+
+function jobsRecordPath(dataDir: string): string {
+  return path.join(dataDir, 'logs', 'provision-jobs.json')
+}
+
+function persistJobsNow(): void {
+  if (!persistDataDir) return
+  persistTimer = null
+  try {
+    const target = jobsRecordPath(persistDataDir)
+    mkdirSync(path.dirname(target), { recursive: true })
+    const records = listProvisionJobs().slice(0, MAX_PERSISTED_JOBS)
+    writeFileSync(target, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), jobs: records }, null, 2), 'utf8')
+  } catch {
+    /* 持久化失败不影响安装 */
+  }
+}
+
+function schedulePersistJobs(): void {
+  if (!persistDataDir || persistTimer) return
+  persistTimer = setTimeout(() => persistJobsNow(), 800)
+  persistTimer.unref?.()
+}
+
+/**
+ * 启动时恢复最近安装任务（用于服务端重启后前端仍能看到结果 / 断点续传提示）。
+ * 上次进程里 running 的任务已随进程终止，这里标记为 failed 并提示重新下载会续传。
+ * 返回恢复的任务数；已有内存任务时不再覆盖。
+ */
+export function restoreProvisionJobs(dataDir: string): number {
+  persistDataDir = dataDir
+  if (jobs.size > 0) return 0
+  try {
+    const raw = JSON.parse(readFileSync(jobsRecordPath(dataDir), 'utf8')) as { version?: number; jobs?: unknown }
+    if (raw?.version !== 1 || !Array.isArray(raw.jobs)) return 0
+    let restored = 0
+    let changed = false
+    for (const item of raw.jobs) {
+      const job = item as ProvisionJob
+      if (!job || typeof job.id !== 'string' || !Array.isArray(job.steps)) continue
+      const copy: ProvisionJob = { ...job, steps: job.steps.map((step) => ({ ...step })) }
+      if (copy.status === 'running') {
+        copy.status = 'failed'
+        copy.error = '服务端已重启，任务已中断；重新点击「开始下载」会从断点续传，无需重下已完成部分'
+        copy.steps = copy.steps.map((step) =>
+          step.status === 'running' ? { ...step, status: 'failed', message: '服务端重启，任务中断（可重新下载续传）' } : step,
+        )
+        changed = true
+      }
+      jobs.set(copy.id, copy)
+      restored += 1
+    }
+    if (changed) schedulePersistJobs()
+    return restored
+  } catch {
+    return 0
+  }
 }
 
 export interface StartProvisionOptions {
@@ -980,6 +1065,7 @@ export interface StartProvisionOptions {
 
 /** 启动安装任务（异步执行；返回立即返回 job）。 */
 export function startProvision(options: StartProvisionOptions): ProvisionJob {
+  persistDataDir = options.dataDir
   if (activeJobId) {
     const running = jobs.get(activeJobId)
     if (running && running.status === 'running') throw new Error('已有安装任务在进行中，请等待完成或先取消')
@@ -1109,7 +1195,7 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
                 if (!jobNow) return
                 updateJob(id, { steps: jobNow.steps.map((item) => (item.key === step.key ? { ...item, message } : item)) })
               },
-              onProgress: ({ received, total, speedBps, attempt }) => {
+              onProgress: ({ received, total, speedBps, attempt, segments }) => {
                 const jobNow = jobs.get(id)
                 if (!jobNow) return
                 const attemptNote = attempt && attempt > 1 ? ` · 第 ${attempt}/${MODEL_DOWNLOAD_ATTEMPTS} 次尝试` : ''
@@ -1120,7 +1206,7 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
                           ...item,
                           progress: total > 0 ? received / total : 0,
                           bytes: received,
-                          message: `${(received / 1e9).toFixed(2)}GB${speedText(speedBps)}${attemptNote}`,
+                          message: `${(received / 1e9).toFixed(2)}GB${speedText(speedBps)}${etaText(speedBps, Math.max(0, total - received), segments)}${attemptNote}`,
                         }
                       : item,
                   ),

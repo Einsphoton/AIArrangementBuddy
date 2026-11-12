@@ -32,10 +32,12 @@ import {
 } from '../provision/enginePackage.js'
 import {
   cancelProvisionJob,
+  getActiveProvisionJob,
   getProvisionJob,
   listProvisionJobs,
   provisionPaths,
   provisionStatus,
+  restoreProvisionJobs,
   startProvision,
 } from '../provision/installer.js'
 import {
@@ -189,6 +191,13 @@ function trimPackageJobs(): void {
 /* ------------------------------------------------------------------ */
 
 export function registerProvisionRoutes(app: FastifyInstance): void {
+  // 服务端重启后恢复最近安装任务（前端刷新/重开面板能看到上次结果；中断任务给出续传提示）
+  try {
+    restoreProvisionJobs(dataDir)
+  } catch {
+    /* 恢复失败不影响安装能力 */
+  }
+
   /* ---------------- 状态 ---------------- */
 
   app.get('/api/provision/status', async () => {
@@ -277,7 +286,13 @@ export function registerProvisionRoutes(app: FastifyInstance): void {
       const job = startProvision(installOptions)
       return reply.send({ jobId: job.id, job })
     } catch (error) {
-      return reply.code(400).send({ error: errorMessage(error) })
+      // 已有下载任务在跑：返回 409 + 运行中任务，前端据此「接管」而不是报错
+      const running = getActiveProvisionJob()
+      const message = errorMessage(error)
+      if (running && /已有安装任务/.test(message)) {
+        return reply.code(409).send({ error: message, jobId: running.id, job: running })
+      }
+      return reply.code(400).send({ error: message })
     }
   })
 
