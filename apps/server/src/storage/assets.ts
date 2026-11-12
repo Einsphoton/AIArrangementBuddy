@@ -7,7 +7,7 @@
  * - residency=local 时记录持有设备，云同步阶段再补上传。
  *
  * 目录：
- *   data/assets/<id>.wav     音频文件（P1 只收 WAV，ACE-Step 输出即 WAV）
+ *   data/assets/<id>.wav     音频文件（P1 只收 WAV，本机生成引擎输出即 WAV）
  *   data/assets/index.json   资产清单（id → 元数据 + 峰值）
  */
 import { createHash } from 'node:crypto'
@@ -68,7 +68,7 @@ export function saveAsset(buffer: Buffer, meta: { name?: string; mime?: string }
   }
 
   if (meta.mime && !/wav|wave/i.test(meta.mime) && !/\.wav$/i.test(meta.name ?? '')) {
-    throw new Error('P1 只支持 WAV 音频（ACE-Step 输出即 WAV）；其它格式请先转成 WAV PCM16')
+    throw new Error('P1 只支持 WAV 音频（本机生成引擎输出即 WAV）；其它格式请先转成 WAV PCM16')
   }
 
   const info = parseWav(buffer)

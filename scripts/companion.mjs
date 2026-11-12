@@ -2,14 +2,14 @@
 /**
  * Companion 工作节点进程（P2-A）：把 NAS/服务端的音频生成任务在本机 GPU 上执行。
  *
- *   node scripts/companion.mjs --server http://127.0.0.1:8899 --name "本机 GPU" [--mock] [--acestep] [--once]
+ *   node scripts/companion.mjs --server http://127.0.0.1:8899 --name "本机 GPU" [--mock|--engine] [--once]
  *
  * 协议（HTTP JSON 轮询，见 docs/COMPANION.md 与 docs/STUDIO_ARCHITECTURE.md §4）：
  *   register → 循环 [heartbeat / claim / progress / complete]
  *
  * 执行器：
  * - --mock      无 GPU 自检：generate_audio / repaint_audio 都返回 2 秒 440Hz 立体声 48k WAV。
- * - --acestep   生产执行器（默认）：
+ * - --engine    生产执行器（默认）：
  *     · EngineManager 常驻 ace-server 子进程，按 DiT 变体复用（generate_audio→turbo，repaint_audio→sft），
  *       同变体跨任务复用、切换变体才重启、空闲 --engine-idle 秒后自动退出、崩溃后下一任务重启；
  *     · generate_audio：POST /synth?wav=1（JSON）；
@@ -40,7 +40,7 @@ const TASK_TYPE_REPAINT = 'repaint_audio'
 const TASK_TYPE_STEM = 'generate_stem'
 const TASK_TYPE_COVER = 'cover_audio'
 const TASKS = [TASK_TYPE_GENERATE, TASK_TYPE_REPAINT, TASK_TYPE_STEM, TASK_TYPE_COVER]
-/** 任务类型 → ACE-Step DiT 变体（repaint 必须用 sft，lego 分轨必须用 base，cover 用 turbo） */
+/** 任务类型 → AI 音频生成引擎 DiT 变体（repaint 必须用 sft，lego 分轨必须用 base，cover 用 turbo） */
 const TASK_VARIANT = {
   [TASK_TYPE_GENERATE]: 'turbo',
   [TASK_TYPE_REPAINT]: 'sft',
@@ -56,29 +56,49 @@ const DEFAULT_ENGINE_IDLE_SEC = 600
 /** 数据目录：与产品一致（AIAB_DATA_DIR/DATA_DIR > <repo>/data） */
 const DATA_ROOT = process.env.AIAB_DATA_DIR || process.env.DATA_DIR || path.join(ROOT, 'data')
 /** P8 自动安装目录（node scripts/provision.mjs install 装到这里） */
-const PROVISIONED_ACESTEP_DIR = path.join(DATA_ROOT, 'ace-step')
+const PROVISIONED_ENGINE_DIR = path.join(DATA_ROOT, 'audio-engine')
+/** 旧版自动安装目录（服务端首次读取状态时会自动迁移到新目录） */
+const LEGACY_PROVISIONED_ENGINE_DIR = path.join(DATA_ROOT, 'ace-step')
 /** 旧版开发布局（Windows 本地实验区）；仅作为兼容回退 */
-const LEGACY_ACESTEP_DIR = path.join(ROOT, 'music-gen', 'acestep-cpp')
+const LEGACY_ENGINE_DIR = path.join(ROOT, 'music-gen', 'acestep-cpp')
 const IS_WINDOWS = process.platform === 'win32'
 const RUNTIME_BIN_NAMES = IS_WINDOWS
   ? ['ace-server.exe', 'bin/ace-server.exe']
   : ['ace-server', 'bin/ace-server']
 
-/** 引擎根目录：AIAB_ACESTEP_DIR > 已安装目录 > 旧版目录 */
+/** 模型文件 → 对用户/界面展示的名字（不暴露真实权重名，与 packages/core/src/branding.ts 一致） */
+export const MODEL_DISPLAY_NAMES = Object.freeze({
+  'Qwen3-Embedding-0.6B-Q8_0.gguf': '语义编码器',
+  'vae-BF16.gguf': '音频编解码器',
+  'acestep-v15-turbo-Q8_0.gguf': '快速生成模型',
+  'acestep-v15-sft-Q8_0.gguf': '精修生成模型',
+  'acestep-5Hz-lm-1.7B-Q8_0.gguf': '提示词增强模型',
+  'acestep-v15-base-Q8_0.gguf': '分轨生成模型',
+})
+
+/** 引擎变体 → 展示名（进度/错误信息里出现，避免暴露内部变体名） */
+export const VARIANT_DISPLAY_NAMES = Object.freeze({
+  turbo: '快速生成模型',
+  sft: '精修生成模型',
+  base: '分轨生成模型',
+})
+
+/** 引擎根目录：AIAB_ENGINE_DIR（兼容旧 AIAB_ACESTEP_DIR）> 已安装目录 > 旧版目录 */
 function resolveAceStepDir() {
-  const explicit = process.env.AIAB_ACESTEP_DIR || process.env.ACESTEP_DIR
+  const explicit = process.env.AIAB_ENGINE_DIR || process.env.AIAB_ACESTEP_DIR || process.env.ACESTEP_DIR
   if (explicit) return path.resolve(explicit)
-  for (const candidate of [PROVISIONED_ACESTEP_DIR, LEGACY_ACESTEP_DIR]) {
+  for (const candidate of [PROVISIONED_ENGINE_DIR, LEGACY_PROVISIONED_ENGINE_DIR, LEGACY_ENGINE_DIR]) {
     if (RUNTIME_BIN_NAMES.some((name) => existsSync(path.join(candidate, name)))) return candidate
   }
-  return PROVISIONED_ACESTEP_DIR
+  return PROVISIONED_ENGINE_DIR
 }
 
 export const ACESTEP_DIR = resolveAceStepDir()
 export const ACESTEP_BIN =
   RUNTIME_BIN_NAMES.map((name) => path.join(ACESTEP_DIR, name)).find((candidate) => existsSync(candidate)) ??
   path.join(ACESTEP_DIR, RUNTIME_BIN_NAMES[0])
-export const ACESTEP_MODELS_DIR = process.env.AIAB_ACESTEP_MODELS_DIR || path.join(ACESTEP_DIR, 'models')
+export const ACESTEP_MODELS_DIR =
+  process.env.AIAB_ENGINE_MODELS_DIR || process.env.AIAB_ACESTEP_MODELS_DIR || path.join(ACESTEP_DIR, 'models')
 /** 计算后端：macOS 用 Metal，其它平台默认 CUDA0（可用 GGML_BACKEND 覆盖） */
 export const ACESTEP_BACKEND = process.env.GGML_BACKEND || (process.platform === 'darwin' ? 'METAL' : 'CUDA0')
 /** 缺引擎时给用户的自动安装提示 */
@@ -141,13 +161,13 @@ const CAPABILITY_STATUS_INTERVAL_MS = 30_000
 const CAPABILITY_HINT_INTERVAL_MS = 30_000
 
 const USAGE = `用法：
-  node scripts/companion.mjs --server http://127.0.0.1:8899 --name "本机 GPU" [--mock|--acestep] [--once] [--engine-idle 秒]
+  node scripts/companion.mjs --server http://127.0.0.1:8899 --name "本机 GPU" [--mock|--engine] [--once] [--engine-idle 秒]
 
 参数：
   --server <url>       服务端地址（默认 ${DEFAULT_SERVER}）
   --name <名字>        工作节点显示名（默认取主机名）
   --mock               无 GPU 自检执行器：generate/repaint/stem 都返回 2 秒 440Hz 立体声 48k WAV
-  --acestep            生产执行器（默认）：常驻本地 ACE-Step C++ 引擎（需要 CUDA/GPU）
+  --engine             生产执行器（默认）：常驻本机 AI 音频生成引擎（需要 CUDA/GPU）
   --engine-idle <秒>   引擎空闲多少秒后自动退出，默认 ${DEFAULT_ENGINE_IDLE_SEC}；0 = 不自动退出
   --once               处理完一个任务就退出（验收用）
   -h, --help           显示本帮助`
@@ -396,7 +416,8 @@ export function parseArgs(argv = []) {
       case '--mock':
         mock = true
         break
-      case '--acestep':
+      case '--engine':
+      case '--acestep': // 旧参数名，保留兼容
         acestep = true
         break
       case '--once':
@@ -410,7 +431,7 @@ export function parseArgs(argv = []) {
         throw new Error(`未知参数：${raw}\n\n${USAGE}`)
     }
   }
-  if (mock && acestep) throw new Error('--mock 与 --acestep 只能二选一')
+  if (mock && acestep) throw new Error('--mock 与 --engine 只能二选一')
   options.executor = mock ? 'mock' : 'acestep'
   return options
 }
@@ -574,7 +595,7 @@ export function readWavInfo(buffer) {
 /* /synth 请求体（照抄 gen_style_datasets.py / test_modes.py 的语义）    */
 /* ------------------------------------------------------------------ */
 
-/** generate_audio：task.params → ACE-Step /synth JSON 请求体。纯函数；缺 caption 直接报错。 */
+/** generate_audio：task.params → AI 音频生成引擎 /synth JSON 请求体。纯函数；缺 caption 直接报错。 */
 export function buildSynthPayload(params = {}) {
   const caption = typeof params?.caption === 'string' ? params.caption.trim() : ''
   if (!caption) throw new Error('任务参数缺少 caption（生成提示词）')
@@ -636,7 +657,7 @@ export function validateRepaintParams(params = {}, { sourceDurationSec } = {}) {
   return normalized
 }
 
-/** repaint_audio：校验后的参数 → ACE-Step /synth multipart 里的 request JSON。 */
+/** repaint_audio：校验后的参数 → AI 音频生成引擎 /synth multipart 里的 request JSON。 */
 export function buildRepaintRequest(params = {}) {
   return {
     caption: params.caption,
@@ -671,7 +692,7 @@ export function validateStemParams(params = {}) {
   return normalized
 }
 
-/** generate_stem：校验后的参数 → ACE-Step lego request JSON（multipart 的 request 字段）。 */
+/** generate_stem：校验后的参数 → AI 音频生成引擎 lego request JSON（multipart 的 request 字段）。 */
 export function buildLegoRequest(params = {}) {
   return {
     caption: params.caption,
@@ -759,12 +780,13 @@ export function engineDecision({
   return 'start'
 }
 
-/** 引擎展示名：`turbo` / `sft+LoRA(adapter_dir)`（纯函数，仅用于日志）。 */
+/** 引擎展示名（用于任务进度/日志，不暴露内部变体名）。 */
 export function engineLabel(variant, adapterPath, lm = false) {
   if (!variant) return '无'
   const adapterName = adapterPath ? path.basename(String(adapterPath)) : ''
-  const suffix = lm ? '+LM' : ''
-  return (adapterName ? `${variant}+LoRA(${adapterName})` : variant) + suffix
+  const base = VARIANT_DISPLAY_NAMES[variant] ?? '生成模型'
+  const suffix = lm ? '（含提示词增强）' : ''
+  return (adapterName ? `${base}+风格适配器(${adapterName})` : base) + suffix
 }
 
 /** 空闲回收判断（纯函数）。idleMs<=0 表示禁用自动退出。 */
@@ -885,8 +907,13 @@ export function detectCapabilityGaps({ blockedByCapability, supportedVariants = 
 /** 生成能力不匹配提示（纯函数），例如「当前队列有 2 个任务需要 sft，但本机只上报了 turbo」。 */
 export function formatCapabilityGapHint({ gaps = [], supportedVariants = [] } = {}) {
   if (!Array.isArray(gaps) || gaps.length === 0) return ''
-  const needs = gaps.map((gap) => `${gap.count} 个任务需要 ${gap.variant}`).join('、')
-  const local = Array.isArray(supportedVariants) && supportedVariants.length ? supportedVariants.join('/') : '（未限制）'
+  const needs = gaps
+    .map((gap) => `${gap.count} 个任务需要 ${VARIANT_DISPLAY_NAMES[gap.variant] ?? '生成模型'}`)
+    .join('、')
+  const local =
+    Array.isArray(supportedVariants) && supportedVariants.length
+      ? supportedVariants.map((variant) => VARIANT_DISPLAY_NAMES[variant] ?? '生成模型').join('/')
+      : '（未限制）'
   return `⚠ 当前队列有${needs}，但本机只上报了 ${local}；服务端不会派单——安装对应模型，或用 --mock 自检`
 }
 
@@ -971,21 +998,23 @@ export async function terminateChild(child, { graceMs = 15_000, killMs = 5000, l
 }
 
 /* ------------------------------------------------------------------ */
-/* ACE-Step 预检 / 健康检查                                             */
+/* AI 音频生成引擎 预检 / 健康检查                                             */
 /* ------------------------------------------------------------------ */
 
 /** 检查 bin + 必需模型（turbo/sft/embedding/vae）是否存在；缺失时返回中文原因，不抛异常。 */
 export function preflightAceStep({ exists = existsSync } = {}) {
   const missing = REQUIRED_MODEL_FILES.filter((file) => !exists(file))
   if (missing.length === 0) return { ok: true, missing: [] }
-  const names = missing.map((file) => path.relative(ROOT, file) || file)
+  const names = missing.map((file) =>
+    file === ACESTEP_BIN ? '引擎可执行文件' : (MODEL_DISPLAY_NAMES[path.basename(file)] ?? '模型文件'),
+  )
   return {
     ok: false,
     missing,
     message:
-      `本机 AI 引擎未安装完整（缺少 ${names.join(', ')}）。` +
+      `本机 AI 音频生成引擎未安装完整（缺少${names.join('、')}）。` +
       `可运行自动安装：${PROVISION_HINT}（或在产品界面点“安装本机引擎”）；` +
-      `已装好但路径不同可设置 AIAB_ACESTEP_DIR / AIAB_ACESTEP_MODELS_DIR`,
+      `已装好但路径不同可设置 AIAB_ENGINE_DIR / AIAB_ENGINE_MODELS_DIR`,
   }
 }
 
@@ -1009,9 +1038,9 @@ async function waitForAceHealth({
   while (Date.now() - started < timeoutMs) {
     throwIfAborted(signal)
     const spawnError = getSpawnError()
-    if (spawnError) throw new Error(`无法启动 ACE-Step：${spawnError.message}`)
+    if (spawnError) throw new Error(`无法启动 AI 音频生成引擎：${spawnError.message}`)
     if (child?.exitCode !== null && child?.exitCode !== undefined) {
-      throw new Error(`ACE-Step 启动后提前退出（exit=${child.exitCode}）${aceLogTail(logTail())}`)
+      throw new Error(`AI 音频生成引擎 启动后提前退出（exit=${child.exitCode}）${aceLogTail(logTail())}`)
     }
     try {
       const response = await fetchImpl(`${base}/health`, { signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS) })
@@ -1021,7 +1050,7 @@ async function waitForAceHealth({
     }
     await sleep(ACESTEP_HEALTH_POLL_MS)
   }
-  throw new Error(`ACE-Step ${Math.round(timeoutMs / 1000)}s 内未就绪${aceLogTail(logTail())}`)
+  throw new Error(`AI 音频生成引擎 ${Math.round(timeoutMs / 1000)}s 内未就绪${aceLogTail(logTail())}`)
 }
 
 /* ------------------------------------------------------------------ */
@@ -1145,7 +1174,7 @@ export class EngineManager {
 
   /** 主入口：确保所需变体（+可选 LoRA）就绪，返回 { variant, adapterPath, pid, warm, baseUrl }。 */
   async ensure(desiredVariant, { adapterPath, signal, onProgress, lm = false } = {}) {
-    if (!MODEL_DITS[desiredVariant]) throw new Error(`未知引擎变体：${desiredVariant}`)
+    if (!MODEL_DITS[desiredVariant]) throw new Error(`未知引擎能力：${VARIANT_DISPLAY_NAMES[desiredVariant] ?? '生成模型'}`)
     throwIfAborted(signal)
     const desiredAdapter = adapterPath || null
     const desiredLm = Boolean(lm)
@@ -1237,11 +1266,11 @@ export class EngineManager {
       if (!existsSync(MODEL_AUX.lm)) {
         this.state = 'stopped'
         this.closeLogStream()
-        throw new Error(`质量模式需要 LM 模型，但文件不存在：${MODEL_AUX.lm}`)
+        throw new Error('质量模式需要提示词增强模型，但本机缺少该模型文件：请重新下载“质量增强”能力')
       }
       args.push('--lm', MODEL_AUX.lm)
     }
-    this.log(`启动 ACE-Step：variant=${engineLabel(variant, adapter, useLm)} port=${port} 日志=${logPath}`)
+    this.log(`启动 AI 音频生成引擎：variant=${engineLabel(variant, adapter, useLm)} port=${port} 日志=${logPath}`)
     if (variant === 'base') {
       this.log('base 变体用于 lego 分轨（generate_stem），冷启动较慢（真机实测 ~36s），请耐心等待…')
     }
@@ -1256,7 +1285,7 @@ export class EngineManager {
     } catch (error) {
       this.state = 'stopped'
       this.closeLogStream()
-      throw new Error(`启动 ACE-Step 失败：${readableError(error)}`)
+      throw new Error(`启动 AI 音频生成引擎 失败：${readableError(error)}`)
     }
     this.child = child
     child.once('error', (error) => {
@@ -1285,10 +1314,10 @@ export class EngineManager {
         logTail: () => this.logTail,
         fetchImpl: this.fetchImpl,
       })
-      if (this.child !== child) throw new Error('ACE-Step 启动失败：进程提前退出')
+      if (this.child !== child) throw new Error('AI 音频生成引擎 启动失败：进程提前退出')
       this.state = 'ready'
       const elapsed = ((this.now() - this.startedAt) / 1000).toFixed(1)
-      this.log(`ACE-Step 就绪（variant=${engineLabel(variant, adapter, useLm)} pid=${child.pid} ${elapsed}s）`)
+      this.log(`AI 音频生成引擎 就绪（variant=${engineLabel(variant, adapter, useLm)} pid=${child.pid} ${elapsed}s）`)
       return { variant, adapterPath: adapter ?? undefined, lm: useLm, pid: child.pid, warm: false, baseUrl, startedAt: this.startedAt }
     } catch (error) {
       await this.stop('启动失败')
@@ -1398,8 +1427,8 @@ function logAdapterUsage(ctx, params, adapterPath) {
   if (!params?.adapterId) return
   ctx.log(
     adapterPath
-      ? `LoRA 适配器：adapterId=${params.adapterId} → 启动引擎时 --lora ${adapterPath}`
-      : `LoRA 适配器：adapterId=${params.adapterId}（服务端未下发 adapterPath，按基座执行）`,
+      ? `风格适配器：adapterId=${params.adapterId} → 启动引擎时 --lora ${adapterPath}`
+      : `风格适配器：adapterId=${params.adapterId}（服务端未下发 adapterPath，按基座执行）`,
   )
 }
 
@@ -1452,21 +1481,21 @@ async function postLm({ ctx, baseUrl, body, timeoutMs = ACESTEP_LM_TIMEOUT_MS })
     })
   } catch (error) {
     if (ctx.isCanceled?.()) throw new CancelledError(ctx.cancelReason?.() ?? '用户取消')
-    if (error?.name === 'TimeoutError') throw new Error(`ACE-Step /lm 超时（${Math.round(timeoutMs / 1000)}s）`)
-    throw new Error(`调用 ACE-Step /lm 失败：${fetchFailureDetail(error)}`)
+    if (error?.name === 'TimeoutError') throw new Error(`AI 音频生成引擎 /lm 超时（${Math.round(timeoutMs / 1000)}s）`)
+    throw new Error(`调用 AI 音频生成引擎 /lm 失败：${fetchFailureDetail(error)}`)
   }
   if (!response.ok) {
     const text = await response.text().catch(() => '')
-    throw new Error(`ACE-Step /lm 失败（HTTP ${response.status}）：${truncate(text, 300)}`)
+    throw new Error(`AI 音频生成引擎 /lm 失败（HTTP ${response.status}）：${truncate(text, 300)}`)
   }
   let parsed
   try {
     parsed = await response.json()
   } catch {
-    throw new Error('ACE-Step /lm 返回的不是 JSON')
+    throw new Error('AI 音频生成引擎 /lm 返回的不是 JSON')
   }
   const first = Array.isArray(parsed) ? parsed[0] : parsed
-  if (!first || typeof first !== 'object') throw new Error('ACE-Step /lm 返回为空')
+  if (!first || typeof first !== 'object') throw new Error('AI 音频生成引擎 /lm 返回为空')
   return first
 }
 
@@ -1522,13 +1551,13 @@ async function postSynthWithProgress({
     })
     if (!response.ok) {
       const text = await response.text().catch(() => '')
-      throw new Error(`ACE-Step /synth 失败（HTTP ${response.status}）：${truncate(text, 300)}`)
+      throw new Error(`AI 音频生成引擎 /synth 失败（HTTP ${response.status}）：${truncate(text, 300)}`)
     }
     const file = Buffer.from(await response.arrayBuffer())
     try {
       readWavInfo(file)
     } catch {
-      throw new Error(`ACE-Step 返回的不是有效 WAV（${file.length} 字节）`)
+      throw new Error(`AI 音频生成引擎 返回的不是有效 WAV（${file.length} 字节）`)
     }
     return file
   } catch (error) {
@@ -1536,10 +1565,10 @@ async function postSynthWithProgress({
       await engineManager.kill(ctx.cancelReason())
       throw new CancelledError(ctx.cancelReason())
     }
-    if (error?.name === 'TimeoutError') throw new Error(`ACE-Step /synth 超时（${Math.round(timeoutMs / 1000)}s）`)
-    if (error?.name === 'AbortError') throw new Error('ACE-Step /synth 请求被中断')
-    if (error instanceof Error && error.message.startsWith('ACE-Step')) throw error
-    throw new Error(`调用 ACE-Step /synth 失败：${fetchFailureDetail(error)}`)
+    if (error?.name === 'TimeoutError') throw new Error(`AI 音频生成引擎 /synth 超时（${Math.round(timeoutMs / 1000)}s）`)
+    if (error?.name === 'AbortError') throw new Error('AI 音频生成引擎 /synth 请求被中断')
+    if (error instanceof Error && error.message.startsWith('AI 音频生成引擎')) throw error
+    throw new Error(`调用 AI 音频生成引擎 /synth 失败：${fetchFailureDetail(error)}`)
   } finally {
     pollAbort.abort()
     try {
@@ -1599,7 +1628,7 @@ export function createAceStepExecutor({ serverUrl, engineManager, log = () => {}
   if (!engineManager) throw new Error('createAceStepExecutor 需要 engineManager（常驻引擎管理器）')
   return {
     kind: 'acestep',
-    name: 'ACE-Step（本地 GPU，常驻引擎）',
+    name: '本机生成引擎（GPU 常驻）',
     capabilities: buildCapabilities('acestep'),
     async run(task, ctx) {
       const preflight = preflightAceStep()
@@ -1608,7 +1637,7 @@ export function createAceStepExecutor({ serverUrl, engineManager, log = () => {}
       if (task.type === TASK_TYPE_REPAINT) return runRepaint(task, ctx, { engineManager, serverUrl })
       if (task.type === TASK_TYPE_STEM) return runStem(task, ctx, { engineManager, serverUrl })
       if (task.type === TASK_TYPE_COVER) return runCover(task, ctx, { engineManager, serverUrl })
-      throw new Error(`ACE-Step 执行器不支持任务类型：${task.type}`)
+      throw new Error(`AI 音频生成引擎 执行器不支持任务类型：${task.type}`)
     },
   }
 }
@@ -1618,29 +1647,29 @@ async function runGenerate(task, ctx, { engineManager }) {
   const adapterPath = resolveAdapterPath(params)
   const quality = params.quality === true
   if (quality && adapterPath) {
-    throw new Error('质量模式使用 sft 基座，暂不支持 turbo LoRA 适配器：请关闭适配器，或改用快模式')
+    throw new Error('质量模式使用精修生成模型，暂不支持同时使用风格适配器：请关闭适配器，或改用快速模式')
   }
   if (quality && !existsSync(MODEL_AUX.lm)) {
-    throw new Error(`质量模式需要 LM 模型，但文件不存在：${path.relative(ROOT, MODEL_AUX.lm)}`)
+    throw new Error('质量模式需要提示词增强模型，但本机缺少该模型文件：请重新下载“质量增强”能力')
   }
   logAdapterUsage(ctx, params, adapterPath)
   const variant = quality ? 'sft' : 'turbo'
   const payload = quality ? buildQualityLmRequest(params) : buildSynthPayload(params)
   ctx.log(
-    `执行 generate_audio（${engineLabel(variant, adapterPath, quality)}，${payload.duration}s / ${payload.bpm ?? params.bpm ?? '?'} BPM / ${payload.keyscale ?? params.keyscale ?? '?'}${quality ? '，质量模式：LM→sft 50 步' : ''}）`,
+    `执行 generate_audio（${engineLabel(variant, adapterPath, quality)}，${payload.duration}s / ${payload.bpm ?? params.bpm ?? '?'} BPM / ${payload.keyscale ?? params.keyscale ?? '?'}${quality ? '，质量模式：精修 50 步' : ''}）`,
   )
   await ctx.progress(0.05, '准备任务')
   const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath, lm: quality })
   try {
     if (quality) {
-      await ctx.progress(0.3, engine.warm ? '复用常驻引擎（sft+LM）' : '开始质量合成（sft+LM）')
+      await ctx.progress(0.3, engine.warm ? '复用常驻引擎（精修 + 提示词增强）' : '开始质量合成（精修 + 提示词增强）')
       const lmStartedAt = Date.now()
       const lmResult = await postLm({ ctx, baseUrl: engine.baseUrl, body: JSON.stringify(payload) })
       const codeLen = typeof lmResult.audio_codes === 'string' ? lmResult.audio_codes.length : 0
       ctx.log(`LM 返回字段：${Object.keys(lmResult).join(',')}（audio_codes ${codeLen} 字符）`)
       const synthRequest = buildQualitySynthRequest(lmResult, params)
       ctx.log(
-        `LM 完成（${((Date.now() - lmStartedAt) / 1000).toFixed(1)}s）：bpm=${synthRequest.bpm ?? '?'} key=${synthRequest.keyscale ?? '?'} → sft ${QUALITY_STEPS} 步合成`,
+        `LM 完成（${((Date.now() - lmStartedAt) / 1000).toFixed(1)}s）：bpm=${synthRequest.bpm ?? '?'} key=${synthRequest.keyscale ?? '?'} → 精修 ${QUALITY_STEPS} 步合成`,
       )
       await ctx.progress(0.4, '合成中（质量模式 50 步）')
       const estimatedMs = Math.max(20_000, estimateGenerationSeconds({ type: TASK_TYPE_GENERATE, params }) * 1000)
@@ -1658,7 +1687,7 @@ async function runGenerate(task, ctx, { engineManager }) {
       return { file, fileName: `${sanitizeFileName(task.id)}.wav` }
     }
 
-    await ctx.progress(0.3, engine.warm ? `复用常驻引擎（${engineLabel('turbo', adapterPath)}）` : '开始生成音频（turbo）')
+    await ctx.progress(0.3, engine.warm ? `复用常驻引擎（${engineLabel('turbo', adapterPath)}）` : '开始生成音频（快速模式）')
     const estimatedMs = estimateGenerationSeconds({ type: TASK_TYPE_GENERATE, params }) * 1000
     const file = await postSynthWithProgress({
       ctx,
@@ -1735,7 +1764,7 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
 
 /**
  * generate_stem：用 base 变体做 lego 分轨（multipart request+audio）。
- * 注意：ACE-Step 输出的是「该 arm 独立生成的 stem」，不是源+stem 混音，也不保证与源音频逐样本对齐。
+ * 注意：AI 音频生成引擎 输出的是「该 arm 独立生成的 stem」，不是源+stem 混音，也不保证与源音频逐样本对齐。
  */
 async function runCover(task, ctx, { engineManager, serverUrl }) {
   const params = task.params ?? {}
@@ -1793,7 +1822,7 @@ async function runStem(task, ctx, { engineManager, serverUrl }) {
   const adapterPath = validated.adapterPath
   logAdapterUsage(ctx, params, adapterPath)
   if (!existsSync(MODEL_DITS.base)) {
-    throw new Error(`generate_stem 需要 base 模型，但文件不存在：${path.relative(ROOT, MODEL_DITS.base)}`)
+    throw new Error('分轨生成需要分轨生成模型，但本机缺少该模型文件：请先下载“分轨能力”')
   }
   ctx.log(`执行 generate_stem（${engineLabel('base', adapterPath)}，arm=${validated.arm}）：source=${validated.sourceAssetId}`)
   ctx.log('说明：输出是该 arm 独立生成的 stem（不是源音频+stem 混音），不保证与源音频逐样本对齐')

@@ -247,7 +247,7 @@ export function AudioEngineMenu({ onOpenAdvanced, onOpenTasks }: AudioEngineMenu
             <div className="rounded-lg border border-line/70 bg-bg-soft/60 px-2.5 py-1.5">
               <div className="flex items-center gap-1 text-[9.5px] text-ink-4">
                 <Settings2 size={9} />
-                风格训练（LoRA）
+                风格适配器训练
               </div>
               <div className="mt-1">
                 <TrainingButton />

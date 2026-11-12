@@ -86,7 +86,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   const [adapterId, setAdapterId] = useState('')
   /** P4-B：任务优先级（0 普通 / 1 高 / 2 紧急），默认普通 */
   const [priority, setPriority] = useState<CompanionPriority>(0)
-  /** P7-A：质量模式（LM → sft 50 步，更慢；与 LoRA 适配器互斥） */
+  /** P7-A：质量模式（精修 50 步，更慢；与风格适配器互斥） */
   const [quality, setQuality] = useState(false)
   /** P7-B：AI 重编（cover）——把当前工程渲染成 WAV 后整体换编制 */
   const [coverStrength, setCoverStrength] = useState(0.7)
@@ -540,12 +540,12 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] text-ink-3">LoRA 适配器（可选）</span>
+                  <span className="mb-1 block text-[11px] text-ink-3">风格适配器（可选）</span>
                   <select
                     value={adapterId}
                     onChange={(event) => setAdapterId(event.target.value)}
                     className="field w-full text-[12.5px]"
-                    aria-label="LoRA 适配器"
+                    aria-label="风格适配器"
                     disabled={quality || !adapters || adapters.length === 0}
                   >
                     <option value="">{adapters && adapters.length > 0 ? '默认模型' : '无可用适配器'}</option>
@@ -572,9 +572,9 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
                   className="mt-[1px] h-4 w-4 shrink-0 accent-[var(--accent,#4fd1c5)]"
                 />
                 <span className="min-w-0">
-                  <span className="font-medium text-ink-2">质量模式（LM → sft 50 步）</span>
+                  <span className="font-medium text-ink-2">质量模式（精修 50 步）</span>
                   <span className="mt-0.5 block text-[10.5px] leading-relaxed text-ink-4">
-                    更慢（20s 音频约 15–25s），高频/编曲更完整；与 LoRA 适配器互斥（勾选后自动清空适配器）
+                    更慢（20s 音频约 15–25s），高频/编曲更完整；与风格适配器互斥（勾选后自动清空适配器）
                   </span>
                 </span>
               </label>
@@ -715,7 +715,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
             className="btn btn-accent h-8 shrink-0 px-3 text-[12px]"
             onClick={() => void submit()}
             disabled={submitting || Boolean(taskId && running)}
-            title="提交 generate_audio 任务"
+            title="提交音频生成任务"
           >
             {submitting ? <LoaderCircle size={12} className="mr-1 animate-spin" /> : <Wand2 size={12} className="mr-1" />}
             {submitting ? '提交中…' : '开始生成'}

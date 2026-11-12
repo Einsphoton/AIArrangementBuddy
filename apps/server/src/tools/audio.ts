@@ -75,7 +75,7 @@ export const AUDIO_TOOLS: ToolDef[] = [
         stems: arr('分轨乐器（仅 audio_with_stems 使用；省略默认 guitar/bass/drums）', enm('乐器', STEM_ARMS)),
         startBeat: num('音频落轨起点（拍，≥0）；省略时落在播放头', { minimum: 0 }),
         trackName: str('可选的轨道/片段名（中文即可）'),
-        quality: bool('质量模式：LM → sft 50 步，更慢但更完整（与适配器互斥）'),
+        quality: bool('质量模式：精修 50 步，更慢但更完整（与风格适配器互斥）'),
         priority: int('任务优先级：0 普通 / 1 高 / 2 紧急', { minimum: 0, maximum: 2 }),
         reason: str('用一句中文说明为什么选这个模式，会展示给用户'),
       },

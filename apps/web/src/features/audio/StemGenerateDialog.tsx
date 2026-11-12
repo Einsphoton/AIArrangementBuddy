@@ -317,7 +317,7 @@ export function StemGenerateDialog({
       }
       if (created.length > 0) {
         setTasks(created)
-        pushToast('info', `已提交 ${created.length} 个分轨任务，等待 Companion（base 模型，可能冷启动较慢）…`)
+        pushToast('info', `已提交 ${created.length} 个分轨任务，等待 Companion（分轨生成模型，可能冷启动较慢）…`)
       }
       if (failures.length > 0) setSubmitError(`部分任务提交失败：${failures.join('；')}`)
     } finally {
@@ -590,7 +590,7 @@ export function StemGenerateDialog({
             className="btn btn-accent h-8 px-3 text-[12px]"
             onClick={() => void submit()}
             disabled={formDisabled || selectedArms.length === 0 || submitting}
-            title="为每个选中的乐器各提交一个 generate_stem 任务"
+            title="为每个选中的乐器各提交一个分轨任务"
           >
             {submitting ? (
               <LoaderCircle size={12} className="mr-1 animate-spin" />

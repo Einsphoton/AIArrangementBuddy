@@ -683,7 +683,8 @@ export interface ProvisionProfileInfo {
 }
 
 export interface ProvisionModelStatus {
-  name: string
+  /** 展示名（服务端不下发真实权重文件名） */
+  displayName: string
   installed: boolean
   sizeBytes: number
   expectedBytes: number
@@ -706,7 +707,7 @@ export interface ProvisionStatus {
   error?: string
   root?: string
   dataDir?: string
-  runtime: { installed: boolean; path: string | null; sizeBytes: number; version?: string }
+  runtime: { installed: boolean; sizeBytes: number; version?: string }
   models: ProvisionModelStatus[]
   adapters: ProvisionAdapterStatus[]
   profiles: ProvisionProfileInfo[]

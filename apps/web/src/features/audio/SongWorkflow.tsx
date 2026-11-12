@@ -120,7 +120,7 @@ export function SongWorkflow({
     setError(null)
     setRunning(true)
     const initial: Step[] = [
-      { key: 'song', label: quality ? '整曲（质量模式 LM→sft50）' : '整曲（快模式）', status: 'running', progress: 0 },
+      { key: 'song', label: quality ? '整曲（质量模式 · 精修 50 步）' : '整曲（快速模式）', status: 'running', progress: 0 },
       ...arms.map((arm) => ({ key: `stem:${arm}`, label: `分轨 · ${STEM_ARM_LABEL[arm]}`, status: 'pending' as StepStatus, progress: 0 })),
     ]
     setSteps(initial)
@@ -161,7 +161,7 @@ export function SongWorkflow({
           className="btn btn-secondary h-6 px-2 text-[10px]"
           onClick={() => void start()}
           disabled={running || offline}
-          title="生成整曲后自动按所选乐器逐条生成分轨（base 基座，冷启动较慢）"
+          title="生成整曲后自动按所选乐器逐条生成分轨（分轨生成模型，冷启动较慢）"
         >
           {running ? <LoaderCircle size={10} className="mr-1 animate-spin" /> : null}
           {running ? '工作流进行中…' : '一键生成'}

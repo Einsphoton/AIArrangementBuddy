@@ -2,20 +2,26 @@
  * 本机引擎安装器（P8）：运行时 + 模型 + 任务进度。
  *
  * 目录布局（放在数据目录下，随产品数据一起迁移）：
- *   <dataDir>/ace-step/
+ *   <dataDir>/audio-engine/
  *     ace-server(.exe) / dylibs / tools   ← 运行时（官方 release 解压）
  *     models/*.gguf                        ← 模型（HF 下载，sha256 校验）
  *     .downloads/                          ← 断点续传缓存
  *     runtime.json                         ← 已安装运行时版本记录
+ *
+ * 界面展示名统一走 @aiab/core 的 branding（见 modelDisplayName / AI_ENGINE_RUNTIME_NAME），
+ * 磁盘文件名与下载地址保持真实值，避免破坏已有安装与校验。
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import { modelDisplayName } from '@aiab/core'
 import { readZipEntries } from '../sync/zip-read.js'
 import { downloadFile } from './downloader.js'
 import {
   ADAPTER_ASSETS,
   DOWNLOAD_CACHE_DIR,
+  ENGINE_RUNTIME_VERSION,
+  LEGACY_PROVISION_DIR_NAME,
   MODEL_FILES,
   PROVISION_DIR_NAME,
   RUNTIME_ASSETS,
@@ -40,8 +46,25 @@ export interface ProvisionPaths {
   binary: string
 }
 
-export function provisionPaths(dataDir: string): ProvisionPaths {
+/**
+ * 引擎根目录：新目录名优先；发现旧目录（ace-step）时自动改名迁移，界面此后只显示新名字。
+ * 迁移失败（例如权限/占用）就退回旧目录，保证功能不中断。
+ */
+function resolveProvisionRoot(dataDir: string): string {
   const root = path.join(dataDir, PROVISION_DIR_NAME)
+  if (existsSync(root)) return root
+  const legacy = path.join(dataDir, LEGACY_PROVISION_DIR_NAME)
+  if (!existsSync(legacy)) return root
+  try {
+    renameSync(legacy, root)
+    return root
+  } catch {
+    return legacy
+  }
+}
+
+export function provisionPaths(dataDir: string): ProvisionPaths {
+  const root = resolveProvisionRoot(dataDir)
   return {
     root,
     downloads: path.join(root, DOWNLOAD_CACHE_DIR),
@@ -86,6 +109,8 @@ export interface AdapterStatus {
 
 export interface ModelStatus {
   name: string
+  /** 界面展示名（不暴露真实权重名） */
+  displayName: string
   installed: boolean
   sizeBytes: number
   expectedBytes: number
@@ -120,7 +145,7 @@ export interface AdapterPaths {
 export function adapterPaths(dataDir: string, adaptersDir?: string): AdapterPaths {
   return {
     dir: adaptersDir || path.join(dataDir, 'adapters'),
-    downloads: path.join(dataDir, PROVISION_DIR_NAME, DOWNLOAD_CACHE_DIR),
+    downloads: provisionPaths(dataDir).downloads,
   }
 }
 
@@ -151,7 +176,9 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
   const runtimeSize = binary ? fileSizeSafe(binary) : 0
   let version: string | undefined
   try {
-    version = (JSON.parse(readFileSync(path.join(paths.root, 'runtime.json'), 'utf8')) as { version?: string }).version
+    const raw = (JSON.parse(readFileSync(path.join(paths.root, 'runtime.json'), 'utf8')) as { version?: string }).version
+    // 旧版 installer 把内部打包名写进 version：非版本号一律用对外版本号代替
+    version = raw ? (/^\d+(\.\d+){1,3}$/.test(raw) ? raw : ENGINE_RUNTIME_VERSION) : undefined
   } catch {
     version = undefined
   }
@@ -160,6 +187,7 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
     const sizeBytes = fileSizeSafe(target)
     return {
       name: file.name,
+      displayName: modelDisplayName(file.name),
       installed: sizeBytes === file.size,
       sizeBytes,
       expectedBytes: file.size,
@@ -179,17 +207,17 @@ export function provisionStatus(options: { dataDir: string; platform?: Provision
     stems: satisfied('stems'),
   }
   const notes: string[] = []
-  if (!binary) notes.push('运行时未安装：需要下载 ACE-Step 可执行文件（约 3–135MB，视平台）')
+  if (!binary) notes.push('运行时未安装：需要下载 AI 音频生成引擎运行时（约 3–135MB，视平台）')
   const missingModels = models.filter((model) => !model.installed)
   if (missingModels.length > 0) {
     notes.push(`模型缺 ${missingModels.length} 个，共约 ${(missingModels.reduce((sum, model) => sum + model.expectedBytes, 0) / 1e9).toFixed(1)}GB`)
   }
-  if (binary && essential) notes.push('基础能力已就绪（快模式可直接生成）')
+  if (binary && essential) notes.push('基础能力已就绪（快速生成模式可直接使用）')
   const missingAdapters = adapters.filter((adapter) => !adapter.installed)
   if (missingAdapters.length > 0) {
-    notes.push(`LoRA 适配器缺 ${missingAdapters.length} 个（共 ${(adaptersTotalBytes() / 1e6).toFixed(0)}MB，自生成数据、可安全分发）`)
+    notes.push(`风格适配器缺 ${missingAdapters.length} 个（共 ${(adaptersTotalBytes() / 1e6).toFixed(0)}MB，自生成数据、可安全分发）`)
   } else {
-    notes.push('LoRA 适配器已就绪（jrpg_v1 / jrpg_v2 / jrock_v1）')
+    notes.push('风格适配器已就绪（jrpg_v1 / jrpg_v2 / jrock_v1）')
   }
   return {
     platform,
@@ -231,7 +259,7 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<{ 
   }
 
   const archivePath = path.join(paths.downloads, asset.archive)
-  options.log?.(`下载 ACE-Step 运行时：${asset.archive}（${(asset.size / 1e6).toFixed(0)}MB）`)
+  options.log?.(`下载 AI 音频生成引擎运行时：${asset.archive}（${(asset.size / 1e6).toFixed(0)}MB）`)
   await downloadFile({
     url: runtimeUrl(platform),
     dest: archivePath,
@@ -281,7 +309,15 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<{ 
   writeFileSync(
     path.join(paths.root, 'runtime.json'),
     JSON.stringify(
-      { platform, version: RUNTIME_ASSETS[platform].archive, archive: asset.archive, sha256: asset.sha256, files: written, symlinks, installedAt: new Date().toISOString() },
+      {
+        platform,
+        version: ENGINE_RUNTIME_VERSION,
+        archive: asset.archive,
+        sha256: asset.sha256,
+        files: written,
+        symlinks,
+        installedAt: new Date().toISOString(),
+      },
       null,
       2,
     ),
@@ -480,13 +516,25 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
   const id = `prov_${Date.now().toString(36)}`
   const steps: ProvisionJobStep[] = []
   if (!status.runtime.installed || options.force) {
-    steps.push({ key: 'runtime', label: 'ACE-Step 运行时', status: 'pending', progress: 0, totalBytes: RUNTIME_ASSETS[platform].size })
+    steps.push({
+      key: 'runtime',
+      label: 'AI 音频生成引擎运行时',
+      status: 'pending',
+      progress: 0,
+      totalBytes: RUNTIME_ASSETS[platform].size,
+    })
   }
   for (const file of modelsForProfiles(options.profiles)) {
     const target = path.join(paths.models, file.name)
     const installed = existsSync(target) && fileSizeSafe(target) === file.size
     if (!installed || options.force) {
-      steps.push({ key: `model:${file.name}`, label: file.name, status: 'pending', progress: 0, totalBytes: file.size })
+      steps.push({
+        key: `model:${file.name}`,
+        label: modelDisplayName(file.name),
+        status: 'pending',
+        progress: 0,
+        totalBytes: file.size,
+      })
     }
   }
   const wantAdapters = options.adapters !== false
@@ -497,7 +545,7 @@ export function startProvision(options: StartProvisionOptions): ProvisionJob {
   if (wantAdapters && missingAdapters.length > 0) {
     steps.push({
       key: 'adapters',
-      label: `LoRA 适配器（${missingAdapters.map((adapter) => adapter.id).join(', ')}）`,
+      label: `风格适配器（${missingAdapters.map((adapter) => adapter.id).join(', ')}）`,
       status: 'pending',
       progress: 0,
       totalBytes: missingAdapters.reduce((sum, adapter) => sum + adapter.expectedBytes, 0),

@@ -51,7 +51,7 @@ function printStatus(status) {
     return
   }
   console.log(`安装目录：${status.root}`)
-  console.log(`运行时：${status.runtime.installed ? `已装（${status.runtime.path}）` : '未安装'}`)
+  console.log(`运行时：${status.runtime.installed ? '已装' : '未安装'}`)
   for (const profile of status.profiles ?? []) {
     console.log(`  [${profile.ready ? '✓' : ' '}] ${profile.id.padEnd(9)} ${profile.label} · 需下载 ${humanBytes(profile.downloadBytes)}`)
   }
@@ -59,12 +59,12 @@ function printStatus(status) {
   const adapters = status.adapters ?? []
   if (adapters.length > 0) {
     const ready = adapters.filter((adapter) => adapter.installed).length
-    console.log(`LoRA 适配器：${ready}/${adapters.length} 就绪（自生成数据，共 ${humanBytes(adapters.reduce((sum, adapter) => sum + adapter.expectedBytes, 0))}）`)
+    console.log(`风格适配器：${ready}/${adapters.length} 就绪（自生成数据，共 ${humanBytes(adapters.reduce((sum, adapter) => sum + adapter.expectedBytes, 0))}）`)
     for (const adapter of adapters) console.log(`  [${adapter.installed ? '✓' : ' '}] ${adapter.id} · ${adapter.name}`)
   }
   if (missing.length > 0) {
     console.log(`缺失模型 ${missing.length} 个，约 ${humanBytes(status.missingBytes)}`)
-    for (const model of missing) console.log(`  - ${model.name}（${humanBytes(model.expectedBytes)}）`)
+    for (const model of missing) console.log(`  - ${model.displayName ?? model.name}（${humanBytes(model.expectedBytes)}）`)
   } else {
     console.log('模型：全部就绪')
   }

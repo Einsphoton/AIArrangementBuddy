@@ -507,7 +507,7 @@ export function RepaintAudioDialog({
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] text-ink-3">LoRA 适配器（可选）</span>
+                  <span className="mb-1 block text-[11px] text-ink-3">风格适配器（可选）</span>
                   <select
                     value={adapterId}
                     onChange={(event) => setAdapterId(event.target.value)}
@@ -607,7 +607,7 @@ export function RepaintAudioDialog({
             className="btn btn-accent h-8 px-3 text-[12px]"
             onClick={() => void submit()}
             disabled={formDisabled || Boolean(rangeError)}
-            title="提交 repaint_audio 任务"
+            title="提交局部重绘任务"
           >
             {submitting || applying ? (
               <LoaderCircle size={12} className="mr-1 animate-spin" />

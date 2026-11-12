@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, CheckCircle2, Copy, Download, HardDriveDownload, LoaderCircle, TriangleAlert, X } from 'lucide-react'
+import { AI_ENGINE_RUNTIME_NAME } from '@aiab/core'
 import {
   cancelProvisionJob,
   getProvisionJob,
@@ -244,7 +245,7 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                     安装本机 AI 引擎
                   </h2>
                   <p className="mt-0.5 text-[10px] leading-relaxed text-ink-4">
-                    自动下载 ACE-Step 运行时与模型并校验 sha256；下载后可断点续传。平台：
+                    自动下载 {AI_ENGINE_RUNTIME_NAME} 与模型并校验 sha256；下载后可断点续传。平台：
                     <code>{status?.platform ?? '检测中'}</code> · 安装到{' '}
                     <code className="break-all">{status?.root ?? '数据目录'}</code>
                   </p>
@@ -338,7 +339,7 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                     />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-1.5">
-                        <span className="font-medium text-ink-2">LoRA 适配器（风格包）</span>
+                        <span className="font-medium text-ink-2">风格适配器（风格包）</span>
                         <span className="ml-auto shrink-0 text-[9px] text-ink-4">
                           已就绪 {adapters.length - missingAdapters}/{adapters.length}
                         </span>
@@ -362,7 +363,7 @@ export function ProvisionButton({ mode = 'trigger' }: { mode?: 'trigger' | 'glob
                     <div className="flex items-start gap-1.5 text-[9.5px] leading-relaxed text-ink-3">
                       <TriangleAlert size={11} className="mt-[2px] shrink-0 text-accent" />
                       <div className="min-w-0 flex-1">
-                        <p className="font-medium text-accent-soft">国内网络访问 GitHub / HuggingFace 通常需要代理</p>
+                        <p className="font-medium text-accent-soft">国内网络访问模型下载源（GitHub / HuggingFace）通常需要代理</p>
                         <p className="mt-0.5">
                           应用已自动识别 <code className="text-ink-2">HTTPS_PROXY</code> 与 macOS 系统代理；若仍失败，请先打开代理软件，
                           或在终端执行{' '}

@@ -197,7 +197,7 @@ export function TrainingButton() {
                 <div className="min-w-0">
                   <h2 className="flex items-center gap-1.5 text-[13.5px] font-semibold">
                     <BrainCircuit size={14} className="text-accent" />
-                    继续训练风格（LoRA）
+                    训练风格适配器
                   </h2>
                   <p className="mt-1 text-[10.5px] leading-relaxed text-ink-4">
                     只在点击时下载训练代码/自生成数据集/基座检查点，并创建独立 Python 环境；训练完成后自动加入模型管理器。
@@ -365,7 +365,7 @@ export function TrainingButton() {
                   className="btn btn-accent h-7 px-3 text-[11px]"
                   disabled={busy || running || missing}
                   onClick={() => void runTrain()}
-                  title={missing ? '先下载并准备训练环境' : '开始训练 LoRA 适配器'}
+                  title={missing ? '先下载并准备训练环境' : '开始训练风格适配器'}
                 >
                   {busy ? <LoaderCircle size={11} className="mr-1 animate-spin" /> : <Sparkles size={11} className="mr-1" />}
                   {running ? '训练中…' : '开始训练'}

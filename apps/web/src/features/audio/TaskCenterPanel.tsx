@@ -14,6 +14,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { variantDisplayName } from '@aiab/core'
 import {
   Bot,
   ClipboardList,
@@ -285,7 +286,7 @@ export function TaskCenterPanel({ onClose }: { onClose: () => void }) {
               <TriangleAlert size={11} className="mt-[2px] shrink-0 text-danger" />
               <p className="min-w-0 flex-1 text-[10px] leading-relaxed text-ink-2">
                 有任务因缺少工作节点能力被阻塞：
-                {status.blockedByCapability.map((item) => `${item.variant} ×${item.count}`).join(' · ')}
+                {status.blockedByCapability.map((item) => `${variantDisplayName(item.variant)} ×${item.count}`).join(' · ')}
               </p>
             </div>
           )}

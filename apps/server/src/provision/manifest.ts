@@ -22,6 +22,9 @@ export interface RuntimeAsset {
   sha256?: string
 }
 
+/** 对外展示的运行时版本号（内部打包名不暴露给用户） */
+export const ENGINE_RUNTIME_VERSION = '1.0.0'
+
 /** 官方 ACE-Step 运行时 release（ace-step/acestep.vst3） */
 export const ACESTEP_RELEASE_TAG = 'v0.1.0'
 export const ACESTEP_RELEASE_BASE = `https://github.com/ace-step/acestep.vst3/releases/download/${ACESTEP_RELEASE_TAG}`
@@ -152,7 +155,7 @@ export function resolvePlatform(
   if (platform === 'linux' && arch === 'x64') return 'linux-x64'
   throw new Error(
     `不支持的平台：${platform}/${arch}。当前自动安装支持 Windows x64 / macOS Apple Silicon / Linux x64；` +
-      `其他平台请自行编译 ACE-Step（acestep.vst3）并把 AIAB_ACESTEP_DIR 指向其目录`,
+      `其他平台请自行编译 AI 音频生成引擎运行时，并把 AIAB_ENGINE_DIR 指向其目录`,
   )
 }
 
@@ -167,11 +170,11 @@ export function modelUrl(file: ModelFile): string {
 export function profileLabel(profile: ProvisionProfile): string {
   switch (profile) {
     case 'essential':
-      return '基础（快模式：turbo + 文本编码器 + VAE）'
+      return '基础能力（快速生成模式）'
     case 'quality':
-      return '质量模式（sft 50 步 + LM 提示词增强）'
+      return '质量增强（精修生成 + 提示词增强）'
     case 'stems':
-      return '分轨 Stem（base / lego）'
+      return '分轨能力（分轨生成模式）'
   }
 }
 
@@ -235,6 +238,8 @@ export function adaptersTotalBytes(assets: AdapterAsset[] = ADAPTER_ASSETS): num
 }
 
 /** 本机 agent 引擎根目录（在数据目录下，随产品数据走） */
-export const PROVISION_DIR_NAME = 'ace-step'
+export const PROVISION_DIR_NAME = 'audio-engine'
+/** 旧版目录名（仅用于自动迁移；迁移后界面只显示新名字） */
+export const LEGACY_PROVISION_DIR_NAME = 'ace-step'
 /** 下载缓存（支持断点续传） */
 export const DOWNLOAD_CACHE_DIR = '.downloads'

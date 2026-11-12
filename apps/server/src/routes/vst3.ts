@@ -52,7 +52,7 @@ export function registerVst3Routes(app: FastifyInstance): void {
     onlineWorkers: listWorkers().length,
     hint:
       listWorkers().length === 0
-        ? '没有在线 Companion：先在 GPU 机器上启动 scripts/companion.mjs --server <地址> --acestep'
+        ? '没有在线 Companion：先在 GPU 机器上启动 scripts/companion.mjs --server <地址> --engine'
         : undefined,
   }))
 

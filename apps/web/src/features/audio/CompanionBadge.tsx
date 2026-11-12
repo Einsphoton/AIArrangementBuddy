@@ -14,7 +14,7 @@ const POLL_MS = 30_000
 
 /** 无 Companion 时的兜底启动命令（服务端 hint 缺失时展示） */
 export const COMPANION_START_HINT =
-  '没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --acestep'
+  '没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --engine'
 
 export function CompanionBadge({ onOpenPanel }: { onOpenPanel?: () => void }) {
   const [status, setStatus] = useState<CompanionStatus | null>(null)

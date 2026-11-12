@@ -52,7 +52,7 @@ if (!provision.ok) {
   console.log(`  服务端    : ✓ ${server}`)
   console.log(`  引擎平台  : ${status.platform}${status.supported === false ? `（不支持自动安装：${status.error ?? ''}）` : ''}`)
   console.log(`  安装目录  : ${status.root ?? '-'}`)
-  console.log(`  运行时    : ${status.runtime?.installed ? `✓ ${status.runtime.path}` : '✗ 未安装'}`)
+  console.log(`  运行时    : ${status.runtime?.installed ? '✓ 已安装' : '✗ 未安装'}`)
   const profiles = status.profiles ?? []
   for (const profile of profiles) {
     console.log(`  [${profile.ready ? '✓' : ' '}] ${String(profile.id).padEnd(9)} ${profile.label} · 需下载 ${human(profile.downloadBytes)}`)
@@ -75,7 +75,7 @@ if (companion.ok) {
   const workers = companion.body?.workers ?? []
   console.log(`  Companion : ${online ? `✓ 在线（${workers.length} 个 worker）` : '✗ 离线'}`)
   if (!online) {
-    console.log('  下一步    : node scripts/companion.mjs --server ' + server + ' --acestep --engine-idle 600')
+    console.log('  下一步    : node scripts/companion.mjs --server ' + server + ' --engine --engine-idle 600')
   }
 } else {
   console.log('  Companion : ? 无法查询')

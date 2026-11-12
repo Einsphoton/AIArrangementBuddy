@@ -14,6 +14,7 @@
  *   GET  /api/companion/status      节点与队列概览（状态面板用）
  */
 import type { FastifyInstance } from 'fastify'
+import { variantDisplayName } from '@aiab/core'
 import { findAdapter } from '../adapters/registry.js'
 import { getAsset } from '../storage/assets.js'
 import {
@@ -289,7 +290,7 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
       const requiredBase = TASK_VARIANT[type] ?? 'turbo'
       if (entry.manifest.baseModel !== requiredBase) {
         return reply.code(400).send({
-          error: `适配器 ${adapterId} 基于 ${entry.manifest.baseModel}，而 ${type} 需要 ${requiredBase} 基座（LoRA 与基座变体绑死）`,
+          error: `适配器 ${adapterId} 基于${variantDisplayName(entry.manifest.baseModel)}，而当前任务需要${variantDisplayName(requiredBase)}基座（风格适配器与基座版本绑定）`,
         })
       }
       params.adapterPath = entry.dir
@@ -360,7 +361,7 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
       tasks: listTasks(20),
       hint:
         summary.workers === 0
-          ? '没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --acestep'
+          ? '没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --engine'
           : undefined,
     }
   })

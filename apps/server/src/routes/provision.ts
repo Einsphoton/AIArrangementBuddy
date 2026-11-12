@@ -8,6 +8,7 @@
  *   GET  /api/provision/jobs          最近任务
  */
 import type { FastifyInstance } from 'fastify'
+import { modelDisplayName } from '@aiab/core'
 import { dataDir } from '../config.js'
 import {
   cancelProvisionJob,
@@ -48,12 +49,31 @@ export function registerProvisionRoutes(app: FastifyInstance): void {
         return {
           id: profile,
           label: profileLabel(profile),
-          files: files.map((file) => file.name),
+          // 只暴露展示名：真实权重文件名属于实现细节，界面上不出现
+          files: files.map((file) => modelDisplayName(file.name)),
           downloadBytes: files.reduce((sum, file) => sum + file.size, 0),
           ready: status.profiles[profile],
         }
       })
-      return { ...status, profiles: profiles, dataDir, jobs: listProvisionJobs().slice(0, 3) }
+      // 接口层也不回传真实权重文件名 / 可执行文件名（只保留展示名 + 安装状态），避免绕过界面泄露
+      const runtime = {
+        installed: status.runtime.installed,
+        sizeBytes: status.runtime.sizeBytes,
+        version: status.runtime.version,
+      }
+      const adapters = status.adapters.map((adapter) => ({
+        ...adapter,
+        // 适配器许可属于上游权重信息，界面/接口统一用产品口径
+        license: '自生成数据，可安全分发',
+      }))
+      const models = status.models.map((model) => ({
+        displayName: model.displayName,
+        installed: model.installed,
+        sizeBytes: model.sizeBytes,
+        expectedBytes: model.expectedBytes,
+        profiles: model.profiles,
+      }))
+      return { ...status, runtime, models, adapters, profiles: profiles, dataDir, jobs: listProvisionJobs().slice(0, 3) }
     } catch (error) {
       return { supported: false, platform: `${process.platform}/${process.arch}`, error: errorMessage(error) }
     }

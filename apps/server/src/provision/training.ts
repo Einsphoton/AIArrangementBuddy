@@ -24,6 +24,18 @@ import { extractTarGz } from './untar.js'
 
 export type TrainingPhase = 'code' | 'datasets' | 'python' | 'checkpoints' | 'env'
 
+/** 检查点目录名 → 界面展示名（训练进度里不暴露真实权重目录名） */
+const CHECKPOINT_GROUP_LABELS: Record<string, string> = {
+  'Qwen3-Embedding-0.6B': '语义编码器',
+  'acestep-v15-turbo': '快速生成模型',
+  vae: '音频编解码器',
+}
+
+function checkpointGroupLabel(filePath: string): string {
+  const group = filePath.split('/')[0] ?? ''
+  return CHECKPOINT_GROUP_LABELS[group] ?? '基座检查点'
+}
+
 export interface TrainingPaths {
   root: string
   code: string
@@ -275,7 +287,7 @@ export async function setupTraining(options: SetupTrainingOptions): Promise<Trai
         fetchImpl,
         onProgress: ({ received }) => {
           const ratio = totalBytes > 0 ? (doneBytes + received) / totalBytes : 0
-          options.onProgress?.({ phase: 'checkpoints', progress: ratio, message: `下载检查点 ${file.path}…` })
+          options.onProgress?.({ phase: 'checkpoints', progress: ratio, message: `下载检查点（${checkpointGroupLabel(file.path)}）…` })
         },
       })
       doneBytes += file.size
@@ -521,7 +533,7 @@ export function startTraining(options: StartTrainingOptions): TrainingJob {
   const runner = options.overrides?.runnerPath ?? path.join(codeDir, 'training', 'runner.py')
   if (!pythonExe || !existsSync(pythonExe)) throw new Error('找不到训练 Python（先准备训练环境）')
   if (!existsSync(runner)) throw new Error(`找不到训练 runner：${runner}`)
-  const job = createJob('train', ['预处理音频', 'LoRA 训练', '注册适配器'], options.tag)
+  const job = createJob('train', ['预处理音频', '风格适配器训练', '注册适配器'], options.tag)
   activeJobId = job.id
   activeAbort = new AbortController()
   const signal = activeAbort.signal
