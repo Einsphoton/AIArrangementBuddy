@@ -10,6 +10,7 @@
 import {
   ArrowDown,
   ArrowUp,
+  AudioLines,
   CheckSquare,
   Copy,
   Music4,
@@ -41,6 +42,7 @@ export function TrackContextMenu({
   hasCustomHeight,
   selectionIds,
   onPreview,
+  onBounce,
   onClose,
   onRequestRename,
   onOpenColor,
@@ -55,6 +57,8 @@ export function TrackContextMenu({
   selectionIds: string[]
   /** 试听音色（原轨道头上的 ▶ 按钮收进菜单，窄面板不再挤占名称） */
   onPreview: () => void
+  /** 单轨渲染为音频（bounce in place）：只在单条含 MIDI 音符的轨道上可用 */
+  onBounce: () => void
   onClose: () => void
   onRequestRename: () => void
   onOpenColor: () => void
@@ -62,6 +66,8 @@ export function TrackContextMenu({
   const collapsed = height <= TRACK_HEIGHT_LIMITS.collapsed + 2
   const multi = selectionIds.length > 1
   const countSuffix = multi ? `（${selectionIds.length} 条）` : ''
+  /** 有 MIDI 音符才谈得上渲染（纯音频轨 / 空轨没有可渲染内容） */
+  const hasMidi = track.clips.some((clip) => clip.notes.length > 0)
 
   const pickHeight = (value: number | null) => {
     const ui = useUiStore.getState()
@@ -94,6 +100,24 @@ export function TrackContextMenu({
       <MenuItem icon={<Pencil size={12} />} label="重命名" hint="双击名称" onClick={() => { onClose(); onRequestRename() }} />
       <MenuItem icon={<Palette size={12} />} label={multi ? `更改颜色${countSuffix}…` : '更改颜色…'} onClick={() => { onClose(); onOpenColor() }} />
       <MenuItem icon={<Play size={12} />} label="试听音色" onClick={() => { onClose(); onPreview() }} />
+      {/* 单轨 bounce：离线渲染 → 上传 → 落一条同色音频轨，并把原轨静音（一次撤销点） */}
+      <MenuItem
+        icon={<AudioLines size={12} />}
+        label="渲染为音频（Bounce）"
+        title={
+          multi
+            ? '只支持单轨渲染：请先在轨道列表里只选中这一条'
+            : hasMidi
+              ? `把「${track.name}」离线渲染成音频轨（原轨会静音，⌘Z 可撤销）`
+              : '这条轨道没有 MIDI 音符，没有可渲染的内容'
+        }
+        disabled={multi || !hasMidi}
+        dataAttr={{ 'data-bounce-menu-item': 'true' }}
+        onClick={() => {
+          onClose()
+          onBounce()
+        }}
+      />
       <MenuDivider />
       <MenuLabel>选择</MenuLabel>
       <MenuItem

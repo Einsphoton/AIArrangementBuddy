@@ -25,6 +25,7 @@ import { useMidiPerformance } from './features/midi/useMidiPerformance'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
 import { useUiStore, CHAT_WIDTH_LIMITS } from './lib/uiStore'
 import { detectAudioIntent, handleAudioPlanFromToolData, retryAudioJob, runAudioPlan } from './features/audio/audioIntent'
+import { bounceTrackToAudio } from './features/audio/bounceTrack'
 import { useAudioJobStore } from './features/audio/audioJobStore'
 
 const VIEW_TABS = [
@@ -155,7 +156,7 @@ export default function App() {
       engine,
       /** 音频任务卡状态：自动化验收/截图用（可注入 running/blocked/done 等状态） */
       useAudioJobStore,
-      audio: { detectAudioIntent, runAudioPlan, retryAudioJob, handleAudioPlanFromToolData },
+      audio: { detectAudioIntent, runAudioPlan, retryAudioJob, handleAudioPlanFromToolData, bounceTrack: bounceTrackToAudio },
     }
   }, [engine])
 

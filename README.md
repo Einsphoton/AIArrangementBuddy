@@ -91,7 +91,8 @@
 | **和弦进行灵感** | 智能片段面板「换一组进行」：按当前风格/调性给 5 条带描述与节奏提示的进行，一键写入工程、可撤销 |
 | **MIDI 导入** | 文件 → 导入 MIDI：解析 SMF format 0/1（多通道分轨、鼓轨单列、running status），导入后可直接让 AI 配伴奏 |
 | **创作信息** | 时间轴和弦轨 + 轨道面板总控行统一展示「风格 · 调式 · BPM」+ 轨道头第三行「段落 · 智能片段」摘要 + 只读创作信息弹层（乐器、智能片段参数、seed、跟随和弦） |
-| **导出** | MIDI（.mid）、WAV、MP3、FLAC、OGG；支持全曲 / 循环区间、预计大小与时长 |
+| **导出** | MIDI（.mid）、WAV（最高 **48kHz / 24-bit**，可选响度归一 -14 LUFS）、MP3、FLAC、OGG；支持全曲 / 循环区间、预计大小与时长；WAV 导出会包含工程里的音频片段 |
+| **单轨渲染为音频（Bounce）** | 轨道右键「渲染为音频（Bounce）」：把单条 MIDI 轨按整工程时间轴离线渲染成 48kHz/24-bit 音频轨（自动静音原轨、一次撤销），方便冻结音色/交给 AI 继续加轨；音频分轨导出同样可落地 |
 | **混音器** | 真实每轨电平、dB 标尺、峰值保持与重置、推子加速度拖拽、通道右键菜单、高度可拖拽 |
 | **AI 混音（推子 + 每轨链 + 母线/母带）** | 按「声部角色 × 风格 × 能量」自动给每轨音量/声像/混响与延迟发送 + 总线；可同时应用每轨三段 EQ + 压缩 + 补偿增益（合成器/音频片段/SoundFont 采样全覆盖；采样轨 >16 条时回退全局输出）以及**总线 / 母带处理**（总线 EQ + 母线压缩 + 限幅上限 -1dBFS）；先预览差异再一键应用，⌘Z 一步撤销，可分别清除每轨链/母带链 |
 | **音频轨道（P1/P2）** | 导入 WAV → 音频轨 + 波形片段，随走带播放（与 Tone.Transport 同步，复用轨道音量/声像/静音/发送）；支持选中、右键删除、双击定位；右键「局部重绘…」按区间重绘（整段替换为新 take，原版本保留、可「切换版本」回退）；`stretchRatio` 固定 1（暂不做变速） |
@@ -416,7 +417,7 @@ pnpm soundfonts --list     # 查看其他可选音色库
 - **权威状态在客户端**：每次请求把工程快照发给后端，Agent 在快照上调用工具，返回新快照并实时推给前端。
   这样不需要复杂的双向同步，也天然支持「撤销 AI 的全部改动」。
 
-更多文档：[AI 音乐风格学习 · 总体规划](docs/AI_MUSIC_ROADMAP.md) · [架构说明](docs/ARCHITECTURE.md) · [Studio 形态能力矩阵（a–g）](docs/STUDIO_MODE.md) · [Companion 工作节点协议](docs/COMPANION.md) · [Agent 集成指南（Codex / DSH / MCP）](docs/AGENT.md) · [开发契约](docs/CONTRACTS.md) · [MIDI 语料与风格学习（可行性评估）](docs/MIDI_CORPUS_STYLE_LEARNING.md) · [三线融合路线（语料 × 检索 × 模型）](docs/FUSION_ROADMAP.md) · [LoRA 微调手册（JRPG / J-Rock）](docs/LORA_FINETUNING_PLAN.md) · [模型管理器：适配器生命周期](docs/MODEL_MANAGER.md)。
+更多文档：[AI 音乐风格学习 · 总体规划](docs/AI_MUSIC_ROADMAP.md) · [架构说明](docs/ARCHITECTURE.md) · [Studio 形态能力矩阵（a–g）](docs/STUDIO_MODE.md) · [Companion 工作节点协议](docs/COMPANION.md) · [Agent 集成指南（Codex / DSH / MCP）](docs/AGENT.md) · [开发契约](docs/CONTRACTS.md) · [MIDI 语料与风格学习（可行性评估）](docs/MIDI_CORPUS_STYLE_LEARNING.md) · [三线融合路线（语料 × 检索 × 模型）](docs/FUSION_ROADMAP.md) · [LoRA 微调手册（JRPG / J-Rock）](docs/LORA_FINETUNING_PLAN.md) · [模型管理器：适配器生命周期](docs/MODEL_MANAGER.md) · [MIDI → 高质量音频可行性研究](docs/MIDI_RENDER_QUALITY_FEASIBILITY.md) · [渲染质量修复（P0）](docs/RENDER_QUALITY_FIX_2026-11-13.md)。
 
 ---
 
@@ -498,7 +499,7 @@ pnpm ai:logs -- --limit 30
 Docker 模式可指定：`AIAB_PORT=9000 docker compose up -d`；本地也可 `PORT=9000 pnpm start`。
 
 **Q：能导出分轨吗？**
-导出对话框选「按轨道拆分」即可得到每条轨道一个 MIDI 文件（音频分轨导出在路线图中）。
+能：① 轨道右键「渲染为音频（Bounce）」把单条 MIDI 轨按整工程时间轴渲染成音频轨；② 导出 WAV 时会包含工程里的音频片段（含 AI 生成/导入的音频）；③ MIDI 分轨 ZIP 由服务端 `/api/export/midi?split=1` 提供（界面入口待补）。
 
 ---
 

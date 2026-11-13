@@ -351,14 +351,153 @@ export function connectMasterChainNative(ctx: BaseAudioContext, input: AudioNode
 /* 离线渲染整段                                                         */
 /* ------------------------------------------------------------------ */
 
-/** 把每条采样轨的原始 buffer 经过各自处理链 + 音量/声像后混合成一条立体声 buffer */
+/** 每条轨的发送量（0..1），由 render.ts 用与实时一致的公式算好传入 */
+export interface TrackSendAmounts {
+  reverb: number
+  delay: number
+  chorus: number
+}
+
+export interface OfflineMixOptions {
+  /** 参与混音的轨道（缺省 project.tracks；单轨 bounce/分轨时传子集） */
+  tracks?: Track[]
+  /** 音频片段资产解码后的 buffer（assetId → AudioBuffer） */
+  audioBuffers?: Map<string, AudioBuffer>
+  /** 每轨发送量（缺省全 0） */
+  sends?: Map<string, TrackSendAmounts>
+}
+
+interface OfflineFxBuses {
+  reverb: ConvolverNode
+  delay: DelayNode
+  chorus: DelayNode
+}
+
+/** 生成一段简单的指数衰减立体声混响 IR（与 Tone.Reverb 的 decay/preDelay 对齐参数） */
+function createReverbImpulse(ctx: BaseAudioContext, decaySec: number, preDelaySec: number): AudioBuffer {
+  const rate = ctx.sampleRate
+  const preDelay = Math.max(0, Math.floor(preDelaySec * rate))
+  const length = Math.max(1, preDelay + Math.floor(Math.max(0.2, decaySec) * rate))
+  const buffer = ctx.createBuffer(2, length, rate)
+  /* 固定种子：同样的工程每次导出得到同样的混响尾巴（可复现） */
+  let seed = 0x9e3779b9
+  const rand = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+    return (seed / 0x100000000) * 2 - 1
+  }
+  for (let channel = 0; channel < 2; channel += 1) {
+    const data = buffer.getChannelData(channel)
+    for (let i = preDelay; i < length; i += 1) {
+      const t = (i - preDelay) / rate
+      data[i] = rand() * Math.pow(Math.max(0, 1 - t / decaySec), 2.2)
+    }
+  }
+  return buffer
+}
+
+function createOfflineFxBuses(ctx: BaseAudioContext, destination: AudioNode, secPerBeat: number): OfflineFxBuses {
+  const reverb = ctx.createConvolver()
+  reverb.normalize = true
+  reverb.buffer = createReverbImpulse(ctx, 2.6, 0.02)
+  reverb.connect(destination)
+
+  const delay = ctx.createDelay(4)
+  delay.delayTime.value = Math.max(0.05, secPerBeat * 0.75)
+  const feedback = ctx.createGain()
+  feedback.gain.value = 0.3
+  delay.connect(feedback)
+  feedback.connect(delay)
+  delay.connect(destination)
+
+  /* 合唱：3.5ms 基础延迟 + 1.1Hz 慢速调制（近似 Tone.Chorus 参数） */
+  const chorus = ctx.createDelay(0.05)
+  chorus.delayTime.value = 0.0035
+  const lfo = ctx.createOscillator()
+  lfo.frequency.value = 1.1
+  const lfoGain = ctx.createGain()
+  lfoGain.gain.value = 0.0018
+  lfo.connect(lfoGain)
+  lfoGain.connect(chorus.delayTime)
+  lfo.start(0)
+  chorus.connect(destination)
+
+  return { reverb, delay, chorus }
+}
+
+/** 排期一条轨的音频片段（与实时 engine.scheduleAudioPass 的语义一致：不变速、支持裁剪/淡入淡出） */
+function scheduleAudioClips(
+  ctx: BaseAudioContext,
+  destination: AudioNode,
+  track: Track,
+  audioBuffers: Map<string, AudioBuffer>,
+  secPerBeat: number,
+  duration: number,
+): number {
+  let scheduled = 0
+  for (const clip of track.audioClips ?? []) {
+    if (clip.muted) continue
+    const buffer = audioBuffers.get(clip.assetId)
+    if (!buffer || buffer.duration <= 0) continue
+    const startSec = Math.max(0, clip.startBeat) * secPerBeat
+    if (startSec >= duration) continue
+    const offsetSec = Math.min(Math.max(0, clip.offsetSec), Math.max(0, buffer.duration - 0.01))
+    const available = Math.max(0, buffer.duration - offsetSec)
+    const durationSec = Math.min(clip.durationSec > 0 ? clip.durationSec : available, available)
+    if (durationSec <= 0.01) continue
+
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    /* 一期与实时一致：不变速（stretchRatio 固定 1；变速会变调） */
+    source.playbackRate.value = 1
+    const gain = ctx.createGain()
+    const base = dbToGain(clip.gainDb)
+    const fadeIn = Math.max(0, clip.fadeInBeats || 0) * secPerBeat
+    const fadeOut = Math.max(0, clip.fadeOutBeats || 0) * secPerBeat
+    try {
+      if (fadeIn > 0.005) {
+        gain.gain.setValueAtTime(0, startSec)
+        gain.gain.linearRampToValueAtTime(base, startSec + Math.min(fadeIn, durationSec))
+      } else {
+        gain.gain.setValueAtTime(base, startSec)
+      }
+      if (fadeOut > 0.005 && durationSec > fadeOut + 0.01) {
+        gain.gain.setValueAtTime(base, startSec + durationSec - Math.min(fadeOut, durationSec))
+        gain.gain.linearRampToValueAtTime(0, startSec + durationSec)
+      }
+    } catch {
+      gain.gain.value = base
+    }
+    source.connect(gain)
+    gain.connect(destination)
+    source.start(startSec, offsetSec, durationSec)
+    scheduled += 1
+  }
+  return scheduled
+}
+
+/**
+ * 把每条采样轨的原始 buffer 与音频片段，经过各自处理链 + 音量/声像 + 共享发送，
+ * 混合成一条立体声 buffer。
+ *
+ * 2026-11 P0：离线也重建共享混响/延迟/合唱（与合成器轨同一套参数），
+ * 采样轨不再依赖 SF3 内建效果，导出与试听的空间/湿声一致。
+ */
 export async function renderTracksWithChainsOffline(
   project: Project,
   buffers: Map<string, AudioBuffer>,
   duration: number,
   sampleRate: number,
+  options: OfflineMixOptions = {},
 ): Promise<AudioBuffer | null> {
-  if (buffers.size === 0) return null
+  const tracks = options.tracks ?? project.tracks
+  const audioBuffers = options.audioBuffers ?? new Map<string, AudioBuffer>()
+  const sends = options.sends ?? new Map<string, TrackSendAmounts>()
+  const hasAudio = tracks.some((track) => {
+    if ((track.audioClips?.length ?? 0) === 0) return false
+    return track.audioClips.some((clip) => !clip.muted && audioBuffers.has(clip.assetId))
+  })
+  if (buffers.size === 0 && !hasAudio) return null
+
   const secPerBeat = 60 / Math.max(20, project.tempo)
   const length = Math.max(1, Math.ceil(duration * sampleRate))
   const OfflineCtor = window.OfflineAudioContext
@@ -366,13 +505,27 @@ export async function renderTracksWithChainsOffline(
   const out = offline.createGain()
   out.gain.value = 1
   out.connect(offline.destination)
-  for (const track of project.tracks) {
+  const fx = createOfflineFxBuses(offline, out, secPerBeat)
+
+  for (const track of tracks) {
     const buffer = buffers.get(track.id)
-    if (!buffer) continue
-    const source = offline.createBufferSource()
-    source.buffer = buffer
+    const trackSends = sends.get(track.id) ?? { reverb: 0, delay: 0, chorus: 0 }
+    const hasClip = (track.audioClips ?? []).some((clip) => !clip.muted && audioBuffers.has(clip.assetId))
+    if (!buffer && !hasClip) continue
+
+    /* 每轨一个输入节点：采样轨 buffer 与音频片段都先汇到这里，再走同一条处理链 */
+    const input = offline.createGain()
+    input.gain.value = 1
+    if (buffer) {
+      const source = offline.createBufferSource()
+      source.buffer = buffer
+      source.connect(input)
+      source.start(0)
+    }
+    scheduleAudioClips(offline, input, track, audioBuffers, secPerBeat, duration)
+
     const automation = buildDuckAutomation(project, track, duration, secPerBeat)
-    const chainOut = connectTrackChainNative(offline, source, track, automation)
+    const chainOut = connectTrackChainNative(offline, input, track, automation)
     const volume = offline.createGain()
     volume.gain.value = clamp(track.volume, 0, 1.5)
     const panner = offline.createStereoPanner()
@@ -380,7 +533,20 @@ export async function renderTracksWithChainsOffline(
     chainOut.connect(volume)
     volume.connect(panner)
     panner.connect(out)
-    source.start(0)
+
+    /* 链后发送（与实时 SoundFont per-channel 的 send 取点一致） */
+    const sendReverb = offline.createGain()
+    sendReverb.gain.value = clamp(trackSends.reverb, 0, 1)
+    const sendDelay = offline.createGain()
+    sendDelay.gain.value = clamp(trackSends.delay, 0, 1)
+    const sendChorus = offline.createGain()
+    sendChorus.gain.value = clamp(trackSends.chorus, 0, 1)
+    chainOut.connect(sendReverb)
+    sendReverb.connect(fx.reverb)
+    chainOut.connect(sendDelay)
+    sendDelay.connect(fx.delay)
+    chainOut.connect(sendChorus)
+    sendChorus.connect(fx.chorus)
   }
   return offline.startRendering()
 }

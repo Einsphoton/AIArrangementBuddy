@@ -128,6 +128,8 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   const [placedName, setPlacedName] = useState<string | null>(null)
   const [placingError, setPlacingError] = useState<string | null>(null)
   const finalizedRef = useRef(false)
+  /** cover 产物是「整工程从 0 拍」的再创作，必须落在 0 拍；普通生成仍落播放头 */
+  const coverPendingRef = useRef(false)
 
   const refreshCompanion = useCallback(async () => {
     try {
@@ -236,7 +238,8 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
         const name = caption.trim().slice(0, 40) || 'AI 生成音频'
         const asset = assetRefFromPeaks(assetId, peaks, { name: `${name}.wav` })
         const store = useStore.getState()
-        const startBeat = tidy(Math.max(0, store.playhead))
+        /* cover 的源音频是整工程从 0 拍渲染的，落轨必须从 0 开始；普通生成仍遵循播放头 */
+        const startBeat = coverPendingRef.current ? 0 : tidy(Math.max(0, store.playhead))
         const parsedBpm = Number(bpm)
         const parsedDuration = Number(durationSec)
         const placeRef: { value: { trackId: string; clipId: string } | null } = { value: null }
@@ -266,6 +269,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
       } catch (error) {
         setPlacingError(error instanceof Error ? error.message : '创建音频轨失败')
       } finally {
+        coverPendingRef.current = false
         setPlacing(false)
       }
     },
@@ -273,7 +277,11 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   )
 
   useEffect(() => {
-    if (!task || task.status !== 'done' || !task.assetId) return
+    if (!task || task.status !== 'done' || !task.assetId) {
+      /* cover 失败/取消时清掉落轨标记，避免下一次普通生成被误放到 0 拍 */
+      if (task && (task.status === 'failed' || task.status === 'canceled')) coverPendingRef.current = false
+      return
+    }
     if (finalizedRef.current) return
     finalizedRef.current = true
     void placeGeneratedAudio(task.assetId)
@@ -341,13 +349,16 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
     try {
       const audioEngine = getAudioEngine()
       const blob = await audioEngine.renderToWav(project, {
-        sampleRate: 44100,
+        sampleRate: 48000,
+        bitDepth: 24,
+        loudnessTargetLufs: -14,
         onProgress: (ratio) => setCoverProgress(Math.min(0.6, ratio * 0.6)),
       })
       setCoverProgress(0.65)
       const file = new File([blob], 'aiab-cover-source.wav', { type: 'audio/wav' })
       const uploaded = await uploadAudioAsset(file)
       setCoverProgress(0.75)
+      coverPendingRef.current = true
       const res = await createCompanionCoverTask(
         { sourceAssetId: uploaded.asset.id, caption: text, audioCoverStrength: coverStrength, engine },
         project.id,
@@ -358,6 +369,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
       finalizedRef.current = false
       pushToast('info', '已提交 AI 重编任务（cover），等待 Companion 处理…')
     } catch (error) {
+      coverPendingRef.current = false
       setCoverError(error instanceof Error ? error.message : 'AI 重编失败')
     } finally {
       setCoverRendering(false)

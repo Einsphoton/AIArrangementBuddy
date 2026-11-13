@@ -108,6 +108,9 @@ export interface DuckDebugState {
   gainDb: number
 }
 
+/** WAV 输出位深（16-bit PCM / 24-bit PCM） */
+export type RenderBitDepth = 16 | 24
+
 export interface RenderOptions {
   /** 采样率，默认 44100 */
   sampleRate?: number
@@ -115,6 +118,21 @@ export interface RenderOptions {
   tailSeconds?: number
   /** 是否包含节拍器 */
   metronome?: boolean
+  /**
+   * 只渲染这些轨道（单轨 bounce / 分轨导出）。
+   * 传入时忽略 mute/solo（用户明确选中了要渲染的轨），且渲染时长默认取整个工程时长。
+   */
+  trackIds?: string[]
+  /** 显式总时长（秒）；缺省 = 工程末拍 + 2s + tailSeconds */
+  durationSec?: number
+  /** 输出位深，默认 16（与历史行为一致；24-bit 需调用方显式选择） */
+  bitDepth?: RenderBitDepth
+  /** 抖动（默认 16-bit 开启 TPDF、24-bit 也开启；32-bit float 内部不量化） */
+  dither?: boolean
+  /** 是否把工程里的音频片段混进渲染，默认 true */
+  includeAudioClips?: boolean
+  /** 响度归一目标（LUFS，如 -14）；null / undefined 表示不归一 */
+  loudnessTargetLufs?: number | null
   onProgress?: (ratio: number) => void
 }
 

@@ -65,11 +65,19 @@ export interface MidiExportOptions {
   normalizeStart?: boolean
   /** 每轨单独一个 MTrk（默认 true）；false 时全部合并到一个轨道 */
   separateTracks?: boolean
+  /**
+   * 是否把轨道混音参数写进 MIDI CC。
+   * - `mix`（默认）：CC7=volume、CC10=pan、CC91=reverbSend、CC93=delaySend（历史行为，用于导出给 DAW）；
+   * - `neutral`：CC7=127、CC10=64、CC91=0、CC93=0（音量/声像/混响交给外部混音链，离线渲染必须用这个，
+   *   否则会和渲染侧的 Tone.Gain / StereoPanner 叠加成两次）；
+   * - `omit`：完全不写混音 CC（音序器/DAW 自行决定）。
+   */
+  mixControls?: 'mix' | 'neutral' | 'omit'
 }
 
 /** 工程 -> MIDI 字节 */
 export function projectToMidiBytes(project: Project, options: MidiExportOptions = {}): Uint8Array {
-  const { separateTracks = true, normalizeStart = true } = options
+  const { separateTracks = true, normalizeStart = true, mixControls = 'mix' } = options
   const tracks = project.tracks.filter((t) => !t.mute && t.clips.length > 0)
   const anySolo = project.tracks.some((t) => t.solo)
   const active = anySolo ? tracks.filter((t) => t.solo) : tracks
@@ -103,10 +111,22 @@ export function projectToMidiBytes(project: Project, options: MidiExportOptions 
     const inst = getInstrument(track.instrumentId)
     const program = Math.max(0, Math.min(127, track.gmProgram || inst.gmProgram))
     if (track.kind !== 'drum') events.push({ tick: 0, priority: 0, bytes: [0xc0 | channel, program] })
-    events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 7, clamp7(track.volume * 100)] })
-    events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 10, clamp7((track.pan + 1) * 63.5)] })
-    events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 91, clamp7(track.reverbSend * 127)] })
-    events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 93, clamp7(track.delaySend * 127)] })
+    if (mixControls === 'mix') {
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 7, clamp7(track.volume * 100)] })
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 10, clamp7((track.pan + 1) * 63.5)] })
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 91, clamp7(track.reverbSend * 127)] })
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 93, clamp7(track.delaySend * 127)] })
+    } else if (mixControls === 'neutral') {
+      /* 与实时引擎的 per-channel 路由保持一致（soundfont.ts applyChannelMix）：
+         音量/声像/发送由渲染侧的 Tone 节点链负责，MIDI 只保留中性值，
+         否则 CC7/CC10 会和 Tone.Gain / StereoPanner 叠加两次（历史 bug：约 −10dB）。 */
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 7, 127] })
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 10, 64] })
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 91, 0] }) // 混响发送
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 93, 0] }) // 合唱深度（不是延迟！）
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 74, 64] }) // 亮度回中
+      events.push({ tick: 0, priority: 0, bytes: [0xb0 | channel, 1, 0] }) // 颤音回零
+    }
 
     for (const clip of track.clips) {
       if (clip.muted) continue
@@ -209,6 +229,8 @@ export function projectDurationSeconds(project: Project): number {
   let endBeat = 0
   for (const track of project.tracks) {
     for (const clip of track.clips) endBeat = Math.max(endBeat, clip.startBeat + clip.lengthBeats)
+    /* 音频片段也要计入：纯音频工程 / 尾部有 AI 音频时，否则导出会截断 */
+    for (const clip of track.audioClips ?? []) endBeat = Math.max(endBeat, clip.startBeat + clip.lengthBeats)
   }
   return (endBeat / project.tempo) * 60 + 2
 }

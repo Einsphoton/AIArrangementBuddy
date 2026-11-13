@@ -16,6 +16,8 @@
     "test": "node scripts/test.mjs",
     "test:ai": "node scripts/test-ai.mjs",
     "test:audio-params": "node scripts/test-audio-params.mjs",
+    "test:render-units": "node --import tsx scripts/test-render-units.mjs",
+    "verify:render": "node scripts/verify-render-quality.mjs",
     "ai:logs": "node scripts/ai-logs.mjs",
     "soundfonts": "node scripts/fetch-soundfonts.mjs",
     "postinstall": "node scripts/postinstall.mjs",

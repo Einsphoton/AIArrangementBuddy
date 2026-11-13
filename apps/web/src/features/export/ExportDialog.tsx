@@ -55,7 +55,7 @@ const FORMATS: FormatOption[] = [
     id: 'wav',
     name: 'WAV',
     ext: '.wav',
-    description: '44.1kHz 无损音频，浏览器本地离线渲染，无需后端',
+    description: '高解析无损音频，浏览器本地离线渲染，无需后端',
     icon: Waves,
     badge: '无损',
     needsFfmpeg: false,
@@ -118,6 +118,10 @@ export function ExportDialog() {
   const [includeMuted, setIncludeMuted] = useState(false)
   const [loopOnly, setLoopOnly] = useState(false)
   const [bitrate, setBitrate] = useState('320k')
+  /** 音频导出质量（仅影响音频导出；MIDI 不传这些参数） */
+  const [sampleRate, setSampleRate] = useState<'44100' | '48000'>('48000')
+  const [bitDepth, setBitDepth] = useState<'16' | '24'>('24')
+  const [normalizeLoudness, setNormalizeLoudness] = useState(true)
   const [job, setJob] = useState<ExportJob>(IDLE_JOB)
   const [health, setHealth] = useState<HealthInfo | null>(null)
   const [healthError, setHealthError] = useState<string | null>(null)
@@ -177,8 +181,11 @@ export function ExportDialog() {
     [project, includeMuted, loopOnly, loopValid],
   )
 
+  const audioSampleRate = sampleRate === '44100' ? 44100 : 48000
+  const audioBitDepth = bitDepth === '16' ? 16 : 24
+  const sampleRateLabel = `${audioSampleRate / 1000}kHz`
   const duration = format === 'mid' ? 0 : projectDurationSeconds(exportProject)
-  const estimatedSize = estimateBytes(format, duration, bitrate)
+  const estimatedSize = estimateBytes(format, duration, bitrate, audioSampleRate, audioBitDepth)
   /** 文件名预览：用户填的 base 会去掉已有音频后缀，最终统一追加当前格式后缀 */
   const filenamePreview = `${sanitizeFilename(
     stripKnownExtension(filename.trim()) || exportProject.name || '未命名工程',
@@ -245,11 +252,19 @@ export function ExportDialog() {
     }
 
     /* WAV：浏览器本地离线渲染；MP3/FLAC/OGG：渲染后上传服务端转码 */
-    setJob({ status: 'rendering', progress: 0.04 })
+    setJob({
+      status: 'rendering',
+      progress: 0.04,
+      message: `${sampleRateLabel} / ${audioBitDepth}-bit 离线渲染中…`,
+    })
     startTicker()
     try {
       const engine = getAudioEngine()
-      const wavBlob = await engine.renderToWav(exportProject)
+      const wavBlob = await engine.renderToWav(exportProject, {
+        sampleRate: audioSampleRate,
+        bitDepth: audioBitDepth,
+        loudnessTargetLufs: normalizeLoudness ? -14 : null,
+      })
 
       if (format === 'wav') {
         stopTicker()
@@ -261,9 +276,11 @@ export function ExportDialog() {
           filename: `${finalBase}.wav`,
           size: wavBlob.size,
           duration,
-          message: 'WAV 已在本地渲染并导出',
+          message: `WAV 已在本地渲染并导出（${sampleRateLabel} / ${audioBitDepth}-bit${
+            normalizeLoudness ? '，响度归一 -14 LUFS' : ''
+          }）`,
         })
-        pushToast('success', 'WAV 导出完成')
+        pushToast('success', `WAV 导出完成（${sampleRateLabel} / ${audioBitDepth}-bit）`)
         return
       }
 
@@ -504,8 +521,59 @@ export function ExportDialog() {
                 {format === 'mid'
                   ? 'MIDI 在浏览器本地生成，不需要后端与音频引擎。'
                   : format === 'wav'
-                    ? 'WAV 在浏览器离线渲染（44.1kHz / 立体声），文件体积较大。'
-                    : `${activeFormat.name} 由服务端 ffmpeg 转码，需要后端已安装 ffmpeg。`}
+                    ? `WAV 在浏览器离线渲染（${sampleRateLabel} / ${audioBitDepth}-bit 立体声${
+                        normalizeLoudness ? '，响度归一 -14 LUFS' : ''
+                      }），文件体积较大。`
+                    : `${activeFormat.name} 由服务端 ffmpeg 转码：先以 ${sampleRateLabel} / ${audioBitDepth}-bit 渲染源 WAV，再上传服务端。`}
+              </div>
+            )}
+
+            {/* 音频质量：仅音频导出可调（WAV 本体 / 转码前的源 WAV），MIDI 不传这些参数 */}
+            {format !== 'mid' && (
+              <div className="rounded-xl border border-line bg-bg-soft/50 px-3 py-2.5 sm:col-span-2">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <span className="text-[10.5px] font-semibold tracking-wide text-ink-3">音频质量</span>
+                  <span className="tabular-nums text-[10px] text-ink-4" data-testid="export-audio-quality-summary">
+                    {sampleRateLabel} / {audioBitDepth}-bit
+                    {normalizeLoudness ? ' / -14 LUFS' : ' / 原始响度'}
+                    {format === 'wav' ? ' · 无损 WAV' : ' · 源 WAV'}
+                  </span>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] text-ink-4">采样率</span>
+                    <Select
+                      value={sampleRate}
+                      ariaLabel="采样率"
+                      options={[
+                        { value: '44100', label: '44.1 kHz · CD 标准' },
+                        { value: '48000', label: '48 kHz · 推荐' },
+                      ]}
+                      onChange={(value) => setSampleRate(value === '44100' ? '44100' : '48000')}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] text-ink-4">位深</span>
+                    <Select
+                      value={bitDepth}
+                      ariaLabel="位深"
+                      options={[
+                        { value: '16', label: '16-bit · CD 兼容' },
+                        { value: '24', label: '24-bit · 高动态（推荐）' },
+                      ]}
+                      onChange={(value) => setBitDepth(value === '16' ? '16' : '24')}
+                    />
+                  </label>
+                </div>
+                <div className="mt-2.5 flex items-center justify-between gap-3 rounded-lg border border-line bg-surface-2/50 px-2.5 py-2">
+                  <div>
+                    <div className="text-[11.5px] text-ink-2">响度归一（-14 LUFS）</div>
+                    <div className="mt-0.5 text-[10px] leading-relaxed text-ink-4">
+                      按流媒体标准统一响度，避免导出忽大忽小；关闭则保留原始动态
+                    </div>
+                  </div>
+                  <Switch checked={normalizeLoudness} label="响度归一 -14 LUFS" onChange={setNormalizeLoudness} />
+                </div>
               </div>
             )}
           </div>
@@ -623,9 +691,16 @@ function stripKnownExtension(value: string): string {
 }
 
 /** 粗估文件大小（仅用于给用户一个数量级，实际以导出结果为准） */
-function estimateBytes(format: ExportFormat, duration: number, bitrate: string): number {
+function estimateBytes(
+  format: ExportFormat,
+  duration: number,
+  bitrate: string,
+  sampleRate: number,
+  bitDepth: number,
+): number {
   if (duration <= 0 || format === 'mid') return 0
-  const wavBytes = duration * 44100 * 2 * 2
+  /* WAV：时长 × 采样率 × 声道数(2) × 位深字节数 */
+  const wavBytes = duration * sampleRate * 2 * (bitDepth / 8)
   switch (format) {
     case 'wav':
       return wavBytes
@@ -658,7 +733,26 @@ function buildExportProject(
     const clips = track.clips
       .map((clip) => cropClip(clip, start, end))
       .filter((clip): clip is Clip => clip !== null)
-    return { ...track, clips }
+    /* 音频片段也要随循环区间裁剪/平移，否则「导出循环区间」会把整段音频混进来 */
+    const secPerBeat = 60 / Math.max(20, project.tempo)
+    const audioClips = (track.audioClips ?? [])
+      .map((clip) => {
+        const clipStart = clip.startBeat
+        const clipEnd = clip.startBeat + clip.lengthBeats
+        const from = Math.max(clipStart, start)
+        const to = Math.min(clipEnd, end)
+        if (to - from < 0.01) return null
+        const removedSec = (from - clipStart) * secPerBeat
+        return {
+          ...clip,
+          startBeat: from - start,
+          lengthBeats: to - from,
+          offsetSec: (clip.offsetSec ?? 0) + removedSec,
+          durationSec: Math.max(0.01, (to - from) * secPerBeat),
+        }
+      })
+      .filter((clip): clip is NonNullable<typeof clip> => clip !== null)
+    return { ...track, clips, audioClips }
   })
   cloned.loop = { enabled: false, startBeat: 0, endBeat: end - start }
   const barBeats = beatsPerBar(project.timeSignature)

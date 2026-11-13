@@ -17,9 +17,10 @@
  * - 行本身的普通点击 / Shift / Ctrl 选择由 `TrackPanel` 的列表容器统一处理（见 TrackPanel 注释）。
  */
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, GripVertical, Info, Play, Waves } from 'lucide-react'
+import { AudioLines, ChevronDown, ChevronRight, GripVertical, Info, Play, Waves } from 'lucide-react'
 import { getInstrument, type Track } from '@aiab/core'
 import { getAudioEngine } from '../../audio'
+import { bounceTrackToAudio, isBouncingTrack } from '../audio/bounceTrack'
 import { cn } from '../../lib/format'
 import { useStore } from '../../store/store'
 import { TRACK_HEIGHT_LIMITS, useUiStore } from '../../lib/uiStore'
@@ -109,6 +110,8 @@ export function TrackRow({
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(track.name)
   const [previewing, setPreviewing] = useState(false)
+  /** 单轨 bounce 进行中：只做行内轻量提示，不阻塞其它 UI（渲染/上传可能要几秒） */
+  const [bouncing, setBouncing] = useState(() => isBouncingTrack(track.id))
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [colorAnchor, setColorAnchor] = useState<{ left: number; right: number; top: number; bottom: number } | null>(null)
   const [infoAnchor, setInfoAnchor] = useState<DOMRect | null>(null)
@@ -198,6 +201,16 @@ export function TrackRow({
     } catch (error) {
       console.warn('[tracks] 试听失败', error)
     }
+  }
+
+  /**
+   * 单轨渲染为音频（bounce in place）。
+   * 成功/失败的 toast 都由 bounceTrack 负责，这里只管行内「渲染中…」状态。
+   */
+  const bounce = () => {
+    if (bouncing || isBouncingTrack(track.id)) return
+    setBouncing(true)
+    void bounceTrackToAudio(track.id).finally(() => setBouncing(false))
   }
 
   const toggleCollapse = (event: React.MouseEvent) => {
@@ -357,6 +370,7 @@ export function TrackRow({
       data-track-selected={selected ? 'true' : 'false'}
       data-track-primary={primary ? 'true' : 'false'}
       data-mix-state={audibility}
+      data-track-bouncing={bouncing ? 'true' : 'false'}
       onContextMenu={(event) => {
         const target = event.target as HTMLElement
         if (target.tagName === 'INPUT') return
@@ -472,6 +486,17 @@ export function TrackRow({
               )}
             >
               <span className="block min-w-0 truncate text-[12.5px]">{track.name}</span>
+            </span>
+          )}
+          {/* 渲染中：行内轻量提示（不遮挡操作、不禁用其它轨道；完成后 bounceTrack 会 toast） */}
+          {bouncing && (
+            <span
+              data-track-bouncing-label
+              title="正在离线渲染为音频…完成后自动落一条音频轨并静音原轨（⌘Z 可撤销）"
+              className="flex shrink-0 items-center gap-0.5 text-[9.5px] leading-none text-accent/90"
+            >
+              <AudioLines size={9} className="animate-pulse" />
+              <span className="whitespace-nowrap">渲染中…</span>
             </span>
           )}
           <div className="flex shrink-0 items-center gap-0.5">
@@ -787,6 +812,7 @@ export function TrackRow({
           hasCustomHeight={hasCustomHeight}
           selectionIds={selectionIds.includes(track.id) ? selectionIds : [track.id]}
           onPreview={preview}
+          onBounce={bounce}
           onClose={() => setMenu(null)}
           onRequestRename={() => {
             setDraft(track.name)

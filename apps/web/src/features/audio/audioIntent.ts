@@ -635,7 +635,9 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
     const engine = getAudioEngine()
     const baseName = (plan.trackName || project.name || 'AI 渲染').slice(0, 40)
     const blob = await engine.renderToWav(project, {
-      sampleRate: 44100,
+      sampleRate: 48000,
+      bitDepth: 24,
+      loudnessTargetLufs: -14,
       onProgress: (ratio) => {
         if (canceledJobs.has(jobId)) return
         useAudioJobStore.getState().updateStep(stepKey, { progress: clamp(ratio, 0, 0.9), status: 'running' })
@@ -666,7 +668,9 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
       channels: uploaded.channels,
       peaks: uploaded.peaks,
     })
-    const startBeat = Math.max(0, plan.startBeat ?? store.playhead)
+    /* 渲染的是整工程、从 0 拍开始，落轨也必须是 0；
+       旧实现落轨用 playhead，播放头不在 0 时整首歌会整体后移（已修）。 */
+    const startBeat = 0
     const slot = useAudioJobStore.getState().slots.find((item) => item.key === stepKey)
     const trackName = slot?.name ?? `渲染 · ${baseName}`
     const current = useStore.getState()

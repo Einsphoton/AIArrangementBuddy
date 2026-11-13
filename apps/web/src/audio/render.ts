@@ -7,9 +7,12 @@
  * 2. **合成器轨**（以及没有音色库时）：用 `Tone.Offline` 重建同一套音色图（synth.ts）
  *    与总线效果，逐音符按绝对时间触发，得到确定性结果。
  *
- * 两组音频按采样点相加后统一应用主音量与软限幅，因此：
- * - 没有音色库 => 纯合成器渲染，一切正常；
- * - 有音色库 => 采样轨明显更真实，合成器轨（如 Synth Pad）仍是合成器音色。
+ * 2026-11 渲染质量修复（P0）：
+ * - 采样轨 MIDI 的混音 CC 改为中性（CC7=127/CC10=64/CC91=0/CC93=0），音量/声像/发送只由本文件的节点链负责，
+ *   修掉历史「CC7/CC10 双重应用 ≈ −10dB」与「delaySend 被写成 Chorus」；
+ * - SoundFont 离线渲染保留绝对时间轴（`skipToFirstNoteOn:false`），修掉「首个音符不在 0 拍的轨道整体前移」；
+ * - 离线也重建共享混响/延迟/合唱总线（与合成器轨同一套参数），不再依赖 SF3 内建效果；
+ * - 支持 trackIds（单轨 bounce / 分轨导出）、音频片段混音、16/24-bit 输出与响度归一。
  *
  * 长曲子（>3 分钟）没问题：整段用一次 OfflineAudioContext 渲染，内存约
  * 3min * 44100 * 2ch * 4B ≈ 63MB。
@@ -36,49 +39,21 @@ import {
   preloadOfflineCalibration,
   renderTracksWithChainsOffline,
 } from './offlineChain'
+import { encodeWavBuffer } from './wav'
+import { normalizeLoudness } from './loudness'
 
 /* ------------------------------------------------------------------ */
-/* WAV 编码                                                            */
+/* WAV 编码（兼容旧接口）                                               */
 /* ------------------------------------------------------------------ */
 
-/** Float32 PCM -> 16bit WAV Blob（与基线实现保持同一签名，UI/服务端都在用） */
+/**
+ * Float32 PCM -> 16bit WAV Blob（与基线实现保持同一签名，UI/服务端都在用）。
+ * 新代码请使用 `encodeWavBuffer`（支持 24-bit / dither）。
+ */
 export function encodeWav(left: Float32Array, right: Float32Array | undefined, sampleRate: number): Blob {
-  const channels = right ? 2 : 1
-  const length = left.length
-  const bytesPerSample = 2
-  const blockAlign = channels * bytesPerSample
-  const dataSize = length * blockAlign
-  const buffer = new ArrayBuffer(44 + dataSize)
-  const view = new DataView(buffer)
-
-  const writeString = (offset: number, text: string) => {
-    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i))
-  }
-
-  writeString(0, 'RIFF')
-  view.setUint32(4, 36 + dataSize, true)
-  writeString(8, 'WAVE')
-  writeString(12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, channels, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * blockAlign, true)
-  view.setUint16(32, blockAlign, true)
-  view.setUint16(34, 16, true)
-  writeString(36, 'data')
-  view.setUint32(40, dataSize, true)
-
-  let offset = 44
-  const clampSample = (sample: number) => Math.max(-1, Math.min(1, sample))
-  for (let i = 0; i < length; i++) {
-    view.setInt16(offset, clampSample(left[i]) * 0x7fff, true)
-    offset += 2
-    if (right) {
-      view.setInt16(offset, clampSample(right[i]) * 0x7fff, true)
-      offset += 2
-    }
-  }
+  const bytes = encodeWavBuffer(left, right, { sampleRate, bitDepth: 16, dither: false })
+  const buffer = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(buffer).set(bytes)
   return new Blob([buffer], { type: 'audio/wav' })
 }
 
@@ -86,11 +61,17 @@ export function encodeWav(left: Float32Array, right: Float32Array | undefined, s
 /* 轨道路由                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 当前工程里应该发声的轨道（考虑 mute / solo）。
+/**
+ * 当前工程里应该发声的轨道（考虑 mute / solo）。
  *
  * 判定与实时引擎共用 `computeAudibleTrackIds`，避免「导出听到的和播放听到的不一致」。
+ * 传入 `trackIds` 时表示用户明确指定要渲染的轨道（单轨 bounce / 分轨）：忽略 mute/solo。
  */
-export function audibleTracks(project: Project): Track[] {
+export function audibleTracks(project: Project, trackIds?: string[]): Track[] {
+  if (trackIds && trackIds.length > 0) {
+    const wanted = new Set(trackIds)
+    return project.tracks.filter((track) => wanted.has(track.id))
+  }
   const audible = computeAudibleTrackIds(project.tracks)
   return project.tracks.filter((track) => audible.has(track.id))
 }
@@ -109,9 +90,9 @@ export interface RenderRouting {
   soundfont: Track[]
 }
 
-export function routeTracks(project: Project, soundfontUsable: boolean): RenderRouting {
+export function routeTracks(project: Project, soundfontUsable: boolean, trackIds?: string[]): RenderRouting {
   const routing: RenderRouting = { synth: [], soundfont: [] }
-  for (const track of audibleTracks(project)) {
+  for (const track of audibleTracks(project, trackIds)) {
     if (track.clips.length === 0) continue
     if (trackUsesSoundfont(track, soundfontUsable)) routing.soundfont.push(track)
     else routing.synth.push(track)
@@ -289,6 +270,41 @@ async function renderSynthGroup(
 }
 
 /* ------------------------------------------------------------------ */
+/* 音频片段解码                                                         */
+/* ------------------------------------------------------------------ */
+
+/** 把工程里用到的音频资产解码成 AudioBuffer（同一资产只解码一次） */
+async function loadAudioClipBuffers(
+  project: Project,
+  tracks: Track[],
+  sampleRate: number,
+): Promise<Map<string, AudioBuffer>> {
+  const ids = new Set<string>()
+  for (const track of tracks) {
+    for (const clip of track.audioClips ?? []) {
+      if (!clip.muted) ids.add(clip.assetId)
+    }
+  }
+  const result = new Map<string, AudioBuffer>()
+  if (ids.size === 0) return result
+  const OfflineCtor = window.OfflineAudioContext
+  const decoder = new OfflineCtor(2, 1, sampleRate)
+  await Promise.all(
+    [...ids].map(async (assetId) => {
+      try {
+        const response = await fetch(`/api/assets/${encodeURIComponent(assetId)}/file`)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const data = await response.arrayBuffer()
+        result.set(assetId, await decoder.decodeAudioData(data))
+      } catch (error) {
+        console.warn('[render] 音频资产加载/解码失败（该片段将被跳过）', assetId, error)
+      }
+    }),
+  )
+  return result
+}
+
+/* ------------------------------------------------------------------ */
 /* 混音                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -319,7 +335,7 @@ function addBuffer(target: StereoPcm, buffer: AudioBuffer): void {
 /**
  * 渲染整个工程为 WAV。
  * @param project 工程快照
- * @param options 采样率 / 尾部时长 / 节拍器 / 进度回调
+ * @param options 采样率 / 位深 / 尾音 / 轨道子集 / 音频片段 / 响度 / 进度回调
  * @param soundfont 采样引擎（可选；不可用或未加载时自动全走合成器）
  */
 export async function renderProjectToWav(
@@ -328,9 +344,19 @@ export async function renderProjectToWav(
   soundfont?: SoundfontEngine,
 ): Promise<Blob> {
   const sampleRate = clamp(Math.round(options.sampleRate ?? 44100), 8000, 192000)
+  const bitDepth = options.bitDepth === 24 ? 24 : 16
   const tail = clamp(options.tailSeconds ?? 2, 0, 10)
-  const duration = Math.max(1, projectDurationSeconds(project) + tail)
-  const routing = routeTracks(project, Boolean(soundfont?.usable))
+  /**
+   * 时长规则：默认「工程末拍 + 2s（projectDurationSeconds 已含）+ tail」；
+   * 传入 trackIds 时仍用**整个工程**的时长，保证单轨 bounce 保留前导静音、可原地对齐。
+   */
+  const duration = Math.max(
+    0.5,
+    Number.isFinite(options.durationSec) && (options.durationSec as number) > 0
+      ? (options.durationSec as number)
+      : projectDurationSeconds(project) + tail,
+  )
+  const routing = routeTracks(project, Boolean(soundfont?.usable), options.trackIds)
   const report = (ratio: number) => {
     try {
       options.onProgress?.(clamp(ratio, 0, 1))
@@ -343,45 +369,70 @@ export async function renderProjectToWav(
   /* P6-A：先标定所有压缩器的浏览器自动补偿（导出链与实时一致） */
   await preloadOfflineCalibration(project)
 
+  const selectedTracks = audibleTracks(project, options.trackIds)
+  const audioTracks =
+    options.includeAudioClips === false
+      ? []
+      : selectedTracks.filter((track) => (track.audioClips?.length ?? 0) > 0)
+
   const pcm = emptyPcm(Math.ceil(duration * sampleRate), sampleRate)
   const soundfontTracks = [...routing.soundfont]
   const synthTracks = [...routing.synth]
 
-  // 1) 采样轨：逐轨渲染原始 buffer（每轨单独 MIDI），再统一重建每轨处理链（EQ/压缩/duck）+ 音量声像
+  // 1) 采样轨：逐轨渲染原始 buffer（每轨单独 MIDI），再统一重建每轨处理链（EQ/压缩/duck）+ 音量声像 + 发送
+  const rawBuffers = new Map<string, AudioBuffer>()
+  const fallbackTracks: Track[] = []
   if (soundfontTracks.length > 0 && soundfont?.usable) {
-    const rawBuffers = new Map<string, AudioBuffer>()
-    const fallbackTracks: Track[] = []
     for (let index = 0; index < soundfontTracks.length; index += 1) {
       const track = soundfontTracks[index]
       report(0.02 + (0.48 * index) / Math.max(1, soundfontTracks.length))
       try {
-        const subProject: Project = { ...project, tracks: [track] }
-        const midiBytes = projectToMidiBytes(subProject)
+        /* 子工程只保留该轨；mute/solo 必须清掉，否则 projectToMidiBytes 会把它过滤掉 */
+        const subTrack: Track = { ...track, mute: false, solo: false }
+        const subProject: Project = { ...project, tracks: [subTrack] }
+        /* neutral：音量/声像/发送不写进 MIDI CC，统一由下面的节点链负责（修双重应用） */
+        const midiBytes = projectToMidiBytes(subProject, { mixControls: 'neutral' })
         const midiBuffer = midiBytes.buffer.slice(
           midiBytes.byteOffset,
           midiBytes.byteOffset + midiBytes.byteLength,
         ) as ArrayBuffer
-        rawBuffers.set(track.id, await soundfont.renderOffline(midiBuffer, duration, sampleRate))
+        /* tailSeconds=0：buffer 长度精确等于 duration，避免末尾 2s 被浪费 */
+        rawBuffers.set(track.id, await soundfont.renderOffline(midiBuffer, duration, sampleRate, undefined, 0))
       } catch (error) {
         console.warn('[render] SoundFont 单轨渲染失败，回退合成器', track.name, error)
         fallbackTracks.push(track)
       }
     }
-    if (rawBuffers.size > 0) {
-      try {
-        const chained = await renderTracksWithChainsOffline(project, rawBuffers, duration, sampleRate)
-        if (chained) addBuffer(pcm, chained)
-        report(0.56)
-      } catch (error) {
-        // 处理链重建失败不影响导出：按原始采样电平回退，避免整段静音
-        console.warn('[render] 采样轨处理链离线重建失败，按未处理电平导出', error)
-        for (const buffer of rawBuffers.values()) addBuffer(pcm, buffer)
-      }
-    }
-    synthTracks.push(...fallbackTracks)
+  }
+  const audioBuffers = await loadAudioClipBuffers(project, audioTracks, sampleRate)
+  const sendAmounts = new Map<string, { reverb: number; delay: number; chorus: number }>()
+  for (const track of selectedTracks) {
+    /* 实时引擎里音频片段只接 dry（不进发送总线），所以纯音频轨的发送量记 0，避免导出多出混响 */
+    const hasMidi = track.clips.some((clip) => clip.notes.length > 0)
+    sendAmounts.set(track.id, hasMidi
+      ? { reverb: reverbAmount(track), delay: delayAmount(track), chorus: chorusAmount(track) }
+      : { reverb: 0, delay: 0, chorus: 0 })
   }
 
-  // 2) 合成器轨（含回退后的采样轨；内部已重建每轨链与 duck）
+  // 2) 采样轨 + 音频片段：同一套 native 离线图（每轨链、推子、声像、共享效果总线）
+  if (rawBuffers.size > 0 || audioBuffers.size > 0) {
+    try {
+      const chained = await renderTracksWithChainsOffline(project, rawBuffers, duration, sampleRate, {
+        tracks: selectedTracks,
+        audioBuffers,
+        sends: sendAmounts,
+      })
+      if (chained) addBuffer(pcm, chained)
+      report(0.56)
+    } catch (error) {
+      // 处理链重建失败不影响导出：按原始采样电平回退，避免整段静音
+      console.warn('[render] 采样轨处理链离线重建失败，按未处理电平导出', error)
+      for (const buffer of rawBuffers.values()) addBuffer(pcm, buffer)
+    }
+  }
+
+  // 3) 合成器轨（含回退后的采样轨；内部已重建每轨链与 duck）
+  synthTracks.push(...fallbackTracks)
   if (synthTracks.length > 0) {
     const synthBuffer = await renderSynthGroup(
       project,
@@ -394,7 +445,7 @@ export async function renderProjectToWav(
     addBuffer(pcm, synthBuffer)
   }
 
-  // 3) 母线 / 母带链：bus EQ + 三段压缩(multiband) + 整体压缩 + makeup + masterVolume + limiter
+  // 4) 母线 / 母带链：bus EQ + 三段压缩(multiband) + 整体压缩 + makeup + masterVolume + limiter
   report(0.86)
   const OfflineCtor = window.OfflineAudioContext
   let mixBuffer: AudioBuffer
@@ -416,8 +467,48 @@ export async function renderProjectToWav(
     // 母线链重建失败：按未处理电平导出（仍保证有 WAV）
     console.warn('[render] 母线/母带链离线重建失败，按未处理电平导出', error)
   }
+  report(0.95)
+
+  const left = new Float32Array(finalBuffer.getChannelData(0))
+  const right =
+    finalBuffer.numberOfChannels > 1
+      ? new Float32Array(finalBuffer.getChannelData(1))
+      : new Float32Array(left)
+
+  /* 响度归一（可选）：默认调用方决定；UI/单轨 bounce 会传 -14 LUFS */
+  if (typeof options.loudnessTargetLufs === 'number' && Number.isFinite(options.loudnessTargetLufs)) {
+    try {
+      normalizeLoudness(left, right, sampleRate, { targetLufs: options.loudnessTargetLufs, ceilingDb: -1 })
+    } catch (error) {
+      console.warn('[render] 响度归一失败，按原始电平导出', error)
+    }
+  }
+
+  /* 最终峰值保护：母带 limiter 是 DynamicsCompressor（非砖墙），合成器轨仍可能冒出 0dBFS；
+     整体缩放（不是硬削波）到 -1dBFS 以内，保证任何配置下都不削顶。 */
+  let peak = 0
+  for (let i = 0; i < left.length; i++) {
+    const a = Math.abs(left[i])
+    const b = Math.abs(right[i])
+    if (a > peak) peak = a
+    if (b > peak) peak = b
+  }
+  const ceiling = Math.pow(10, -1 / 20)
+  if (peak > ceiling) {
+    const gain = ceiling / peak
+    for (let i = 0; i < left.length; i++) {
+      left[i] *= gain
+      right[i] *= gain
+    }
+  }
+
   report(1)
-  const left = finalBuffer.getChannelData(0)
-  const right = finalBuffer.numberOfChannels > 1 ? finalBuffer.getChannelData(1) : left
-  return encodeWav(new Float32Array(left), new Float32Array(right), sampleRate)
+  const bytes = encodeWavBuffer(left, right, {
+    sampleRate,
+    bitDepth,
+    dither: options.dither ?? true,
+  })
+  const buffer = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(buffer).set(bytes)
+  return new Blob([buffer], { type: 'audio/wav' })
 }

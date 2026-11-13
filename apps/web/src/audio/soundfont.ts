@@ -594,6 +594,10 @@ export class SoundfontEngine implements SoundfontManager {
       soundBankList: [{ bankOffset: 0, soundBankBuffer: this.bankBuffer.slice(0) }],
       midiSequence: parsed,
       loopCount: 0,
+      /* 关键：默认 Sequencer 会「跳到第一个音符」，把轨道前导静音裁掉。
+         这会让每个采样轨从各自首个音符开始混，凡首个音符不在 0 拍的工程都会整体错位
+         （实测 p_rdew9m4a 主旋律从第 8 拍前移到 0 秒）。离线渲染必须保留绝对时间轴。 */
+      sequencerOptions: { skipToFirstNoteOn: false },
     })
     await synth.isReady
     onProgress?.(0.12)
