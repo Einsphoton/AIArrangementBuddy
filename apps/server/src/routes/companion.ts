@@ -12,6 +12,14 @@
  *   GET  /api/companion/tasks/:id   查询进度/结果
  *   POST /api/companion/tasks/:id/cancel
  *   GET  /api/companion/status      节点与队列概览（状态面板用）
+ *
+ * 本机节点管理（P15，单机形态）：
+ *   GET  /api/companion/node        本机生成节点进程状态（可用性 / 状态 / 日志尾部 / 启动命令）
+ *   POST /api/companion/node/start  一键启动（拉起 scripts/companion.mjs 并等待注册）
+ *   POST /api/companion/node/stop   停止由服务端拉起的节点
+ *
+ * 入队时若没有任何在线节点，会先尝试拉起本机节点（见 companion/supervisor.ts）：
+ * 失败才返回 503，不再让用户对着「节点未连接」干等。
  */
 import type { FastifyInstance } from 'fastify'
 import { variantDisplayName } from '@aiab/core'
@@ -35,6 +43,12 @@ import {
   taskWithQueueInfo,
   variantForTask,
 } from '../companion/store.js'
+import {
+  companionNodeStatus,
+  ensureCompanionOnline,
+  startCompanionNode,
+  stopCompanionNode,
+} from '../companion/supervisor.js'
 import { errorMessage } from '../util.js'
 
 const HEARTBEAT_MS = 5000
@@ -42,7 +56,11 @@ const POLL_MS = 1500
 /** P1/P2/P5 开放的任务类型；后续 cover/extract 在这里扩展 */
 const SUPPORTED_TASK_TYPES = new Set(['generate_audio', 'repaint_audio', 'generate_stem', 'cover_audio'])
 
-/** generate_stem 允许的乐器手臂（C++ lego 的 track 名称） */
+/**
+ * generate_stem 允许的乐器手臂（**产品 arm 名**，与 companion.mjs 的 STEM_ARMS 保持一致）。
+ * 注意：arm 不是引擎轨道名 —— 引擎只认 keyboard/bass/... 等标准名，`keys → keyboard`
+ * 的翻译在 Companion 侧完成（引擎收到 `keys` 会打 WARNING 并当成未知轨道）。
+ */
 const STEM_ARMS = new Set(['guitar', 'bass', 'drums', 'strings', 'keys', 'synth', 'vocals'])
 
 type Json = Record<string, unknown>
@@ -310,7 +328,7 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
       params.sourceDurationSec = asset.durationSec
     }
 
-    // generate_stem（lego 分轨）：需要源资产 + 合法乐器手臂（base 基座由派单能力保证）
+    // generate_stem（extract 分轨）：需要源资产 + 合法乐器手臂（base 基座由派单能力保证）
     if (type === 'generate_stem') {
       const sourceAssetId = str(params.sourceAssetId)
       if (!sourceAssetId) {
@@ -328,6 +346,15 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
         return reply
           .code(400)
           .send({ error: `不支持的乐器 arm：${arm}（可用：${[...STEM_ARMS].join(', ')}）` })
+      }
+      // seed 必须是整数：分轨用固定 seed 才可复现（缺省由 Companion 兜底，这里只挡非法值）
+      if (params.seed !== undefined && params.seed !== null) {
+        const seedValue = Number(params.seed)
+        if (!Number.isInteger(seedValue) || seedValue < 0) {
+          return reply
+            .code(400)
+            .send({ error: `params.seed 必须是非负整数（收到 ${String(params.seed)}）；分轨用固定 seed 才能复现` })
+        }
       }
       params.sourceDurationSec = asset.durationSec
     }
@@ -375,9 +402,19 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
       params.adapterPath = entry.dir
     }
 
+    // 没有在线节点：单机形态下服务端自己就能把它拉起来（P15），不要直接 503 让用户干等。
+    // 拉起失败（未装引擎 / 部署形态不支持 / 已禁用自动启动）才回 503，并带上可执行的原因。
     if (listWorkers().length === 0) {
+      await ensureCompanionOnline()
+    }
+    if (listWorkers().length === 0) {
+      const node = companionNodeStatus()
+      const nodeHint = node.state === 'failed' && node.reason ? `（${node.reason}）` : ''
       return reply.code(503).send({
-        error: '没有在线 Companion：先启动本地工作节点（node scripts/companion.mjs --server <本服务地址>），再提交生成任务',
+        error:
+          `没有在线 Companion${nodeHint}：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --engine，` +
+          '或在界面点「启动生成节点」由本机服务自动拉起',
+        node,
       })
     }
 
@@ -395,6 +432,16 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
     // 派单变体由 variantForTask 从 params 推导（2B→sft，XL→xl_sft），不再单独传 variantOverride
     if (params.quality !== undefined && typeof params.quality !== 'boolean') {
       return reply.code(400).send({ error: 'params.quality 必须是布尔值' })
+    }
+
+    // 是否纯乐器（本轮）：只做类型校验，值原样透传给 Companion（它决定 lyrics/vocal_language）。
+    // 缺省（旧前端不带）= true，保持旧行为：今天所有生成都是 [Instrumental]。
+    if (params.instrumental !== undefined && typeof params.instrumental !== 'boolean') {
+      return reply.code(400).send({ error: 'params.instrumental 必须是布尔值（true=纯乐器，false=要人声）' })
+    }
+    // 分轨源的「是否含人声」同样只能是布尔；缺省不传 = 未知，Companion 不拦
+    if (params.sourceInstrumental !== undefined && typeof params.sourceInstrumental !== 'boolean') {
+      return reply.code(400).send({ error: 'params.sourceInstrumental 必须是布尔值' })
     }
 
     const task = enqueueTask({ type, params, projectId: str(body.projectId), priority })
@@ -446,6 +493,7 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
   app.get('/api/companion/status', async () => {
     const summary = companionSummary()
     const queue = queueCounts()
+    const node = companionNodeStatus()
     return {
       summary,
       queue,
@@ -453,10 +501,38 @@ export function registerCompanionRoutes(app: FastifyInstance): void {
       online: summary.workers > 0,
       workers: listWorkers(),
       tasks: listTasks(20),
+      // P15：本机生成节点进程状态（单机形态下可一键/自动拉起）；旧前端忽略该字段
+      node,
       hint:
         summary.workers === 0
-          ? '没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --engine'
+          ? node.state === 'failed' && node.reason
+            ? `没有在线 Companion：${node.reason}`
+            : '没有在线 Companion：在跑 GPU 的机器上执行 node scripts/companion.mjs --server <本服务地址> --engine，或在界面点「启动生成节点」'
           : undefined,
     }
+  })
+
+  /* ---------------- P15：本机生成节点进程管理 ---------------- */
+
+  app.get('/api/companion/node', async () => {
+    // 拉一次摘要：worker 在线时子进程状态应显示 running（用户手动启动的节点也算在线）
+    const node = companionNodeStatus()
+    if (listWorkers().length > 0 && node.state === 'stopped') {
+      return { ...node, state: 'running' as const }
+    }
+    return node
+  })
+
+  app.post<{ Body: Json }>('/api/companion/node/start', async (request) => {
+    const body = request.body ?? {}
+    const waitMsRaw = num(body.waitMs)
+    const waitMs = waitMsRaw === undefined ? undefined : Math.min(30_000, Math.max(0, waitMsRaw))
+    // 用户显式点「启动」时允许覆盖 AIAB_COMPANION_AUTOSTART=0（那是给「不想让服务端碰进程」的场景）
+    const result = await startCompanionNode({ waitMs, force: body.force === true })
+    return result
+  })
+
+  app.post('/api/companion/node/stop', async () => {
+    return stopCompanionNode()
   })
 }

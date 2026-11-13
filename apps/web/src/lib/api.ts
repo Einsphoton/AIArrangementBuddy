@@ -790,12 +790,72 @@ export interface CompanionStatus {
     engine?: CompanionEngineLive
   }[]
   tasks: CompanionTaskState[]
+  /** P15：本机生成节点进程状态（旧服务端不带） */
+  node?: CompanionNodeStatus
   /** 离线时的启动提示（服务端给出） */
   hint?: string
 }
 
 export function getCompanionStatus(): Promise<CompanionStatus> {
   return request<CompanionStatus>('/api/companion/status')
+}
+
+/* ---------------- P15：本机生成节点（Companion 进程） ---------------- */
+
+/**
+ * 本机生成节点进程状态。
+ *
+ * 背景：Companion 是独立进程，以前只能手敲命令启动，导致「生成节点未连接」一直不变。
+ * 单机形态下服务端可以自己拉起它：
+ * - `available`：部署里有 `scripts/companion.mjs`（Docker/仅打包 server → false）
+ * - `controllable`：允许服务端启动（AIAB_COMPANION_AUTOSTART 未关）
+ * - `state`：stopped / starting / running / failed
+ * - `reason`：失败原因（中文，界面直接展示）
+ * - `logTail`：日志尾部，排障用
+ */
+export interface CompanionNodeStatus {
+  available: boolean
+  /** 服务端是否允许「自动启动」（提交任务时顺手拉起） */
+  autostart: boolean
+  /** 是否允许「一键启动」按钮 */
+  controllable: boolean
+  state: 'stopped' | 'starting' | 'running' | 'failed'
+  pid?: number
+  startedAt?: number
+  reason?: string
+  exitCode?: number
+  logPath?: string
+  logTail?: string
+  /** 手动启动命令（available:false 时展示给用户） */
+  command: string
+}
+
+export function getCompanionNode(): Promise<CompanionNodeStatus> {
+  return request<CompanionNodeStatus>('/api/companion/node')
+}
+
+/**
+ * 一键启动本机生成节点。
+ *
+ * `waitMs` 是等待节点注册的上限（默认服务端 4s）；用户在界面上点按钮时给到 12s，
+ * 覆盖冷启动 + 首次健康检查。返回的 `online` 才是真正的「能被派单」。
+ */
+export function startCompanionNode(
+  options: { waitMs?: number; force?: boolean } = {},
+): Promise<{ ok: boolean; online: boolean; node: CompanionNodeStatus }> {
+  return request<{ ok: boolean; online: boolean; node: CompanionNodeStatus }>('/api/companion/node/start', {
+    method: 'POST',
+    body: JSON.stringify(options),
+  })
+}
+
+export function stopCompanionNode(): Promise<{ ok: boolean; node: CompanionNodeStatus }> {
+  // 空 body 要显式给 `{}`：请求头默认带 Content-Type: application/json，
+  // Fastify 对「声明了 JSON 却没有 body」直接 400，别的地方的 POST 也是这个写法。
+  return request<{ ok: boolean; node: CompanionNodeStatus }>('/api/companion/node/stop', {
+    method: 'POST',
+    body: '{}',
+  })
 }
 
 /* ---------------- P8：本机引擎自动安装 ---------------- */
@@ -1163,10 +1223,24 @@ export interface GenerateAudioParams {
   /** 英文提示词：风格 / 乐器 / 情绪 / 速度 */
   caption: string
   bpm?: number
+  /** 调性（主音 + 调式，如 "C minor"）；缺省时 Companion 回落 "C major" */
   keyscale?: string
+  /** 拍号分子（如 "4"）。引擎只认分子字符串，不认 "4/4" */
+  timesignature?: string
   durationSec?: number
   seed?: number
   style?: string
+  /**
+   * 是否纯乐器（无人声），缺省 true。false = 这次生成要人声：
+   * Companion 的歌词条件会从 `[Instrumental]`（禁止人声）切换成 `''`（让 LM 写歌词），
+   * 否则「要人声的 caption + 禁止人声的条件」互相打架，成品没有人声。
+   */
+  instrumental?: boolean
+  /**
+   * 演唱语言（BCP-47，如 'ja' / 'en'）。仅要人声时有意义；缺省时 Companion 按
+   * caption 的「Japanese / anime / J-ROCK」等线索推断，再不中给 'en'。
+   */
+  vocalLanguage?: string
   /** 来自 GET /api/adapters 的 nativeReady 列表 */
   adapterId?: string
   /** P7-A 质量模式：LM → sft 50 步（更慢；与 LoRA 适配器互斥） */
@@ -1264,9 +1338,20 @@ export interface GenerateStemParams {
   /** 源音频资产 id（从要分轨的音频片段来） */
   sourceAssetId: string
   arm: StemArm
-  /** 可选：该 arm 的额外描述（留空用 Companion 内置映射） */
+  /**
+   * 可选：该 arm 的**风格补充**（如 "japanese rock, 178 bpm"）。
+   * Companion 会先给「只保留该乐器的隔离描述」，这里只作为后缀 —— 不要传整曲描述，
+   * 否则等于要求模型重新生成一整首歌而不是分离。
+   */
   caption?: string
+  /** 可选：固定 seed（留空用 Companion 的分轨固定 seed，保证可复现） */
   seed?: number
+  /**
+   * 可选：源整曲是否是纯乐器（无人声）。用来拦「从没人声的源里抽人声」——
+   * extract 只能分离源音频里已有的东西，源里没人声时抽出的 vocals 是噪声。
+   * 不传 = 未知，Companion 不拦（兼容旧调用方）。
+   */
+  sourceInstrumental?: boolean
   /** P9 引擎量级：'xl' 时走 xl_base（缺省 2b） */
   engine?: CompanionEngine
 }

@@ -65,6 +65,103 @@ export function assetRefFromPeaks(
   })
 }
 
+/* ------------------------------------------------------------------ */
+/* 分轨落轨增益（缺陷：分轨叠加比整曲响 14dB 并削顶到 peak 3.15）        */
+/* ------------------------------------------------------------------ */
+
+/** 叠加总峰值的硬上限：留 10% 余量，低于 1.0 全刻度就不会削顶 */
+export const STEM_SUM_HEADROOM = 0.9
+/** 推子下限：再低就等价于静音，留给用户自己推上去 */
+export const STEM_VOLUME_MIN = 0.02
+
+const finitePositive = (value: number): boolean => Number.isFinite(value) && value > 0
+
+/**
+ * 资产实测峰值绝对值（0..1+）：取 `peaks` 里 min/max 的全局极值。
+ *
+ * 为什么用峰值而不是 RMS：落轨时手上只有 `GET /api/assets/:id/peaks` 的 512 桶
+ * min/max（已经请求过了），而 RMS 必须自己拉 44MB WAV 逐采样算。
+ * 峰值这条路是可证的：服务端 `parseWav` 的桶内 min/max 是**真实采样极值**（只降采样
+ * 到 512 桶，不丢极值），实测推出的峰值与逐采样最大值逐位一致。
+ *
+ * 已知代价：峰值预算不是等响匹配。实测两种做法在真实分轨上的频段失真为
+ * 57.1pp（等增益）vs 47.2pp（等响匹配）——等响更好，但 (a) 需要额外解码 6×44MB，
+ * (b) 从 512 桶 min/max 反推 RMS 完全不可靠（实测 5 种估计式的偏差散布 ±3.4dB），
+ * 只能用峰值预算。等响匹配列为后续优化，不是已完成的改进。
+ */
+export function assetPeakFromPeaks(peaks: number[] | undefined): number {
+  if (!Array.isArray(peaks) || peaks.length === 0) return 0
+  let peak = 0
+  for (const value of peaks) {
+    if (!Number.isFinite(value)) continue
+    const magnitude = Math.abs(value)
+    if (magnitude > peak) peak = magnitude
+  }
+  return peak
+}
+
+/**
+ * 分轨落轨音量（纯函数）。
+ *
+ * 为什么不能直接用 0.8：实测用户工程 `p_7atqcqig`，6 条分轨各按 0.8 叠加后
+ * RMS 比整曲高 **+13.87 dB**、峰值 **3.149**（严重削顶）。根因是**引擎对每个输出
+ * 文件独立做峰值归一化**（同一工程 7 个文件峰值全是 0.99997，而 RMS 从 -13.7 到
+ * -20.7 dBFS 不等）——分轨之间的相对电平不含音乐信息，等增益叠加必然爆表。
+ *
+ * 推导（相位无关上界，因此不需要知道分轨之间的相干性）：
+ *   |Σ g_i·x_i| ≤ Σ g_i·peak_i ，取所有 g_i 相同 g = budget/n 时上界正好是 budget。
+ *   budget = min(HEADROOM, 整曲有效峰值)  —— 「分轨总和不超过整曲」+「不削顶」
+ *   g      = budget / n
+ *   再按单轨自身不削顶收紧：g ≤ HEADROOM / stemPeak
+ *
+ * n 条同峰值时 g = budget/n；因为引擎已把所有分轨峰值拉齐到 ~1.0，
+ * 该式实际退化成一个「等分预算」的统一增益 —— 这正是正确的，不是偷懒。
+ *
+ * ## 读这段注释的人请注意：增益分级**没有**解决「糊」
+ *
+ * 分轨是**各自重合成的近似物，不是原曲的分解**，两者都是实测结论：
+ *
+ * 1) 分轨之间**正相干**：单位增益下 5 条乐器叠加实测 -6.08 dBFS，
+ *    比「不相关」的等功率模型（sqrt(Σ) = -9.66 dBFS）高 +3.58 dB；
+ *    两两在 1–6kHz 的相关最高 +0.43。所以**任何相位无关的混音建议都会偏**，
+ *    包括「把所有分轨推子都设成 0.8」这种看起来无害的做法 —— 实测那条路
+ *    peak 3.149、11.2% 采样贴顶。
+ * 2) 中频/中高频根本不在分轨里：逐条实测 500–2000Hz 能量只有整曲同频段的
+ *    **0.04–0.55 倍**，2–6kHz 只有 0.01–0.71 倍，且该频段与整曲相关仅
+ *    **+0.006…+0.088**。叠加后中频缺 14.1pp、中高频缺 16.6pp。
+ *    增益是线性缩放，**改不了频段占比**（实测修复前后占比逐位相同）。
+ *
+ * 换句话说：用户抱怨的「糊」= 中频/中高频缺失，**这个函数修不了**，
+ * 它只修「14dB 过响 + 削顶」。要真正改善糊，得从引擎侧（extract 的分离能力）
+ * 想办法，或改用真正的分离模型；不要在这里继续调增益然后以为问题解决了。
+ *
+ * ## 本函数的保证边界（别过度承诺）
+ *
+ * 只保证**落轨默认音量**下 sum 不削顶（相位无关上界 Σgᵢ·peakᵢ ≤ budget ≤ 0.9）。
+ * DAW 允许用户事后把推子推到 1.5，**那时仍会削顶**——实测 6 条分轨全部推到
+ * 0.8 时 peak 3.149、推到 1.0 时 peak 3.936。这是刻意的产品取舍：
+ * 用户要能"推得动"，而不是被一个隐藏的总线限制器锁死。
+ */
+export function stemPlacementVolume(input: {
+  /** 本分轨资产实测峰值（`GET /api/assets/:id/peaks` 的 min/max 全局极值） */
+  stemPeak: number
+  /** 同批一起落轨的分轨条数（含本条），用于等分叠加预算 */
+  stemCount: number
+  /** 整曲轨有效峰值 = 整曲资产原始峰值 × 整曲轨音量 */
+  songPeak: number
+}): number {
+  const count = Math.max(1, Math.floor(Number(input.stemCount) || 1))
+  const stemPeak = finitePositive(input.stemPeak) ? input.stemPeak : 1
+  // 整曲峰值未知（旧服务端 / 峰值接口失败）时退回固定余量，仍然保证不削顶
+  const songPeak = finitePositive(input.songPeak) ? input.songPeak : STEM_SUM_HEADROOM
+  const budget = Math.min(STEM_SUM_HEADROOM, songPeak)
+  const bySum = budget / count
+  const bySelf = STEM_SUM_HEADROOM / stemPeak
+  const volume = Math.min(bySum, bySelf)
+  // 永不为负 / NaN / 超过 1.0；上限 1.0 保证用户还能自己往上推（推子 ≤1.5）
+  return Math.min(1, Math.max(STEM_VOLUME_MIN, volume))
+}
+
 export interface PlaceAudioInput {
   asset: AssetRef
   /** 有效音频时长（秒），来自上传返回或 peaks 接口 */
@@ -76,6 +173,8 @@ export interface PlaceAudioInput {
   color?: string
   /** 生成产物的溯源（导入时为 import） */
   provenance?: Provenance
+  /** 轨道推子音量；缺省 0.8（导入 / MIDI 渲染 / 重绘都是这个值，保持原行为） */
+  volume?: number
 }
 
 /**
@@ -92,7 +191,8 @@ export function placeAudioClip(draft: Project, input: PlaceAudioInput): { trackI
     instrumentId: instrument.id,
     emotionId: instrument.emotions[0].id,
     gmProgram: instrument.gmProgram,
-    volume: 0.8,
+    // 分轨会传入按实测峰值推导的音量；其余场景（导入/渲染/重绘）保持 0.8
+    volume: Number.isFinite(input.volume) && (input.volume as number) > 0 ? Math.min(1.5, input.volume as number) : 0.8,
   })
   const clip = createAudioClip({
     trackId: track.id,

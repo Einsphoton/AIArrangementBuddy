@@ -33,6 +33,39 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { IS_WINDOWS, spawnBin } from './lib/spawn-bin.mjs'
+import {
+  applyModelSelection,
+  buildExtractRequest,
+  buildLegoRequest,
+  buildQualityLmRequest,
+  buildQualitySynthRequest,
+  buildSynthPayload,
+  createMockWav,
+  DC_OFFSET_HEALTHY,
+  DC_OFFSET_THRESHOLD,
+  defaultStemCaption,
+  ENGINE_TRACKS,
+  engineTrackForArm,
+  normalizeKeyscale,
+  normalizeTimesignature,
+  presetForVariant,
+  QUALITY_GUIDANCE,
+  QUALITY_SHIFT,
+  QUALITY_STEPS,
+  readMeanDcOffset,
+  readWavInfo,
+  resolveStemArmDecision,
+  resolveVocalLanguage,
+  sanitizeWavDcOffset,
+  STEM_ARMS,
+  STEM_SEED,
+  stripDcOffsetFromWav16,
+  TURBO_GUIDANCE,
+  TURBO_SHIFT,
+  TURBO_STEPS,
+  validateStemParams,
+  wantsVocals,
+} from './companion.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DATA_DIR = mkdtempSync(path.join(tmpdir(), 'aiab-ai-test-'))
@@ -1847,6 +1880,357 @@ async function scenarioAudioQualityBoolean(signal) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 7.5 分轨（generate_stem / extract）纯函数断言 —— 缺陷 #2 回归        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 缺陷 #2「分轨不是同一首歌的乐器」的纯函数回归：
+ * 1) 请求必须是 `task_type=extract` + `track=<引擎轨道名>`，不能再发 `{lego: arm}`
+ *    （未知键会让引擎回落 text2music，等于按 caption 重生成一首 30s 新歌）；
+ * 2) 产品 arm 名（含 `keys`）必须映射成引擎白名单里的轨道名；
+ * 3) seed 必须稳定（extract 可复现），caption 必须以隔离描述开头。
+ */
+function scenarioStemExtractRequest(signal) {
+  void signal
+  // 1) arm → 引擎轨道名：7 个全部合法，keys → keyboard
+  for (const arm of STEM_ARMS) {
+    const track = engineTrackForArm(arm)
+    if (!track) throw new Error(`arm ${arm} 没有引擎轨道映射`)
+    if (!ENGINE_TRACKS.includes(track)) throw new Error(`arm ${arm} → ${track} 不在引擎白名单内`)
+  }
+  if (engineTrackForArm('keys') !== 'keyboard') {
+    throw new Error(`keys 必须映射成 keyboard，实际 ${engineTrackForArm('keys')}`)
+  }
+
+  // 2) 请求形状：extract + track，且没有 lego 键
+  const validated = validateStemParams({ sourceAssetId: 'asset_src', arm: 'keys' })
+  const request = buildExtractRequest(validated)
+  if (request.task_type !== 'extract') throw new Error(`task_type 期望 extract，实际 ${request.task_type}`)
+  if (request.track !== 'keyboard') throw new Error(`track 期望 keyboard，实际 ${request.track}`)
+  if ('lego' in request) throw new Error('请求里不能出现 lego 键（引擎会回落 text2music）')
+  if (request.inference_steps !== 50 || request.guidance_scale !== 1 || request.shift !== 1) {
+    throw new Error(`采样预设不对：${JSON.stringify(request)}`)
+  }
+  if (request.lyrics !== '[Instrumental]') throw new Error(`lyrics 期望 [Instrumental]，实际 ${request.lyrics}`)
+
+  // 3) seed 稳定：同输入两次一致，且等于固定默认值
+  const seedA = validateStemParams({ sourceAssetId: 'asset_src', arm: 'guitar' }).seed
+  const seedB = validateStemParams({ sourceAssetId: 'asset_src', arm: 'guitar' }).seed
+  if (seedA !== seedB) throw new Error(`seed 应稳定，实际 ${seedA} / ${seedB}`)
+  if (seedA !== STEM_SEED) throw new Error(`缺省 seed 期望固定 ${STEM_SEED}，实际 ${seedA}`)
+
+  // 4) caption 必须以「隔离该乐器」开头（整曲描述会让模型重新生成一首歌）
+  const withHint = validateStemParams({ sourceAssetId: 'a', arm: 'guitar', caption: 'japanese rock 178 bpm' })
+  if (!/^Isolated .*guitar/i.test(withHint.caption)) {
+    throw new Error(`caption 应以隔离描述开头，实际 ${withHint.caption}`)
+  }
+  // 旧名兼容壳必须走同一实现，避免历史调用点继续发 lego
+  if (buildLegoRequest(validated).task_type !== 'extract') {
+    throw new Error('buildLegoRequest 兼容壳没有走 extract 实现')
+  }
+
+  /* 5) 隔离描述不能带「主动要求窄带/闷音色」的措辞。
+     实测证据（.verify-audio/band_corr.py）：用户工程 5 条乐器分轨叠加后
+     中频缺 14.1pp、中高频缺 16.6pp（正是用户说的「糊」）。旧描述里
+     `round low end`（低音沉）与 `palm-muted power chords`（闷音）方向相反，已移除；
+     这里锁住它们不再回来。 */
+  const forbidden = [/palm-muted/i, /round low end/i, /\bmuffled\b/i, /\bdark\b/i, /bass[- ]heavy/i]
+  for (const arm of STEM_ARMS) {
+    const caption = defaultStemCaption(arm)
+    if (!caption) throw new Error(`arm ${arm} 没有默认隔离描述`)
+    for (const pattern of forbidden) {
+      if (pattern.test(caption)) throw new Error(`arm ${arm} 的描述里仍有窄带措辞 ${pattern}：${caption}`)
+    }
+  }
+  // 乐器分轨应显式要求干声 + 全频段（引导模型给出未混音的完整频谱）
+  for (const arm of STEM_ARMS.filter((item) => item !== 'vocals')) {
+    const caption = defaultStemCaption(arm)
+    if (!/\bdry\b/i.test(caption)) throw new Error(`arm ${arm} 的描述缺 dry（干声）：${caption}`)
+    if (!/full frequency range/i.test(caption)) throw new Error(`arm ${arm} 的描述缺 full frequency range：${caption}`)
+  }
+  return `extract + track=${request.track} · seed=${seedA} · 7 arm 全合法 · 描述无窄带措辞`
+}
+
+/* ------------------------------------------------------------------ */
+/* 7.6 生成参数（shift / keyscale）纯函数断言 —— 缺陷 #1 回归           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 缺陷 #1「非常难听、几乎听不出是音乐」的两条根因，跑在**真实导出的函数**上：
+ *
+ * A) turbo DiT 被喂了 shift=1.0。引擎 `/props` 的 `presets.turbo` 是
+ *    `{ inference_steps: 8, guidance_scale: 1.0, shift: 3.0 }`；喂 1.0 会过曝发刺
+ *    （实测峰值 0.996 vs 0.958、频谱质心 1793Hz vs 1477Hz）。
+ *    这里锁住 `buildSynthPayload` / `applyModelSelection` / `presetForVariant` 都不再出现 1.0。
+ *
+ * B) 调性从未下传：`buildSynthPayload` 兜底 'C major'，而工程其实是 C minor。
+ *    这里锁住 keyscale 一旦传入就原样透传，且**只有真的没传**时才回落 'C major'。
+ *
+ * 端到端那一半（parseAudioPlan / generate_audio 工具 / 工程兜底）在
+ * `scripts/test-audio-params.mjs`（那是 TS 源码，本文件只测 companion.mjs）。
+ */
+function scenarioGenerationParams(signal) {
+  void signal
+
+  // A1) turbo 预设：与引擎 /props 的 presets.turbo 完全一致
+  const turbo = presetForVariant('turbo')
+  if (turbo.inference_steps !== TURBO_STEPS || TURBO_STEPS !== 8) {
+    throw new Error(`turbo 步数期望 8，实际 ${turbo.inference_steps}/${TURBO_STEPS}`)
+  }
+  if (turbo.guidance_scale !== TURBO_GUIDANCE || TURBO_GUIDANCE !== 1) {
+    throw new Error(`turbo guidance 期望 1.0，实际 ${turbo.guidance_scale}`)
+  }
+  if (turbo.shift !== TURBO_SHIFT || TURBO_SHIFT !== 3) {
+    throw new Error(`turbo shift 期望 3.0（引擎 presets.turbo），实际 ${turbo.shift}/${TURBO_SHIFT}`)
+  }
+  if (presetForVariant('xl_turbo').shift !== 3) throw new Error('xl_turbo 的 shift 必须保持 3.0（原有行为）')
+  for (const variant of ['sft', 'base', 'xl_sft', 'xl_base']) {
+    const preset = presetForVariant(variant)
+    if (preset.shift !== QUALITY_SHIFT || preset.inference_steps !== QUALITY_STEPS) {
+      throw new Error(`${variant} 应走 sft 预设（复用 QUALITY_* 常量），实际 ${JSON.stringify(preset)}`)
+    }
+  }
+
+  // A2) buildSynthPayload 实际产出的请求体
+  const payload = buildSynthPayload({ caption: 'energetic japanese rock, guitar bass drums', bpm: 178, keyscale: 'C minor' })
+  if (payload.shift !== 3) throw new Error(`buildSynthPayload.shift 期望 3.0，实际 ${payload.shift}`)
+  if (payload.inference_steps !== 8) throw new Error(`buildSynthPayload.inference_steps 期望 8，实际 ${payload.inference_steps}`)
+  if (payload.guidance_scale !== 1) throw new Error(`buildSynthPayload.guidance_scale 期望 1.0，实际 ${payload.guidance_scale}`)
+  if (payload.keyscale !== 'C minor') throw new Error(`keyscale 期望透传 "C minor"，实际 ${payload.keyscale}`)
+  if (payload.bpm !== 178) throw new Error(`bpm 期望 178，实际 ${payload.bpm}`)
+  // 调性只在「真的没传」时才回落
+  const noKey = buildSynthPayload({ caption: 'lofi beat' })
+  if (noKey.keyscale !== 'C major') throw new Error(`未给调性时应回落 "C major"，实际 ${noKey.keyscale}`)
+  for (const garbage of ['', '   ', 'loud and fast', 'C']) {
+    if (buildSynthPayload({ caption: 'x', keyscale: garbage }).keyscale !== 'C major') {
+      throw new Error(`非法调性 ${JSON.stringify(garbage)} 应回落到 "C major"`)
+    }
+  }
+  // 质量档仍是 sft 预设
+  const quality = buildQualitySynthRequest({ caption: 'x' }, { durationSec: 20 })
+  if (quality.shift !== QUALITY_SHIFT || quality.inference_steps !== QUALITY_STEPS) {
+    throw new Error(`质量档预设不对：${JSON.stringify(quality)}`)
+  }
+  // 调性归一化
+  if (normalizeKeyscale('c#minor') !== 'C# minor') throw new Error('normalizeKeyscale 未把 c#minor 规整成 C# minor')
+  if (normalizeKeyscale('loud and fast') !== undefined) throw new Error('normalizeKeyscale 应拒绝乱码调性')
+  if (normalizeTimesignature('3/4') !== '3') throw new Error('normalizeTimesignature 未把 3/4 取成 "3"')
+
+  return `turbo shift=${payload.shift} · keyscale=${payload.keyscale} · 非法调性回落 C major`
+}
+
+/**
+ * 现代运行时的 applyModelSelection：RUNTIME_API 在 import 时读取，因此用一个
+ * 查询串强制新实例（与 scripts/test-audio-params.mjs 同一手法）。
+ */
+async function scenarioApplyModelSelectionModern(signal) {
+  void signal
+  const previous = process.env.AIAB_ACESTEP_API
+  process.env.AIAB_ACESTEP_API = 'modern'
+  let modern
+  try {
+    modern = await import(`./companion.mjs?runtime=modern&t=${Date.now()}`)
+  } finally {
+    if (previous === undefined) delete process.env.AIAB_ACESTEP_API
+    else process.env.AIAB_ACESTEP_API = previous
+  }
+  if (modern.RUNTIME_API !== 'modern') throw new Error(`未切到现代运行时：${modern.RUNTIME_API}`)
+  const base = modern.buildSynthPayload({ caption: 'j-rock', keyscale: 'C minor' })
+  for (const variant of ['turbo', 'xl_turbo']) {
+    const applied = modern.applyModelSelection(base, { variant })
+    if (applied.shift !== 3) throw new Error(`${variant} 经 applyModelSelection 后 shift 应为 3.0，实际 ${applied.shift}`)
+    if (applied.shift === 1) throw new Error(`${variant} 的 shift 仍为 1.0（缺陷 #1 未修）`)
+    if (applied.inference_steps !== 8) throw new Error(`${variant} 步数应为 8，实际 ${applied.inference_steps}`)
+    if (!applied.synth_model) throw new Error(`${variant} 缺少 synth_model`)
+  }
+  for (const variant of ['sft', 'xl_sft']) {
+    const applied = modern.applyModelSelection(base, { variant })
+    if (applied.shift !== QUALITY_SHIFT || applied.inference_steps !== QUALITY_STEPS) {
+      throw new Error(`${variant} 应走 sft 预设（50 步 / shift 1.0），实际 ${JSON.stringify(applied)}`)
+    }
+  }
+  // /lm 请求体不能被塞采样字段
+  const lmApplied = modern.applyModelSelection(modern.buildQualityLmRequest({ caption: 'j-rock' }), { variant: 'sft', lmTier: '1.7B' })
+  if ('inference_steps' in lmApplied || 'shift' in lmApplied) {
+    throw new Error(`/lm 请求被写入采样字段：${JSON.stringify(lmApplied)}`)
+  }
+  return 'turbo/xl_turbo → shift 3.0 · sft → 1.0 · /lm 不塞采样字段'
+}
+
+/* ------------------------------------------------------------------ */
+/* 7.7 人声意图 + DC 防御 + 分轨护栏 —— 「人声轨全是噪音」回归          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 「人声部分里面根本没有人声，全都是噪音」的三层修复，全部跑在真实导出函数上：
+ *
+ * A) 人声意图必须显式：旧实现无条件 `lyrics:'[Instrumental]'`（DiT 的「不要人声」条件），
+ *    与「caption 要日语男声」自相矛盾 → 成品没人声。现在 instrumental=false 时 `lyrics:''`
+ *    （引擎语义 = 让 LM 写歌词），instrumental 缺省=true 时与旧行为逐字节一致。
+ *
+ * B) 分轨护栏：从纯乐器源里 extract vocals 只能拆出噪声（实测 DC +0.6367 / 99.69% 能量），
+ *    护栏要把这一臂明确拒绝/跳过，而不是静默产出噪声。
+ *
+ * C) DC 安全网：病态直流偏置就地校正；正常音频必须**逐字节不变**（返回同一引用）。
+ */
+function scenarioVocalIntent(signal) {
+  void signal
+
+  // A1) 缺省 = 纯乐器：与旧行为逐字节一致
+  const instrumental = buildSynthPayload({ caption: 'lofi beat', bpm: 90 })
+  if (instrumental.lyrics !== '[Instrumental]') {
+    throw new Error(`instrumental 缺省 lyrics 必须是 [Instrumental]（旧行为），实际 ${JSON.stringify(instrumental.lyrics)}`)
+  }
+  if (instrumental.vocal_language !== 'unknown') {
+    throw new Error(`instrumental 缺省 vocal_language 必须是 unknown，实际 ${JSON.stringify(instrumental.vocal_language)}`)
+  }
+
+  // A2) 要人声：lyrics 必须是空串（引擎语义 = LM 生成歌词），语言按 caption 判
+  const vocal = buildSynthPayload({ caption: 'emotional powerful male Japanese rock vocals, j-rock', bpm: 165, instrumental: false })
+  if (vocal.lyrics !== '') throw new Error(`要人声时 lyrics 必须是空串（LM 写歌词），实际 ${JSON.stringify(vocal.lyrics)}`)
+  if (vocal.vocal_language !== 'ja') throw new Error(`日语线索应得到 vocal_language=ja，实际 ${vocal.vocal_language}`)
+  // 非日语诉求不能硬塞成日语
+  const englishVocal = buildSynthPayload({ caption: 'emotional male pop vocals', instrumental: false })
+  if (englishVocal.vocal_language !== 'en') {
+    throw new Error(`非日语人声应得到 en（不硬塞 ja），实际 ${englishVocal.vocal_language}`)
+  }
+  // 显式 vocalLanguage 优先
+  const explicit = buildSynthPayload({ caption: 'x', instrumental: false, vocalLanguage: 'zh' })
+  if (explicit.vocal_language !== 'zh') throw new Error(`显式 vocalLanguage 应优先，实际 ${explicit.vocal_language}`)
+
+  // A3) wantsVocals 三元语义：只有显式 false 才算要人声
+  if (wantsVocals({}) !== false) throw new Error('缺省应视为纯乐器')
+  if (wantsVocals({ instrumental: true }) !== false) throw new Error('instrumental=true 应视为纯乐器')
+  if (wantsVocals({ instrumental: false }) !== true) throw new Error('instrumental=false 应视为要人声')
+  if (resolveVocalLanguage({ instrumental: true }) !== 'unknown') throw new Error('纯乐器语言必须是 unknown')
+
+  // A4) 质量路径一致：/lm 不能被告知「这是纯乐器」
+  const lmInstr = buildQualityLmRequest({ caption: 'j-rock' })
+  if (lmInstr.lyrics !== '[Instrumental]') throw new Error(`质量档纯乐器 /lm lyrics 应为 [Instrumental]，实际 ${lmInstr.lyrics}`)
+  if ('vocal_language' in lmInstr) throw new Error('质量档纯乐器 /lm 不应带 vocal_language（保持旧请求体形状）')
+  const lmVocal = buildQualityLmRequest({ caption: 'japanese rock vocals', instrumental: false })
+  if (lmVocal.lyrics !== '') throw new Error(`质量档要人声 /lm lyrics 应为空串（LM 写歌词），实际 ${JSON.stringify(lmVocal.lyrics)}`)
+  if (lmVocal.vocal_language !== 'ja') throw new Error(`质量档要人声 /lm 应带 ja，实际 ${lmVocal.vocal_language}`)
+  // LM 回显 [Instrumental] 不能把人声意图洗掉
+  const synthAfterLm = buildQualitySynthRequest(
+    { caption: 'x', lyrics: '[Instrumental]', vocal_language: 'unknown' },
+    { caption: 'japanese rock vocals', instrumental: false },
+  )
+  if (synthAfterLm.lyrics !== '') {
+    throw new Error(`LM 回显 [Instrumental] 时仍应保持人声条件（空串），实际 ${JSON.stringify(synthAfterLm.lyrics)}`)
+  }
+  if (synthAfterLm.vocal_language !== 'ja') throw new Error(`LM 的 unknown 不能盖掉显式 ja，实际 ${synthAfterLm.vocal_language}`)
+  // 纯乐器的质量合成必须把 LM 可能写出的歌词强制回 [Instrumental]
+  const instrAfterLm = buildQualitySynthRequest({ caption: 'x', lyrics: 'some lyrics', vocal_language: 'ja' }, { caption: 'j-rock' })
+  if (instrAfterLm.lyrics !== '[Instrumental]' || instrAfterLm.vocal_language !== 'unknown') {
+    throw new Error(`纯乐器质量合成必须回 [Instrumental]+unknown，实际 ${JSON.stringify(instrAfterLm)}`)
+  }
+
+  // B) 分轨护栏：纯乐器源的人声臂必须被拒
+  const blocked = resolveStemArmDecision({ arm: 'vocals' }, { sourceInstrumental: true })
+  if (blocked.ok !== false || blocked.code !== 'vocals-from-instrumental') {
+    throw new Error(`纯乐器源抽 vocals 必须被拒，实际 ${JSON.stringify(blocked)}`)
+  }
+  if (!/人声/.test(blocked.message) || !/跳过|噪声/.test(blocked.message)) {
+    throw new Error(`护栏消息应是可执行的中文说明，实际 ${blocked.message}`)
+  }
+  // 其它臂不受影响（任务保持 alive）
+  for (const arm of ['guitar', 'bass', 'drums', 'strings', 'keys', 'synth']) {
+    if (resolveStemArmDecision({ arm }, { sourceInstrumental: true }).ok !== true) {
+      throw new Error(`${arm} 臂不该被护栏拦下`)
+    }
+  }
+  // 未知来源 / 明确含人声的源：不拦（兼容旧调用方）
+  if (resolveStemArmDecision({ arm: 'vocals' }, {}).ok !== true) throw new Error('来源未知时不该拦（兼容旧调用方）')
+  if (resolveStemArmDecision({ arm: 'vocals' }, { sourceInstrumental: false }).ok !== true) {
+    throw new Error('源明确含人声时不该拦')
+  }
+  // validateStemParams 要真的抛中文错误
+  let threw = ''
+  try {
+    validateStemParams({ sourceAssetId: 'a', arm: 'vocals', sourceInstrumental: true })
+  } catch (error) {
+    threw = error instanceof Error ? error.message : String(error)
+  }
+  if (!threw) throw new Error('validateStemParams 应从纯乐器源拒绝 vocals 臂')
+  // 人声 caption 必须是 a cappella 干声，不能是乐器模板
+  const vocalsCaption = buildStemCaptionOf('vocals')
+  if (!/a cappella|vocal/i.test(vocalsCaption)) throw new Error(`vocals caption 应要求人声，实际 ${vocalsCaption}`)
+
+  return `instrumental→[Instrumental]/unknown · vocals→''/${vocal.vocal_language} · 护栏拦截 + 6 臂放行`
+}
+
+/** 取 arm 的默认分轨 caption（走真实 buildStemCaption） */
+function buildStemCaptionOf(arm) {
+  return validateStemParams({ sourceAssetId: 'a', arm }).caption
+}
+
+/**
+ * DC 偏置安全网：合成一条带病态 DC 的 16bit WAV → 洗掉；正常音频必须字节不变。
+ */
+function scenarioDcOffsetGuard(signal) {
+  void signal
+  // 1) 合成 DC 偏置波形：正弦 + 0.63 直流（复刻实测 +0.6367）
+  const base = createMockWav({ durationSec: 0.5, amplitude: 0.3 })
+  const info = readWavInfo(base)
+  const dataStart = findDataStart(base)
+  const biased = Buffer.from(base)
+  const frames = Math.floor(info.dataSize / (info.channels * 2))
+  const dc = 0.63
+  for (let frame = 0; frame < frames; frame += 1) {
+    for (let channel = 0; channel < info.channels; channel += 1) {
+      const pos = dataStart + frame * info.channels * 2 + channel * 2
+      const value = Math.max(-32768, Math.min(32767, biased.readInt16LE(pos) + Math.round(dc * 32767)))
+      biased.writeInt16LE(value, pos)
+    }
+  }
+  const before = readMeanDcOffset(biased)
+  if (!before || Math.abs(before.mean) < DC_OFFSET_THRESHOLD) {
+    throw new Error(`合成样本的 DC 偏置不够大（${before ? before.mean : 'null'}），测试前置条件不成立`)
+  }
+  const result = sanitizeWavDcOffset(biased)
+  if (!result.changed) throw new Error('病态 DC 未被校正')
+  const after = readMeanDcOffset(result.buffer)
+  if (!after || Math.abs(after.mean) > 0.001) throw new Error(`校正后 DC 应≈0，实际 ${after ? after.mean : 'null'}`)
+  // 仍是合法的 16bit WAV，长度与头不变
+  const cleanedInfo = readWavInfo(result.buffer)
+  if (cleanedInfo.bitsPerSample !== 16 || cleanedInfo.audioFormat !== 1) throw new Error('校正后不再是 16bit PCM')
+  if (result.buffer.length !== biased.length) throw new Error('校正后长度变了（应只改样本）')
+  if (result.buffer.toString('latin1', 0, 4) !== 'RIFF') throw new Error('校正后 RIFF 头损坏')
+  // 校正必须可复现
+  if (!stripDcOffsetFromWav16(biased).equals(result.buffer)) throw new Error('校正结果不可复现')
+
+  // 2) 正常音频（|mean|<0.01）：必须逐字节不变、返回同一引用
+  const healthy = readMeanDcOffset(base)
+  if (!healthy || Math.abs(healthy.mean) >= DC_OFFSET_HEALTHY) throw new Error('对照样本不是健康音频')
+  const healthyResult = sanitizeWavDcOffset(base)
+  if (healthyResult.changed) throw new Error('健康音频不该被改写（必须保持位精确）')
+  if (healthyResult.buffer !== base) throw new Error('健康音频应原样返回同一引用')
+  if (!stripDcOffsetFromWav16(base).equals(base)) throw new Error('健康音频 strip 后必须字节不变')
+
+  // 3) 非 WAV / 空输入：不崩、原样返回
+  for (const junk of [Buffer.from('not a wav at all'), Buffer.alloc(0), Buffer.from([0x52, 0x49, 0x46, 0x46])]) {
+    const out = sanitizeWavDcOffset(junk)
+    if (out.changed) throw new Error('非 WAV 输入不该被判为可校正')
+    if (!stripDcOffsetFromWav16(junk).equals(junk)) throw new Error('非 WAV 输入必须原样返回')
+  }
+
+  return `DC ${before.mean.toFixed(3)} → ${after.mean.toFixed(6)} · 健康音频位精确不变 · 非 WAV 不崩`
+}
+
+/** WAV 里 data 块起点（测试用，故意独立实现以避免自证） */
+function findDataStart(buffer) {
+  let offset = 12
+  while (offset + 8 <= buffer.length) {
+    const id = buffer.toString('latin1', offset, offset + 4)
+    const size = buffer.readUInt32LE(offset + 4)
+    if (id === 'data') return offset + 8
+    offset = offset + 8 + size + (size % 2)
+  }
+  throw new Error('WAV 里找不到 data 块')
+}
+
+/* ------------------------------------------------------------------ */
 /* 8. main / cleanup                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -1936,6 +2320,11 @@ async function main() {
       ['23. 情绪兜底 emotionId:"swing" → brush（提示不精确）', scenarioEmotionFallback],
       ['24. ui_action play/seek 下发 SSE ui 事件且工程不变', scenarioUiActionEvents],
       ['25. generate_audio quality 布尔开关不被当成和弦枚举拒绝', scenarioAudioQualityBoolean],
+      ['26. generate_stem 走 extract + track 映射 + 固定 seed（缺陷 #2）', scenarioStemExtractRequest],
+      ['27. 生成参数：turbo shift=3.0 + keyscale 透传（缺陷 #1）', scenarioGenerationParams],
+      ['28. applyModelSelection 现代运行时：turbo shift 保持 3.0（缺陷 #1）', scenarioApplyModelSelectionModern],
+      ['29. 人声意图端到端：instrumental 缺省不变 · 要人声 lyrics="" · 质量路径一致 · 分轨护栏（缺陷 #3）', scenarioVocalIntent],
+      ['30. DC 偏置安全网：病态 DC 校正 · 健康音频位精确不变 · 非 WAV 不崩（缺陷 #3）', scenarioDcOffsetGuard],
     ]
 
     for (const [name, fn] of scenarios) {

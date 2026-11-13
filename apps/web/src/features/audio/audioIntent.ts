@@ -22,13 +22,16 @@ import {
   createCompanionGenerateTask,
   createCompanionStemTask,
   getAssetPeaks,
+  getCompanionNode,
   getCompanionStatus,
   getCompanionTask,
   getProvisionStatus,
+  startCompanionNode,
   STEM_ARM_LABEL,
   STEM_ARMS,
   uploadAudioAsset,
   type CompanionEngine,
+  type CompanionNodeStatus,
   type CompanionPriority,
   type CompanionTaskState,
   type CompanionTaskStatus,
@@ -38,7 +41,7 @@ import {
 import { getAudioEngine } from '../../audio'
 import { useStore } from '../../store/store'
 import { useAudioJobStore, type AudioJobPhase, type AudioJobTelemetry } from './audioJobStore'
-import { assetRefFromPeaks, generatedAudioProvenance, placeAudioClip } from './audioTrack'
+import { assetPeakFromPeaks, assetRefFromPeaks, generatedAudioProvenance, placeAudioClip, stemPlacementVolume } from './audioTrack'
 import type { AudioJobTrackSpec } from './audioJobStore'
 import { TRACK_COLORS } from '../arrangement/timeline'
 import { primeAssetPeaks } from './peaks'
@@ -51,9 +54,28 @@ export interface AudioPlan {
   /** 英文提示词（风格 / 乐器 / 情绪 / BPM） */
   caption?: string
   bpm?: number
+  /**
+   * 调性（主音 + 调式，如 "C minor"）。服务端工具会先按模型给的值填，
+   * 没给就按工程 key/scale 兜底；前端执行时再兜一层，确保引擎拿到的调性
+   * 与 DAW 工程一致（否则 C minor 的工程会被当成 C major 生成）。
+   */
+  keyscale?: string
+  /** 拍号分子（如 "4"）。引擎只认分子字符串；缺省按工程 timeSignature 推导 */
+  timesignature?: string
   durationSec?: number
   style?: string
   stems?: StemArm[]
+  /**
+   * 是否纯乐器（无人声），缺省 true（= 旧行为）。
+   * false 表示这次生成**要人声**：Companion 会把歌词条件从 `[Instrumental]`（禁止人声）
+   * 改成 `''`（让 LM 写歌词）。不传 = 纯乐器，与今天的生成完全一致。
+   */
+  instrumental?: boolean
+  /**
+   * 演唱语言（BCP-47，如 'ja'）。仅要人声时有意义；缺省由 Companion 按 caption
+   * 线索推断（Japanese/anime/J-ROCK → ja），不能推断时给 'en'。
+   */
+  vocalLanguage?: string
   startBeat?: number
   trackName?: string
   quality?: boolean
@@ -138,13 +160,52 @@ export function buildHeuristicAudioPlan(text: string): AudioPlan | null {
   if (!detectAudioIntent(text)) return null
   const source = text.trim()
   const stems = /分轨|stem|拆轨|分开.*(乐器|轨)/i.test(source) ? (extractStemArms(source) ?? ['guitar', 'bass', 'drums']) : undefined
+  /* 兜底识别「要人声」：用户说「人声/带唱/主唱/vocal」时不能按纯乐器生成，
+     否则整曲没人声、人声分轨只能拆出噪声（本轮缺陷的根因链路）。 */
+  const wantsVocal = /人声|带唱|主唱|演唱|清唱|vocal|唱/i.test(source)
+  const vocalFlag = wantsVocal ? { instrumental: false } : {}
   if (stems) {
-    return { mode: 'audio_with_stems', caption: source.slice(0, 600), stems, reason: '按你的描述识别为「整曲 + 分轨」' }
+    return { mode: 'audio_with_stems', caption: source.slice(0, 600), stems, ...vocalFlag, reason: '按你的描述识别为「整曲 + 分轨」' }
   }
   if (/(midi|工程|编曲|伴奏|这段|这首|当前).{0,14}(渲染|导出|转成|变成|做成|输出)|渲染成音频|导出成音频/i.test(source)) {
     return { mode: 'midi_to_audio', reason: '工程里已有素材，识别为「MIDI → 音频」' }
   }
-  return { mode: 'text_to_audio', caption: source.slice(0, 600), reason: '识别为「文本 → 音频」' }
+  return { mode: 'text_to_audio', caption: source.slice(0, 600), ...vocalFlag, reason: '识别为「文本 → 音频」' }
+}
+
+/**
+ * 分轨计划护栏（纯函数，返回决策而不是抛错）：
+ *
+ * extract 只能「分离源音频里已经存在的东西」。整曲若是按纯乐器（`instrumental: true`）
+ * 生成的，源里根本没有人声，抽 vocals 的结果是噪声（实测 DC +0.64、99.7% 能量是直流）。
+ * 与其静默产出一条「名字叫人声、实际是噪音」的轨，不如把这一臂从计划里去掉，
+ * 并把原因明确告诉用户 —— 整曲与其它分轨照常执行，任务不中断。
+ *
+ * 注意 `instrumental` 缺省也为「纯乐器」：计划里没写这个字段时，Companion 仍会发
+ * `[Instrumental]`（旧行为），所以源音频确实不含人声。这里与「原始分轨 API 的来源未知
+ * 就不拦」不同 —— 计划层是**已知**的，因为整曲正是本流程自己生成的。
+ *
+ * 返回 `{ stems, skipped }`；`skipped` 为空时行为与旧实现完全一致。
+ */
+export function resolveStemPlan(input: { stems: StemArm[]; instrumental?: boolean }): {
+  stems: StemArm[]
+  skipped: Array<{ arm: StemArm; reason: string }>
+} {
+  const stems = Array.isArray(input.stems) ? input.stems : []
+  // 缺省（undefined）= 纯乐器 = 旧行为；只有显式 false 才算「这次生成含人声」
+  if (input.instrumental === false) return { stems, skipped: [] }
+  const skipped: Array<{ arm: StemArm; reason: string }> = []
+  const kept = stems.filter((arm) => {
+    if (arm !== 'vocals') return true
+    skipped.push({
+      arm,
+      reason:
+        '整曲是按「纯乐器（无人声）」生成的，里面本来就没有人声，硬拆人声只会得到噪声，已跳过「人声」分轨。' +
+        '要人声分轨，请重新生成整曲并勾选「要人声」（或描述里写明「要人声/带唱」）后再分轨。',
+    })
+    return false
+  })
+  return { stems: kept, skipped }
 }
 
 /* ------------------------------------------------------------------ */
@@ -153,6 +214,56 @@ export function buildHeuristicAudioPlan(text: string): AudioPlan | null {
 
 function isAudioMode(value: unknown): value is AudioMode {
   return value === 'text_to_audio' || value === 'midi_to_audio' || value === 'audio_with_stems' || value === 'midi_then_audio'
+}
+
+/** 本工程调式 id → 引擎 keyscale 里的英文调式名 */
+const SCALE_LABEL: Record<string, string> = {
+  major: 'major',
+  minor: 'minor',
+  harmonicMinor: 'harmonic minor',
+  melodicMinor: 'melodic minor',
+  dorian: 'dorian',
+  phrygian: 'phrygian',
+  lydian: 'lydian',
+  mixolydian: 'mixolydian',
+  locrian: 'locrian',
+  pentatonicMajor: 'major pentatonic',
+  pentatonicMinor: 'minor pentatonic',
+  blues: 'blues',
+  wholeTone: 'whole tone',
+  chromatic: 'chromatic',
+}
+
+/**
+ * 调性字符串轻量归一化（纯函数）：`"c minor"` → `"C minor"`、`"C#minor"` → `"C# minor"`。
+ * 只认「主音 + 调式」形状；乱码 / 过长返回 undefined（调用方回落到工程调性）。
+ */
+export function normalizeKeyscale(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const compact = value.trim().replace(/\s+/g, ' ')
+  if (!compact || compact.length > 24) return undefined
+  const matched = /^([A-Ga-g])([#b♯♭]?)\s*([A-Za-z]{2,12}(?:\s+[A-Za-z]{2,12})?)$/.exec(compact)
+  if (!matched) return undefined
+  const accidental = matched[2].replace('♯', '#').replace('♭', 'b')
+  return `${matched[1].toUpperCase()}${accidental} ${matched[3].toLowerCase()}`
+}
+
+/**
+ * 工程 key/scale → 引擎 keyscale（纯函数）。
+ * 计划里没有调性时按这条兜底，保证「引擎的调 = DAW 工程的调」。
+ */
+export function keyscaleFromProject(project?: { key?: string; scale?: string }): string | undefined {
+  const key = typeof project?.key === 'string' ? project.key.trim() : ''
+  if (!key) return undefined
+  const scale = typeof project?.scale === 'string' ? project.scale.trim() : ''
+  return normalizeKeyscale(`${key} ${SCALE_LABEL[scale] ?? (scale || 'major')}`)
+}
+
+/** 工程拍号 → 引擎 timesignature（分子字符串，如 "4"；引擎不认 "4/4"） */
+export function timesignatureFromProject(project?: { timeSignature?: { numerator?: number } }): string | undefined {
+  const numerator = Number(project?.timeSignature?.numerator)
+  if (!Number.isInteger(numerator) || numerator < 1 || numerator > 16) return undefined
+  return String(numerator)
 }
 
 /** 从 `generate_audio` 工具的 data 里提取计划；数据不合法时返回 null */
@@ -178,9 +289,18 @@ export function parseAudioPlan(data: unknown): AudioPlan | null {
     mode: value.mode,
     caption: typeof value.caption === 'string' ? value.caption.slice(0, 600) : undefined,
     bpm: toNumber(value.bpm),
+    // 调性：归一化后不合形状（乱码 / 超长）就当没给，由执行阶段回落到工程调性
+    keyscale: normalizeKeyscale(value.keyscale),
+    timesignature: /^\d{1,2}$/.test(String(value.timesignature ?? '')) ? String(value.timesignature) : undefined,
     durationSec: toNumber(value.durationSec),
     style: typeof value.style === 'string' ? value.style.slice(0, 80) : undefined,
     stems: stems && stems.length ? stems : undefined,
+    // 只有显式 false 才是「要人声」；缺省/非法值一律按纯乐器（= 旧行为，绝不误开人声）
+    instrumental: value.instrumental === false ? false : undefined,
+    // 演唱语言：小写归一化，非法/空值当没给（由 Companion 按 caption 推断）
+    vocalLanguage: /^[a-zA-Z]{2,3}(?:[-_][a-zA-Z0-9]{2,8})*$/.test(String(value.vocalLanguage ?? ''))
+      ? String(value.vocalLanguage).trim().toLowerCase().replace(/_/g, '-')
+      : undefined,
     startBeat: toNumber(value.startBeat),
     trackName: typeof value.trackName === 'string' ? value.trackName.slice(0, 60) : undefined,
     quality: value.quality === true,
@@ -209,7 +329,44 @@ export function handleAudioPlanFromToolData(data: unknown): boolean {
 type Readiness =
   | { ok: true }
   | { ok: false; reason: 'provision'; profiles: ProvisionProfileId[]; message: string; bytes: number }
-  | { ok: false; reason: 'start-companion'; message: string; hint: string }
+  | {
+      ok: false
+      reason: 'start-companion'
+      message: string
+      hint: string
+      /** P15：本机节点能否被一键拉起（旧服务端没有该接口时为 undefined） */
+      node?: CompanionNodeStatus
+    }
+
+/**
+ * P15：确保有在线生成节点 —— 没有就请服务端把本机节点拉起来。
+ *
+ * 返回 true 表示「真的能派单」。任何异常都降级为 false（旧服务端没有该接口、
+ * 部署形态不支持自动启动等），调用方继续走原有的「复制启动命令」路径。
+ */
+export async function ensureCompanionOnline(waitMs?: number): Promise<boolean> {
+  try {
+    const status = await getCompanionStatus()
+    if (status.online && (status.summary?.workers ?? 0) > 0) return true
+  } catch {
+    /* 服务端不可达：下面的启动请求同样会失败，按不可用处理 */
+  }
+  try {
+    const result = await startCompanionNode(waitMs === undefined ? {} : { waitMs })
+    return result.online === true
+  } catch {
+    return false
+  }
+}
+
+/** P15：读取本机节点状态（旧服务端 404 时返回 null，界面据此隐藏一键启动） */
+export async function loadCompanionNode(): Promise<CompanionNodeStatus | null> {
+  try {
+    return await getCompanionNode()
+  } catch {
+    return null
+  }
+}
 
 async function checkGenerationReady(needsStems: boolean): Promise<Readiness> {
   try {
@@ -251,12 +408,19 @@ async function checkGenerationReady(needsStems: boolean): Promise<Readiness> {
       message: `生成音频需要本机 AI 引擎与模型（约 ${size}）。是否现在下载？下载完成后还差「启动生成节点」一步。`,
     }
   }
-  const hint = resolveCompanionHint()
+  // 模型已就绪：单机形态直接请服务端拉起本机节点（这正是「等再久也不动」的根因）
+  const lifted = await ensureCompanionOnline()
+  if (lifted) return { ok: true }
+  const node = await loadCompanionNode()
   return {
     ok: false,
     reason: 'start-companion',
-    message: '本机模型已安装，但生成节点（Companion）未启动。',
-    hint,
+    message: node?.reason
+      ? `本机模型已安装，但生成节点（Companion）没能启动：${node.reason}`
+      : '本机模型已安装，但生成节点（Companion）未启动。',
+    // 服务端返回的启动命令已带真实地址；没有时按当前 origin 兜底
+    hint: node?.command || resolveCompanionHint(),
+    node: node ?? undefined,
   }
 }
 
@@ -376,8 +540,22 @@ async function placeGeneratedAsset(
   jobId: string,
   stepKey: string,
   assetId: string,
-  options: { name: string; trackName: string; startBeat: number; caption: string; bpm: number; durationSec?: number },
-): Promise<void> {
+  options: {
+    name: string
+    trackName: string
+    startBeat: number
+    caption: string
+    bpm: number
+    durationSec?: number
+    /** 落轨后整轨静音（分轨用：避免整曲 + 所有 stem 同时可闻 → 叠加削顶） */
+    muted?: boolean
+    /**
+     * 分轨增益预算：给了就按实测峰值算推子音量（见 `stemPlacementVolume`）。
+     * 整曲 / 渲染等不给 = 沿用 0.8 的旧行为。
+     */
+    stemGain?: { stemCount: number; songPeak: number }
+  },
+): Promise<{ trackId: string; clipId: string; durationSec: number; startBeat: number; peak: number }> {
   const slot = useAudioJobStore.getState().slots.find((item) => item.key === stepKey)
   // 生成完成 → 写入阶段：占位轨原地变成「正在写入」，不凭空消失
   useAudioJobStore.getState().updateSlot(stepKey, {
@@ -388,6 +566,10 @@ async function placeGeneratedAsset(
   const peaks = await getAssetPeaks(assetId)
   assertActive(jobId)
   primeAssetPeaks(assetId, peaks)
+  // 真实时长只认资产峰值：extract 会锁源时长，写死 30s 会让 stem 片段长度错位
+  const realDurationSec = peaks.durationSec
+  // 实测峰值：引擎对每个输出文件独立峰值归一化，所以这个值 ≈1.0，是「不削顶」预算的依据
+  const peak = assetPeakFromPeaks(peaks.peaks)
   const asset = assetRefFromPeaks(assetId, peaks, { name: `${options.name}.wav` })
   const store = useStore.getState()
   const trackName = slot?.name || options.trackName
@@ -395,17 +577,30 @@ async function placeGeneratedAsset(
   store.mutate((draft) => {
     placedRef.value = placeAudioClip(draft, {
       asset,
-      durationSec: peaks.durationSec,
+      durationSec: realDurationSec,
       name: options.name,
       startBeat: options.startBeat,
       trackName,
       color: slot?.color,
+      // 分轨按实测峰值推导的预算音量落轨；其余场景 undefined → placeAudioClip 用 0.8
+      volume: options.stemGain
+        ? stemPlacementVolume({
+            stemPeak: peak,
+            stemCount: options.stemGain.stemCount,
+            songPeak: options.stemGain.songPeak,
+          })
+        : undefined,
       provenance: generatedAudioProvenance({
         caption: options.caption,
         bpm: options.bpm,
-        durationSec: options.durationSec ?? Math.round(peaks.durationSec),
+        durationSec: options.durationSec ?? Math.round(realDurationSec),
       }),
     })
+    // 轨道级静音（M 按钮/混音台都读它），同一个 mutate 内完成 → 只有一个撤销点
+    if (options.muted && placedRef.value) {
+      const placedTrack = draft.tracks.find((track) => track.id === placedRef.value?.trackId)
+      if (placedTrack) placedTrack.mute = true
+    }
   })
   const placed = placedRef.value
   if (!placed) {
@@ -419,6 +614,7 @@ async function placeGeneratedAsset(
   useStore.getState().requestReveal(placed.trackId, options.startBeat)
   const job = activeJob()
   if (job) useAudioJobStore.getState().update({ placed: [...job.placed, trackName] })
+  return { ...placed, durationSec: realDurationSec, startBeat: options.startBeat, peak }
 }
 
 /** MIDI → 音频：浏览器离线渲染当前工程，上传资产后落一条音频轨 */
@@ -510,12 +706,26 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
 }
 
 /** 文本 → 音频（可带分轨） */
-async function runCompanionFlow(jobId: string, plan: AudioPlan, stems: StemArm[], bpm: number, durationSec: number) {
+async function runCompanionFlow(
+  jobId: string,
+  plan: AudioPlan,
+  stems: StemArm[],
+  bpm: number,
+  durationSec: number,
+  skippedStems: Array<{ arm: StemArm; reason: string }> = [],
+) {
   const store = useStore.getState()
   const projectId = store.project.id
   const startBeat = Math.max(0, plan.startBeat ?? store.playhead)
-  const caption = (plan.caption ?? '').trim() || `${plan.style ?? ''} instrumental, ${bpm} bpm`.trim()
+  const fallbackKind = plan.instrumental === false ? 'song with vocals' : 'instrumental'
+  const caption = (plan.caption ?? '').trim() || `${plan.style ?? ''} ${fallbackKind}, ${bpm} bpm`.trim()
   const priority = plan.priority ?? 0
+  /**
+   * 调性/拍号必须下传到引擎：计划带来了就用计划的，否则按当前工程的 key/scale 兜底。
+   * 「C minor 的工程按 C major 生成」就是这里漏传造成的 —— 引擎只会用它收到的 keyscale。
+   */
+  const keyscale = normalizeKeyscale(plan.keyscale) ?? keyscaleFromProject(store.project)
+  const timesignature = plan.timesignature ?? timesignatureFromProject(store.project)
   try {
     const songStep = 'song'
     useAudioJobStore.getState().updateStep(songStep, { status: 'running', progress: 0 })
@@ -523,11 +733,17 @@ async function runCompanionFlow(jobId: string, plan: AudioPlan, stems: StemArm[]
       {
         caption,
         bpm,
+        keyscale,
+        timesignature,
         durationSec,
         style: plan.style,
         quality: plan.quality || undefined,
         /* P9：AI 可指定引擎量级；缺省不传 = 服务端按 2b */
         engine: plan.engine,
+        /* 要人声时必须下传：Companion 据此把歌词条件从 [Instrumental] 换成空串（LM 写歌词） */
+        instrumental: plan.instrumental,
+        /* 演唱语言（可选）：只对「要人声」有意义，缺省由 Companion 按 caption 推断 */
+        vocalLanguage: plan.vocalLanguage,
       },
       projectId,
       priority,
@@ -536,46 +752,75 @@ async function runCompanionFlow(jobId: string, plan: AudioPlan, stems: StemArm[]
     useAudioJobStore.getState().update({ taskId: created.taskId })
     const songAssetId = await waitCompanionTask(jobId, songStep, created.taskId)
     const songName = plan.trackName || caption.slice(0, 32) || 'AI 生成音频'
-    await placeGeneratedAsset(jobId, songStep, songAssetId, {
+    const songPlacement = await placeGeneratedAsset(jobId, songStep, songAssetId, {
       name: songName,
       trackName: `生成 · ${songName.slice(0, 20)}`,
       startBeat,
       caption,
       bpm,
-      durationSec,
     })
     useAudioJobStore.getState().updateStep(songStep, { status: 'done', progress: 1 })
 
+    /**
+     * 分轨激励预算：整曲的**有效峰值**（资产原始峰值 × 整曲轨推子）。
+     * 分轨叠加只要不超过它，就不会比整曲更响、也不会削顶。
+     */
+    const songTrackVolume =
+      useStore.getState().project.tracks.find((track) => track.id === songPlacement.trackId)?.volume ?? 0.8
+    const songPeak = songPlacement.peak * songTrackVolume
+
+    /* 分轨：extract（从整曲里分离该乐器）。不能再把整曲 caption 拼进去 ——
+       整曲描述会让模型「重新生成一首歌」而不是分离；caption 交给 Companion 的
+       每 arm 隔离描述（"Isolated electric guitar stem…"），这里只补风格关键词。 */
+    const styleHint = (plan.style ?? '').trim()
     for (const arm of stems) {
       const key = `stem:${arm}`
       useAudioJobStore.getState().updateStep(key, { status: 'running', progress: 0 })
       const stemTask = await createCompanionStemTask(
-        { sourceAssetId: songAssetId, arm, caption: `${caption} · ${arm} stem`, engine: plan.engine },
+        {
+          sourceAssetId: songAssetId,
+          arm,
+          caption: styleHint || undefined,
+          engine: plan.engine,
+          /* 把「源是否含人声」这个已知事实一起下发（未知就不传，Companion 不拦）：
+             计划里 instrumental 缺省 = 纯乐器，人声臂已在 resolveStemPlan 里被去掉。 */
+          sourceInstrumental: plan.instrumental === false ? false : true,
+        },
         projectId,
         priority,
       )
       assertActive(jobId)
       useAudioJobStore.getState().update({ taskId: stemTask.taskId })
       const stemAssetId = await waitCompanionTask(jobId, key, stemTask.taskId)
+      // 落轨时长只认资产真实峰值（extract 锁源时长），不再用整曲的预估值
       await placeGeneratedAsset(jobId, key, stemAssetId, {
         name: `Stem · ${STEM_ARM_LABEL[arm]}`,
         trackName: `Stem · ${STEM_ARM_LABEL[arm]}`,
-        startBeat,
-        caption: `${caption} · ${arm} stem`,
+        startBeat: songPlacement.startBeat,
+        caption: `Extract ${arm} stem from: ${songName}`,
         bpm,
-        durationSec,
+        // 分轨默认静音：整曲 + 全部 stem 同时可闻会叠加削顶（实测 peak≈1.84）
+        muted: true,
+        /* 按实测峰值把 N 条分轨的叠加预算等分 → 全部解开静音也不会爆表 */
+        stemGain: { stemCount: stems.length, songPeak },
       })
       useAudioJobStore.getState().updateStep(key, { status: 'done', progress: 1 })
     }
 
     useAudioJobStore.getState().finish('done')
+    /* 被护栏跳过的臂必须让用户看见原因：静默少一条轨比报错更让人困惑 */
+    for (const item of skippedStems) useStore.getState().pushToast('info', item.reason)
     useStore
       .getState()
       .pushToast(
         'success',
-        stems.length
-          ? `音频生成完成：1 条整曲 + ${stems.length} 条分轨（每条轨可单独撤销）`
-          : `音频已生成并加入工程：${songName}（⌘Z 可撤销）`,
+        stems.length === 0
+          ? `音频已生成并加入工程：${songName}（⌘Z 可撤销）`
+          : skippedStems.length
+            ? `音频生成完成：1 条整曲 + ${stems.length} 条分轨（「${skippedStems
+                .map((item) => STEM_ARM_LABEL[item.arm])
+                .join('/')}」因源音频不含人声已跳过）；分轨已默认静音，点 M/S 可单独试听。分轨是分别重合成的，不是原曲的严格分解，叠加不会与原曲完全对齐`
+            : `音频生成完成：1 条整曲 + ${stems.length} 条分轨；分轨已默认静音，点 M/S 可单独试听（每条轨可单独撤销）。分轨是模型按乐器分别重合成的，不是原曲的严格分解，叠加不会与原曲完全对齐`,
       )
   } catch (error) {
     if (error instanceof JobCanceledError) {
@@ -599,11 +844,16 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
   const project = useStore.getState().project
   const bpm = Number.isFinite(plan.bpm) ? Math.round(clamp(Number(plan.bpm), 20, 320)) : Math.round(project.tempo)
   const needsStems = mode === 'audio_with_stems'
-  const stems: StemArm[] = needsStems
+  const requestedStems: StemArm[] = needsStems
     ? plan.stems?.length
       ? plan.stems
       : ['guitar', 'bass', 'drums']
     : []
+  /* 分轨护栏：纯乐器整曲不拆人声（源里没人声，只能拆出噪声）。
+     去掉的臂连占位轨都不建，避免用户看到一条空的「Stem · 人声」轨。 */
+  const stemPlan = resolveStemPlan({ stems: requestedStems, instrumental: plan.instrumental })
+  const stems = stemPlan.stems
+  const skippedStems = stemPlan.skipped
   const durationSec = Number.isFinite(plan.durationSec)
     ? Math.round(clamp(Number(plan.durationSec), 5, 300))
     : needsStems
@@ -634,7 +884,9 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
     return TRACK_COLORS[start]
   }
   const startBeat = Math.max(0, plan.startBeat ?? useStore.getState().playhead)
-  const caption = (plan.caption ?? '').trim() || `${plan.style ?? ''} instrumental, ${bpm} bpm`.trim()
+  // 兜底 caption 不能说 "instrumental"：要人声时那会与歌词条件自相矛盾
+  const fallbackKind = plan.instrumental === false ? 'song with vocals' : 'instrumental'
+  const caption = (plan.caption ?? '').trim() || `${plan.style ?? ''} ${fallbackKind}, ${bpm} bpm`.trim()
   const songName = plan.trackName || caption.slice(0, 32) || 'AI 生成音频'
   const renderBaseName = (plan.trackName || project.name || 'AI 渲染').slice(0, 40)
   const projectDurationSec = Math.max(
@@ -715,7 +967,7 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
     return
   }
 
-  await runCompanionFlow(jobId, plan, stems, bpm, durationSec)
+  await runCompanionFlow(jobId, plan, stems, bpm, durationSec, skippedStems)
 }
 
 /**

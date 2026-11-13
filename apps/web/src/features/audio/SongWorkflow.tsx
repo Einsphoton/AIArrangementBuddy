@@ -3,7 +3,7 @@
  *
  * 流程：
  *   1) 提交 generate_audio（可选质量模式）→ 完成后落一条整曲音频轨；
- *   2) 以整曲为源，按所选乐器依次提交 generate_stem（lego/base）→ 每条落一条独立音频轨；
+ *   2) 以整曲为源，按所选乐器依次提交 generate_stem（extract/base）→ 每条落一条独立音频轨（默认静音）；
  *   3) 进度、失败原因、取消都在面板内可见；每一步落轨都是独立撤销记录。
  */
 import { useState } from 'react'
@@ -22,8 +22,9 @@ import {
 } from '../../lib/api'
 import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
-import { assetRefFromPeaks, generatedAudioProvenance, placeAudioClip } from './audioTrack'
+import { assetPeakFromPeaks, assetRefFromPeaks, generatedAudioProvenance, placeAudioClip, stemPlacementVolume } from './audioTrack'
 import { primeAssetPeaks } from './peaks'
+import { keyscaleFromProject, timesignatureFromProject } from './audioIntent'
 
 type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
 interface Step {
@@ -91,23 +92,42 @@ export function SongWorkflow({
     }
   }
 
-  const placeAsset = async (assetId: string, name: string, trackName: string, provenanceCaption: string) => {
+  const placeAsset = async (
+    assetId: string,
+    name: string,
+    trackName: string,
+    provenanceCaption: string,
+    options: { startBeat?: number; muted?: boolean; stemGain?: { stemCount: number; songPeak: number } } = {},
+  ) => {
     const peaks = await getAssetPeaks(assetId)
     primeAssetPeaks(assetId, peaks)
+    /* 实测峰值：引擎对每个输出文件独立峰值归一化，因此它是「不削顶」预算的依据 */
+    const peak = assetPeakFromPeaks(peaks.peaks)
     const asset = assetRefFromPeaks(assetId, peaks, { name: `${name}.wav` })
     const store = useStore.getState()
+    const placedRef: { value: { trackId: string; clipId: string } | null } = { value: null }
     store.mutate((draft) => {
-      placeAudioClip(draft, {
+      placedRef.value = placeAudioClip(draft, {
         asset,
         durationSec: peaks.durationSec,
         name,
-        startBeat: 0,
+        startBeat: options.startBeat ?? 0,
         trackName,
+        /* 分轨按实测峰值推导的预算音量落轨；其余场景 undefined → placeAudioClip 用 0.8 */
+        volume: options.stemGain
+          ? stemPlacementVolume({ stemPeak: peak, stemCount: options.stemGain.stemCount, songPeak: options.stemGain.songPeak })
+          : undefined,
         provenance: generatedAudioProvenance({ caption: provenanceCaption, bpm: project.tempo, durationSec: Math.round(peaks.durationSec) }),
       })
+      /* 分轨默认静音：整曲与全部分轨同时可闻会叠加爆表（实测 peak≈1.84），用户点 M/S 再单独试听 */
+      if (options.muted && placedRef.value) {
+        const placedTrack = draft.tracks.find((track) => track.id === placedRef.value?.trackId)
+        if (placedTrack) placedTrack.mute = true
+      }
     })
     store.setView('arrangement')
     store.setSaveStatus('dirty')
+    return placedRef.value ? { ...placedRef.value, peak } : null
   }
 
   const start = async () => {
@@ -137,24 +157,51 @@ export function SongWorkflow({
     let songAssetId: string | null = null
     try {
       const song = await createCompanionGenerateTask(
-        { caption: text, quality: quality || undefined, engine },
+        {
+          caption: text,
+          quality: quality || undefined,
+          engine,
+          /* 调性/拍号跟工程走：不传时引擎会退回写死的 C major，与工程调式打架 */
+          keyscale: keyscaleFromProject(project),
+          timesignature: timesignatureFromProject(project),
+        },
         project.id,
         priority,
       )
       songAssetId = await waitTask(song.taskId, 'song')
-      await placeAsset(songAssetId, `整曲 · ${text.slice(0, 28)}`, `音轨 · ${text.slice(0, 20)}`, text)
+      const songPlacement = await placeAsset(songAssetId, `整曲 · ${text.slice(0, 28)}`, `音轨 · ${text.slice(0, 20)}`, text)
+      /* 分轨与整曲同起点：整曲片段落在 startBeat 0，这里保持一致（后续若整曲改起点也跟着走） */
+      const songStartBeat =
+        useStore
+          .getState()
+          .project.tracks.find((track) => track.id === songPlacement?.trackId)
+          ?.audioClips.find((clip) => clip.id === songPlacement?.clipId)?.startBeat ?? 0
+      /* 整曲有效峰值（资产峰值 × 整曲推子）：分轨叠加不超过它，就不会比整曲响、也不会削顶 */
+      const songTrackVolume =
+        useStore.getState().project.tracks.find((track) => track.id === songPlacement?.trackId)?.volume ?? 0.8
+      const songPeak = (songPlacement?.peak ?? 0) * songTrackVolume
 
       for (const arm of arms) {
         update(`stem:${arm}`, { status: 'running' })
         const stem = await createCompanionStemTask(
-          { sourceAssetId: songAssetId, arm, caption: `${arm} stem`, engine },
+          /* caption 只传风格补充：整曲描述会与 extract（分离该乐器）的语义打架 */
+          { sourceAssetId: songAssetId, arm, engine },
           project.id,
           priority,
         )
         const stemAssetId = await waitTask(stem.taskId, `stem:${arm}`)
-        await placeAsset(stemAssetId, `Stem · ${STEM_ARM_LABEL[arm]}`, `Stem · ${STEM_ARM_LABEL[arm]}`, `${text} · ${arm} stem`)
+        /* 与整曲同起点、真实时长；默认静音，避免整曲+分轨叠加爆表 */
+        await placeAsset(stemAssetId, `Stem · ${STEM_ARM_LABEL[arm]}`, `Stem · ${STEM_ARM_LABEL[arm]}`, `${text} · ${arm} stem`, {
+          startBeat: songStartBeat,
+          muted: true,
+          /* 按实测峰值把 N 条分轨的叠加预算等分 → 全部解开静音也不会爆表 */
+          stemGain: { stemCount: arms.length, songPeak },
+        })
       }
-      pushToast('success', `一键工作流完成：1 条整曲 + ${arms.length} 条分轨（每条轨可单独撤销）`)
+      pushToast(
+        'success',
+        `一键工作流完成：1 条整曲 + ${arms.length} 条分轨（已按实测电平压低音量，分轨默认静音，点 M/S 可单独试听）。分轨是分别重合成的，不是原曲的严格分解，叠加不会与原曲完全对齐`,
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : '一键工作流失败')
       pushToast('error', `一键工作流中断：${err instanceof Error ? err.message : String(err)}`)
@@ -207,7 +254,7 @@ export function SongWorkflow({
         ))}
       </div>
       <p className="mt-1 text-[9px] leading-relaxed text-ink-4">
-        先出整曲（质量模式更慢但高频/编曲更完整），再以整曲为上下文逐条生成 stem；整曲与每条 stem 各自成轨、各自撤销。
+        先出整曲（质量模式更慢但高频/编曲更完整），再以整曲为上下文逐条生成 stem；整曲与每条 stem 各自成轨、各自撤销。分轨按实测电平自动压低音量，避免叠加削顶；分轨是分别重合成的，叠加与原曲不完全对齐。
       </p>
       {error && <p className="mt-1 text-[9.5px] leading-relaxed text-danger">{error}</p>}
       {steps.length > 0 && (

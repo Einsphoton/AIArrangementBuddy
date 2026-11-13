@@ -182,6 +182,66 @@ export const LM_TIERS = Object.freeze({
 export const QUALITY_STEPS = 50
 export const QUALITY_GUIDANCE = 1.0
 export const QUALITY_SHIFT = 1.0
+/**
+ * 质量档成品的 peak_clip（引擎 `GET /props` 默认是 10）。
+ *
+ * 语义（真机实测，同一份 audio_codes / 同 seed，只改这个值）：它是「峰值软限幅强度」，
+ * 值越大越把波形往满刻度顶。实测 20s turbo 渲染：
+ *
+ *   peak_clip=100 → 6.70% 的 0.1s 帧 >0.95、1.03% 帧贴 0.999（明确削顶）
+ *   peak_clip=10  → 3.09% 帧 >0.95（引擎默认，成品峰值贴到 1.000）
+ *   peak_clip=3   → 1.03% 帧 >0.95
+ *   peak_clip=1   → 0.52% 帧 >0.95
+ *   peak_clip=0   → 0.00% 帧 >0.95（= 关闭，与 -1 逐字节相同）
+ *
+ * 取 1：既压掉贴顶削顶（用户反馈「成品品质不高」的一部分），又保留 0 档会丢的
+ * 峰值余量；RMS 只降 0.3dB，动态范围不变（均为 20.0dB）。
+ */
+export const QUALITY_PEAK_CLIP = 1
+/**
+ * 快速档（turbo）采样预设：照抄引擎 `GET /props` 的 `presets.turbo`
+ * （acestep.cpp 07abf07 / 2026-11-06 实测）：
+ *
+ *   presets.turbo = { inference_steps: 8, guidance_scale: 1.0, shift: 3.0 }
+ *   presets.sft   = { inference_steps: 50, guidance_scale: 1.0, shift: 1.0 }
+ *
+ * turbo 必须用 shift=3.0：喂 1.0 会过曝发刺（实测峰值 0.996 vs 0.958、
+ * 高频占比 25.7% vs 22.1%、频谱质心 1793Hz vs 1477Hz），听感更刺更糊。
+ * sft 预设与上面的 QUALITY_* 同值，因此 sft 类变体直接复用 QUALITY_*。
+ */
+export const TURBO_STEPS = 8
+export const TURBO_GUIDANCE = 1.0
+export const TURBO_SHIFT = 3.0
+/** turbo 类变体（其余 sft/base 类按 sft 预设）；xl_* 同名同档 */
+const TURBO_CLASS_VARIANTS = ['turbo', 'xl_turbo']
+
+/**
+ * DiT 变体 → 引擎采样预设（纯函数）。这是「步数 / guidance / shift」的**唯一**来源：
+ * 请求体构造与 applyModelSelection 都走这里，避免 shift 在多处各写一份而不一致。
+ * 缺省（无变体）/ turbo 类 → turbo 预设；sft / base / xl_sft / xl_base → sft 预设。
+ */
+export function presetForVariant(variant = 'turbo') {
+  const name = typeof variant === 'string' ? variant.trim().toLowerCase() : ''
+  if (!name || TURBO_CLASS_VARIANTS.includes(name)) {
+    return { inference_steps: TURBO_STEPS, guidance_scale: TURBO_GUIDANCE, shift: TURBO_SHIFT }
+  }
+  return { inference_steps: QUALITY_STEPS, guidance_scale: QUALITY_GUIDANCE, shift: QUALITY_SHIFT }
+}
+
+/**
+ * 调性字符串轻量归一化（纯函数）：`"c minor"` → `"C minor"`、`"C#minor"` → `"C# minor"`。
+ * 引擎 keyscale 是自由字符串，这里只做「主音 + 调式」的形状校验与大小写规整；
+ * 形状不认识（乱码 / 过长）返回 undefined，由调用方回落到缺省调性。
+ */
+export function normalizeKeyscale(value) {
+  if (typeof value !== 'string') return undefined
+  const compact = value.trim().replace(/\s+/g, ' ')
+  if (!compact || compact.length > 24) return undefined
+  const matched = /^([A-Ga-g])([#b♯♭]?)\s*([A-Za-z]{2,12})$/.exec(compact)
+  if (!matched) return undefined
+  const accidental = matched[2].replace('♯', '#').replace('♭', 'b')
+  return `${matched[1].toUpperCase()}${accidental} ${matched[3].toLowerCase()}`
+}
 /** P2-A 支持的任务类型所必需的模型文件（base/lego 未开放，不强制要求） */
 const REQUIRED_MODEL_FILES = [ACESTEP_BIN, MODEL_AUX.embedding, MODEL_AUX.vae, MODEL_DITS.turbo, MODEL_DITS.sft]
 /** 合法的引擎变体（服务端 requiredVariant 的取值域；xl_* 仅在 modern 运行时可用） */
@@ -190,16 +250,67 @@ export const ENGINE_VARIANTS = ['turbo', 'sft', 'base', 'xl_turbo', 'xl_sft', 'x
 export const XL_VARIANTS = ['xl_turbo', 'xl_sft', 'xl_base']
 /** mock 执行器三种任务都能伪造，按契约上报 turbo/sft/base（含 base 才能接到 generate_stem 做 UI 联调） */
 const MOCK_MODEL_VARIANTS = ['turbo', 'sft', 'base']
-/** lego 分轨的合法 arm（base 基座），以及 caption 缺省时的英文描述 */
+/** 分轨的合法 arm（产品/界面用名，base 基座），以及 caption 缺省时的英文描述 */
 export const STEM_ARMS = ['guitar', 'bass', 'drums', 'strings', 'keys', 'synth', 'vocals']
+/**
+ * 引擎（acestep）认可的标准轨道名白名单（acestep/constants.py:153 与二进制一致）。
+ * 产品 arm 名不等于引擎轨道名（`keys` → `keyboard`），只在引擎边界翻译。
+ */
+export const ENGINE_TRACKS = [
+  'vocals',
+  'backing_vocals',
+  'drums',
+  'bass',
+  'guitar',
+  'keyboard',
+  'percussion',
+  'strings',
+  'synth',
+  'fx',
+  'brass',
+  'woodwinds',
+]
+/** 产品 arm → 引擎轨道名（界面/文案继续用 STEM_ARMS 的名字，别把 `keys` 发进引擎） */
+export const STEM_ARM_TRACKS = Object.freeze({
+  guitar: 'guitar',
+  bass: 'bass',
+  drums: 'drums',
+  strings: 'strings',
+  keys: 'keyboard',
+  synth: 'synth',
+  vocals: 'vocals',
+})
+/** 分轨的固定 seed：extract 是「按源音频条件分离」，固定 seed 让重复运行可复现（不再每次随机） */
+export const STEM_SEED = 777
+/**
+ * 分轨隔离描述。
+ *
+ * 写这里的两个约束：
+ * 1) 必须描述「只有这件乐器」，否则 extract 会按整支乐队去理解；
+ * 2) **不要写会造成音色收窄的形容词**。实测用户工程 `p_7atqcqig` 的 5 条乐器分轨
+ *    2–6kHz 相对整曲只有 0.01–0.71 倍能量、500–2000Hz 与整曲的相关只有 0.006–0.088，
+ *    叠加后中频缺 14.1pp、中高频缺 16.6pp —— 这正是「糊」的实测表征。
+ *    旧描述里 `round low end`（低音沉）与 `palm-muted power chords`（闷音和弦）
+ *    都是**主动要求窄带/闷音色**的写法，与「全频段隔离」目标相反，故移除。
+ *    保留 `dry` / `full frequency range` 引导模型给出未经混音处理的完整频谱。
+ *
+ * 说明：以上为代码层可证的改动方向；**没有**真机 A/B 证明改完一定更好听
+ *（当时引擎未运行，无法跑 extract 对照），因此只删掉明确有害的措辞，不新增激进要求。
+ */
 const STEM_ARM_CAPTIONS = Object.freeze({
-  guitar: 'Isolated electric guitar stem: distorted rhythm and lead guitar, palm-muted power chords, no other instruments',
-  bass: 'Isolated bass stem: electric bass line, round low end, no drums or guitars',
-  drums: 'Isolated drum stem: acoustic drum kit, kick snare hi-hat toms, tight groove, no melodic instruments',
-  strings: 'Isolated strings stem: orchestral string section, sustained legato, no brass or percussion',
-  keys: 'Isolated keyboard stem: piano and electric keys, chordal comping, no guitar or drums',
-  synth: 'Isolated synthesizer stem: analog synth pads and arpeggios, no acoustic instruments',
-  vocals: 'Isolated vocal stem: lead vocals with clear diction, no instrumental backing',
+  guitar: 'Isolated electric guitar stem: electric guitar only, dry close-mic recording, full frequency range, no other instruments',
+  bass: 'Isolated bass stem: electric bass guitar only, dry direct recording, full frequency range and natural harmonics, no drums or guitars',
+  drums: 'Isolated drum stem: acoustic drum kit only, dry close-mic recording, full frequency range, kick snare hi-hat toms cymbals with natural brightness, no melodic instruments',
+  strings: 'Isolated strings stem: orchestral string section only, dry recording, sustained legato, full frequency range, no brass or percussion',
+  keys: 'Isolated keyboard stem: piano and electric keys only, dry recording, full frequency range, no guitar or drums',
+  synth: 'Isolated synthesizer stem: analog synth only, dry recording, full frequency range, no acoustic instruments',
+  /**
+   * 人声不能用「乐器隔离」模板：extract 会把「没有乐器伴奏」理解成「去掉伴奏后剩下的东西」，
+   * 而源音频若是 `[Instrumental]` 条件生成的，剩下就只有噪声（实测 DC +0.64 = 实测噪声场）。
+   * 这里显式要求 a cappella / 干声清唱，让模型按「人声」这一语义去分离。
+   */
+  vocals:
+    'Isolated a cappella lead vocal stem: only the sung voice, dry close-mic vocal with clear diction and natural vibrato, no instrumental backing, no drums, no bass, no reverb wash',
 })
 const ACESTEP_PORT_MIN = 17900
 const ACESTEP_PORT_MAX = 17999
@@ -687,31 +798,211 @@ export function readWavInfo(buffer) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 直流偏置（DC offset）防御：安全网，不是本轮修复本身                   */
+/*                                                                     */
+/* 实测：源音频按 `[Instrumental]` 生成后再 extract vocals，模型会吐出一条 */
+/* 99.7% 能量都是 DC 的噪声场（+0.6367 → 去 DC 后 RMS -29dBFS）。真正的  */
+/* 修复是「不生成本来就没人声的源音频」（见 wantsVocals / 分轨护栏），   */
+/* 这里只是**最后一道防线**：宁可多洗一次，也不要把带巨型 DC 的 WAV 交给工程。*/
+/* ------------------------------------------------------------------ */
+
+/** 判定阈值（相对满幅 1.0）：|mean| 超过它就算病态 DC，必须就地校正。 */
+export const DC_OFFSET_THRESHOLD = 0.05
+/** 低于该值视为正常音频（留出余量），用于「健康区间」判定与自检 */
+export const DC_OFFSET_HEALTHY = 0.01
+
+/**
+ * 读 16bit PCM WAV 每声道均值（纯函数）。
+ * 只支持 `bitsPerSample === 16` 的 PCM；其它格式返回 null（不猜、不改）。
+ * 返回值：`{ mean, peak, channels, frames }`，mean 为各声道均值（-1..1）。
+ */
+export function readMeanDcOffset(buffer) {
+  let info
+  try {
+    info = readWavInfo(buffer)
+  } catch {
+    return null
+  }
+  if (info.audioFormat !== 1 || info.bitsPerSample !== 16) return null
+  const dataStart = findWavDataOffset(buffer)
+  if (dataStart < 0) return null
+  const frames = Math.floor(info.dataSize / (info.channels * 2))
+  if (!frames) return null
+  const sums = new Array(info.channels).fill(0)
+  let peak = 0
+  for (let frame = 0; frame < frames; frame += 1) {
+    const base = dataStart + frame * info.channels * 2
+    for (let channel = 0; channel < info.channels; channel += 1) {
+      const sample = buffer.readInt16LE(base + channel * 2) / 32768
+      sums[channel] += sample
+      const abs = Math.abs(sample)
+      if (abs > peak) peak = abs
+    }
+  }
+  const perChannel = sums.map((sum) => sum / frames)
+  // 多声道取平均：立体声两边同号偏置时才有意义（实测就是两边同号）
+  const mean = perChannel.reduce((total, value) => total + value, 0) / perChannel.length
+  return { mean, peak, channels: info.channels, frames }
+}
+
+/** 在 WAV 里定位 data 块的数据起点（纯函数，找不到返回 -1）。 */
+function findWavDataOffset(buffer) {
+  let offset = 12
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString('latin1', offset, offset + 4)
+    const chunkSize = buffer.readUInt32LE(offset + 4)
+    const body = offset + 8
+    if (chunkId === 'data') return body
+    offset = body + chunkSize + (chunkSize % 2)
+  }
+  return -1
+}
+
+/**
+ * 是否该做 DC 校正（纯函数）：
+ * - 不是 16bit PCM WAV → false（不动它）；读不出数据 → false；
+ * - `|mean| > DC_OFFSET_THRESHOLD` → true（病态，必须洗）；
+ * - 健康区间（`|mean| < DC_OFFSET_HEALTHY`）→ false，**保证正常音频逐字节不变**。
+ */
+export function shouldStripDcOffset(info, { threshold = DC_OFFSET_THRESHOLD } = {}) {
+  if (!info || !Number.isFinite(info.mean)) return false
+  return Math.abs(info.mean) > threshold
+}
+
+/**
+ * 就地去掉 16bit PCM WAV 的直流偏置（纯函数：不改入参，返回新 Buffer）。
+ *
+ * 实现：逐声道减去该声道均值 → 四舍五入 → 夹到 int16 范围 → 原地写回样本。
+ * 每声道独立求均值，避免「左右偏置不同」时把声像洗歪。
+ * 非 16bit PCM / 非 WAV / 解析失败一律**原样返回**（绝不破坏输入）。
+ *
+ * 注意：这是安全网，不是根因修复 —— 根因是「不该从无人声的源音频里抽人声」。
+ * 触发时会由调用方打中文日志（见 postSynthWithProgress），默认不改动正常音频。
+ */
+export function stripDcOffsetFromWav16(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return buffer
+  let info
+  try {
+    info = readWavInfo(buffer)
+  } catch {
+    return buffer
+  }
+  if (info.audioFormat !== 1 || info.bitsPerSample !== 16) return buffer
+  const dataStart = findWavDataOffset(buffer)
+  if (dataStart < 0) return buffer
+  const channels = info.channels
+  const frames = Math.floor(info.dataSize / (channels * 2))
+  if (!frames) return buffer
+  const sums = new Array(channels).fill(0)
+  for (let frame = 0; frame < frames; frame += 1) {
+    const base = dataStart + frame * channels * 2
+    for (let channel = 0; channel < channels; channel += 1) sums[channel] += buffer.readInt16LE(base + channel * 2)
+  }
+  // 用原始整数均值做减法，不引入浮点漂移：四舍五入后逐样本减掉
+  const means = sums.map((sum) => Math.round(sum / frames))
+  if (means.every((value) => value === 0)) return buffer
+  const next = Buffer.from(buffer)
+  for (let frame = 0; frame < frames; frame += 1) {
+    const base = dataStart + frame * channels * 2
+    for (let channel = 0; channel < channels; channel += 1) {
+      const pos = base + channel * 2
+      const value = next.readInt16LE(pos) - means[channel]
+      next.writeInt16LE(Math.max(-32768, Math.min(32767, value)), pos)
+    }
+  }
+  return next
+}
+
+/**
+ * 安全网总入口（纯函数）：返回值直接把「该不该洗/洗完什么」交给调用方打日志。
+ * `changed=false` 时 `buffer` 与入参**同一引用**（保证正常音频逐字节不变）。
+ */
+export function sanitizeWavDcOffset(buffer, { threshold = DC_OFFSET_THRESHOLD } = {}) {
+  const info = readMeanDcOffset(buffer)
+  if (!shouldStripDcOffset(info, { threshold })) return { buffer, changed: false, info }
+  const cleaned = stripDcOffsetFromWav16(buffer)
+  return { buffer: cleaned, changed: cleaned !== buffer, info }
+}
+
+/* ------------------------------------------------------------------ */
 /* /synth 请求体（照抄 gen_style_datasets.py / test_modes.py 的语义）    */
 /* ------------------------------------------------------------------ */
 
-/** generate_audio：task.params → AI 音频生成引擎 /synth JSON 请求体。纯函数；缺 caption 直接报错。 */
+/**
+ * 拍号归一化（纯函数）：引擎要的是**分子字符串**（`"4"`），不是 `"4/4"`。
+ * 接受 `4` / `'4'` / `'4/4'` / `'3/4'`，别的一律回落到 4/4。
+ */
+export function normalizeTimesignature(value) {
+  const matched = /^\s*(\d{1,2})(?:\s*\/\s*\d{1,2})?\s*$/.exec(String(value ?? ''))
+  if (!matched) return '4'
+  const numerator = Number(matched[1])
+  return numerator >= 1 && numerator <= 16 ? String(numerator) : '4'
+}
+
+/**
+ * 这次生成是否要人声（纯函数）。`instrumental` 缺省 true（保持旧行为 = 纯乐器）；
+ * 只有显式 `instrumental: false`（或 `params.vocals === true`）才算「要人声」。
+ */
+export function wantsVocals(params = {}) {
+  if (params?.instrumental === false) return true
+  if (params?.instrumental === true) return false
+  return params?.vocals === true
+}
+
+/** 日语线索（纯函数）：caption/语言字段里出现日语或日系风格关键词 → 'ja'。 */
+const JAPANESE_HINT_RE = /japanese|j-?rock|jpop|j-?pop|anime|日语|日文|日系|日本/i
+/**
+ * 生成请求的 vocal_language（纯函数）：
+ * - 显式 `params.vocalLanguage` 优先（前端/工具可选下发）；
+ * - 无人声 → 'unknown'（与旧行为逐字节一致，引擎据此不进人声通道）；
+ * - 要人声但没指定语言 → 'ja'（本仓库用户绝大多数诉求是日语 J-ROCK；引擎只把 language
+ *   当自由文本提示写进 LM 条件，写错不至于失败，但会让歌词/咬字跑偏，所以按 caption 判一次）；
+ * - caption 有日语线索 → 'ja'。非日语且未显式给语言时给 'en'，避免把中文诉求硬塞成日语。
+ */
+export function resolveVocalLanguage(params = {}) {
+  const explicit = typeof params?.vocalLanguage === 'string' ? params.vocalLanguage.trim() : ''
+  if (explicit) return explicit
+  if (!wantsVocals(params)) return 'unknown'
+  const caption = `${params?.caption ?? ''} ${params?.style ?? ''}`
+  if (JAPANESE_HINT_RE.test(caption)) return 'ja'
+  return 'en'
+}
+
+/**
+ * generate_audio：task.params → AI 音频生成引擎 /synth JSON 请求体。纯函数；缺 caption 直接报错。
+ * 采样参数走 presetForVariant（turbo 预设 = 8 步 / guidance 1.0 / shift 3.0），
+ * 调性来自 params.keyscale（前端从工程 key/scale 派生），缺省才回落 'C major'。
+ *
+ * 歌词条件（本轮修复的核心）：
+ * - `instrumental: true`（缺省）→ `lyrics: '[Instrumental]'` + `vocal_language: 'unknown'`，与旧行为完全一致；
+ * - 要人声 → `lyrics: ''`：引擎语义是「`''` = 让 LM 自己写歌词」，
+ *   `'[Instrumental]'` = 明确告诉 DiT「不要人声」。以前不管用户要不要人声都写 `[Instrumental]`，
+ *   于是「caption 要日语男声、lyrics 条件却禁止人声」自相矛盾 → 出不来人声，人声 stem 只能抽到噪声。
+ */
 export function buildSynthPayload(params = {}) {
   const caption = typeof params?.caption === 'string' ? params.caption.trim() : ''
   if (!caption) throw new Error('任务参数缺少 caption（生成提示词）')
-  const keyscale = typeof params.keyscale === 'string' && params.keyscale.trim() ? params.keyscale.trim() : 'C major'
+  const keyscale = normalizeKeyscale(params.keyscale) ?? 'C major'
   const rawBpm = Number(params.bpm)
   const bpm = Number.isFinite(rawBpm) ? clampInt(rawBpm, 30, 300, 120) : 120
   const rawDuration = Number(params.durationSec)
   const duration = Number.isFinite(rawDuration) ? Math.min(300, Math.max(1, rawDuration)) : 30
   const seed = Number.isInteger(params.seed) && params.seed >= 0 ? params.seed : 0
+  // generate_audio 快速档固定走 turbo DiT；这里显式取 turbo 预设（不要再写死 shift: 1.0）
+  const preset = presetForVariant('turbo')
+  const vocals = wantsVocals(params)
   return {
     caption,
-    lyrics: '[Instrumental]',
+    lyrics: vocals ? '' : '[Instrumental]',
     bpm,
     keyscale,
-    timesignature: '4',
-    vocal_language: 'unknown',
+    timesignature: normalizeTimesignature(params.timesignature),
+    vocal_language: resolveVocalLanguage(params),
     seed,
     batch_size: 1,
-    inference_steps: 8,
-    guidance_scale: 1.0,
-    shift: 1.0,
+    inference_steps: preset.inference_steps,
+    guidance_scale: preset.guidance_scale,
+    shift: preset.shift,
     use_cot_caption: false,
     duration,
   }
@@ -767,9 +1058,91 @@ export function buildRepaintRequest(params = {}) {
   }
 }
 
+/** 产品 arm → 引擎轨道名；未知 arm 返回 ''（调用方应先过 validateStemParams）。 */
+export function engineTrackForArm(arm) {
+  return STEM_ARM_TRACKS[String(arm ?? '').trim().toLowerCase()] ?? ''
+}
+
 /**
- * generate_stem（lego 分轨）参数校验（纯函数）：
+ * 分轨 caption（纯函数）：始终先给「只保留该乐器」的隔离描述，
+ * 调用方补充的描述（如风格）只作为后缀追加。
+ *
+ * 背景：以前调用方把**整曲** caption 传进来，等于告诉模型「按整首歌生成」，
+ * 与 extract（从这段音频里分离出该乐器）的语义打架 —— 所以约束必须排在最前。
+ *
+ * 人声特殊处理：vocals 的隔离描述是「a cappella 干声清唱」（见 STEM_ARM_CAPTIONS.vocals），
+ * 不再沿用「no instrumental backing」这类乐器模板；同时把调用方后缀里的「伴奏/纯音乐」
+ * 这类会与「要人声」自相矛盾的词剔掉（否则 caption 自己就在说「没有人声」）。
+ */
+export function buildStemCaption(arm, detail = '') {
+  const key = String(arm ?? '').trim().toLowerCase()
+  const own = STEM_ARM_CAPTIONS[key] ?? ''
+  // 去掉调用方顺手加的「<arm> stem / stem」这类冗余后缀（隔离描述里已说清楚）
+  let extra =
+    typeof detail === 'string'
+      ? detail
+          .trim()
+          .replace(/[\s·,\-–—]*\bstem\b\s*$/i, '')
+          .replace(/[\s·,\-–—]+$/, '')
+          .trim()
+      : ''
+  // 结尾只剩 arm 名（"… · guitar"）也没有信息量，连同分隔符一起去掉
+  if (key) {
+    const tail = new RegExp(`[\\s·,\\-–—]+${key}$`, 'i')
+    if (tail.test(extra)) extra = extra.replace(tail, '').trim()
+  }
+  // 整段只剩 arm 名本身时同样丢掉
+  if (extra.toLowerCase() === key) extra = ''
+  // vocals：后缀若在说「无人声/纯伴奏/乐器」，与「分离人声」直接冲突，整段丢弃
+  if (key === 'vocals' && /instrumental|no\s+vocals?|backing\s+track|karaoke|伴奏|纯音乐|无人声/i.test(extra)) extra = ''
+  extra = extra.slice(0, 160)
+  if (!own) return extra
+  return extra ? `${own}. ${extra}` : own
+}
+
+/**
+ * 「从纯乐器源里抽人声」护栏（纯函数，返回决策而不是抛错）：
+ *
+ * extract 是**按源音频条件分离**：源音频里没有的东西抽不出来。实测从
+ * `lyrics:'[Instrumental]'` 生成的整曲里 extract vocals，模型会吐一条 99.7% 能量是
+ * 直流偏置的噪声场（DC +0.6367 → 去 DC 后 RMS 仅 -29dBFS、ZCR 0.42 = 纯嘶声）。
+ * 与其静默产出一条「名字叫人声、实际是噪音」的轨，不如明确告诉用户并跳过这一臂，
+ * 让整曲和其它分轨照常完成（任务保持 alive）。
+ *
+ * 判据（任一成立即认为源不含人声）：
+ * - `sourceInstrumental === true`（前端/调用方从生成计划带下来的**明确事实**）；
+ * - 或 `sourceLyrics === '[Instrumental]'`（源音频是按无人声条件生成的）。
+ * 「不知道」时**不拦**（旧调用方/外部 Agent 不传该字段，保持可用）。
+ *
+ * 返回：`{ ok: true }` 或 `{ ok: false, code: 'vocals-from-instrumental', message }`。
+ */
+export function resolveStemArmDecision(params = {}, { sourceInstrumental, sourceLyrics } = {}) {
+  const arm = String(params?.arm ?? '').trim().toLowerCase()
+  if (arm !== 'vocals') return { ok: true }
+  const claimsInstrumental =
+    sourceInstrumental === true ||
+    params?.sourceInstrumental === true ||
+    sourceLyrics === '[Instrumental]' ||
+    params?.sourceLyrics === '[Instrumental]'
+  if (!claimsInstrumental) return { ok: true }
+  return {
+    ok: false,
+    code: 'vocals-from-instrumental',
+    message:
+      '这条整曲是按「纯乐器（无人声）」生成的，里面本来就没有人声，硬拆人声只会得到噪声，已跳过「人声」分轨。' +
+      '要人声分轨，请重新生成整曲并勾选「要人声」（或在描述里明确写「要人声/带唱」），再分轨。',
+  }
+}
+
+/**
+ * generate_stem（extract 分轨）参数校验（纯函数）：
  * 启动引擎/下载源音频之前先拦掉缺 sourceAssetId 与非法 arm。
+ *
+ * seed：默认固定（STEM_SEED）而不是随机 —— extract 是按源音频条件分离，
+ * 固定 seed 让同一源音频的重复运行可复现，不再每次都是「另一个版本」。
+ *
+ * 源音频是否含人声的**事实**由调用方通过 `sourceInstrumental` 传入（见 resolveStemArmDecision），
+ * 校验本身不猜；没人声的源要抽 vocals 时直接抛可执行的中文错误（顶层由执行器跳过该臂）。
  */
 export function validateStemParams(params = {}) {
   const sourceAssetId = typeof params?.sourceAssetId === 'string' ? params.sourceAssetId.trim() : ''
@@ -779,26 +1152,52 @@ export function validateStemParams(params = {}) {
   if (!STEM_ARMS.includes(rawArm)) {
     throw new Error(`generate_stem 的 arm 非法：${rawArm}（合法值：${STEM_ARMS.join('/')}）`)
   }
-  const caption =
-    typeof params?.caption === 'string' && params.caption.trim() ? params.caption.trim() : STEM_ARM_CAPTIONS[rawArm]
-  const normalized = { sourceAssetId, arm: rawArm, caption, seed: resolveSeed(params?.seed) }
+  const decision = resolveStemArmDecision(
+    { arm: rawArm, sourceInstrumental: params?.sourceInstrumental, sourceLyrics: params?.sourceLyrics },
+    { sourceInstrumental: params?.sourceInstrumental, sourceLyrics: params?.sourceLyrics },
+  )
+  if (!decision.ok) throw new Error(decision.message)
+  const detail = typeof params?.caption === 'string' && params.caption.trim() ? params.caption.trim() : ''
+  const normalized = {
+    sourceAssetId,
+    arm: rawArm,
+    track: engineTrackForArm(rawArm),
+    caption: buildStemCaption(rawArm, detail),
+    seed: Number.isInteger(params?.seed) && params.seed >= 0 ? params.seed : STEM_SEED,
+  }
   if (typeof params?.adapterId === 'string' && params.adapterId.trim()) normalized.adapterId = params.adapterId.trim()
   if (typeof params?.adapterPath === 'string' && params.adapterPath.trim()) normalized.adapterPath = params.adapterPath.trim()
   return normalized
 }
 
-/** generate_stem：校验后的参数 → AI 音频生成引擎 lego request JSON（multipart 的 request 字段）。 */
-export function buildLegoRequest(params = {}) {
+/**
+ * generate_stem：校验后的参数 → 引擎 request JSON（multipart 的 request 字段）。
+ *
+ * 必须是 `task_type: 'extract'` + `track: <引擎轨道名>`：引擎的 `lego` 是「另生成一条
+ * 叠加轨」，`extract` 才是「从源音频分离出该乐器」；发 `{lego: arm}` 这类未知键会被
+ * 忽略并回落 `task_type=text2music`，等于按 caption 重生成一首 30s 新歌（时长也对不上）。
+ * export 名保留 `buildLegoRequest` 仅为兼容既有调用点/自检脚本。
+ */
+export function buildExtractRequest(params = {}) {
+  const arm = String(params.arm ?? '').trim().toLowerCase()
+  const track = engineTrackForArm(arm)
+  if (!track) throw new Error(`分轨需要合法 arm（收到 ${JSON.stringify(params.arm)}）`)
   return {
     caption: params.caption,
     lyrics: '[Instrumental]',
-    seed: Number.isInteger(params.seed) ? params.seed : resolveSeed(params.seed),
+    seed: Number.isInteger(params.seed) && params.seed >= 0 ? params.seed : STEM_SEED,
     batch_size: 1,
-    lego: params.arm,
+    task_type: 'extract',
+    track,
     inference_steps: 50,
     guidance_scale: 1.0,
     shift: 1.0,
   }
+}
+
+/** 旧名兼容壳（历史调用点/自检仍在用 buildLegoRequest）。 */
+export function buildLegoRequest(params = {}) {
+  return buildExtractRequest(params)
 }
 
 /** 默认 caption（arm → 英文描述），导出便于文档/测试核对。 */
@@ -908,26 +1307,88 @@ export function isEngineIdle(lastUsedAt, now, idleMs) {
  * 质量档：/lm 请求体。
  * 只给"描述 + 时长 + 歌词占位"，bpm/keyscale 等编曲参数交给 LM 自己推断——
  * 实测把 bpm/keyscale 塞给 /lm 会让它回显这些值、生成更暗的编曲（真机对照）。
+ *
+ * 人声一致性：旧实现无条件把 `[Instrumental]` 交给 /lm，等于告诉 LM「这是纯乐器」，
+ * 与「caption 要日语男声」互相打架（质量模式不出人声的根因）。现在：
+ * - 无人声 → 与旧行为逐字节一致（`[Instrumental]`，不带 vocal_language）；
+ * - 要人声 → `lyrics: ''`（LM 自写歌词）并带 `vocal_language`，让歌词语言跟着用户意图走。
  */
 export function buildQualityLmRequest(params = {}) {
   const base = buildSynthPayload(params)
-  return {
+  const request = {
     caption: base.caption,
     lyrics: base.lyrics,
     duration: base.duration,
     batch_size: 1,
     use_cot_caption: false,
   }
+  if (wantsVocals(params)) request.vocal_language = base.vocal_language
+  return withAuthoritativeMetadata(request, params)
 }
 
-/** 质量档：把 /lm 返回结果变成 /synth 的 passthrough 请求（固定 50 步 / guidance 1.0 / shift 1.0）。 */
+/**
+ * 工程元数据必须压过 LM 的推断（纯函数）：
+ *
+ * `bpm`/`keyscale`/`timesignature` 一旦缺省，引擎就会走 CoT「fill gaps」替用户决定，
+ * 实测同一工程（165 BPM / A minor）不同次跑出 83 / 167 / 176 BPM、6/4、甚至
+ * `vocal_language:'ar'` —— DAW 工程里写的是 165，成品却不在这个网格上，听感就是
+ * 「不像质量模式」。所以质量档**显式下发**这三项；给了值引擎就不再改写它们
+ * （vst3-README「Everything provided → LLM skips CoT」）。
+ *
+ * 早期注释里「塞 bpm/keyscale 会让编曲变暗」是 2B 时代的真机观察；当前 4B 上
+ * A/B（同 seed / 同 50 步 / 合成端一律 165）没有复现出该退化，见报告。
+ *
+ * `peak_clip`：引擎默认 10 会让成品贴顶削顶（实测削顶帧 1.3%、峰值 1.000）。
+ * 这里只在质量档下发 `QUALITY_PEAK_CLIP`，见常量注释。
+ */
+export function withAuthoritativeMetadata(request = {}, params = {}) {
+  const next = { ...request }
+  const rawBpm = Number(params?.bpm)
+  if (Number.isFinite(rawBpm) && rawBpm > 0) next.bpm = clampInt(rawBpm, 30, 300, 120)
+  const keyscale = normalizeKeyscale(params?.keyscale)
+  if (keyscale) next.keyscale = keyscale
+  // 拍号只在调用方真的给了才下发：normalizeTimesignature 对空值会回落 '4'，
+  // 无条件写会把「调用方没管拍号」变成「我们改了他的拍号」。
+  const rawTimesignature = params?.timesignature
+  if (rawTimesignature !== undefined && rawTimesignature !== null && String(rawTimesignature).trim() !== '') {
+    next.timesignature = normalizeTimesignature(rawTimesignature)
+  }
+  return next
+}
+
+/**
+ * 质量档 /synth passthrough 的人声一致性（纯函数）：
+ * - 无人声：强制 `[Instrumental]` + `unknown`（LM 回显什么都不能让 DiT 误开人声通道）；
+ * - 要人声：LM 真写出歌词就用它；LM 只回 `[Instrumental]`/空 → 交空串让 DiT 走人声条件，
+ *   语言用用户意图解析出的值（LM 的 `unknown` 不能盖掉显式 `ja`）。
+ */
+export function applyVocalIntentToQualityRequest(request = {}, params = {}) {
+  const next = { ...request }
+  if (!wantsVocals(params)) {
+    next.lyrics = '[Instrumental]'
+    next.vocal_language = 'unknown'
+    return next
+  }
+  const lyrics = typeof request?.lyrics === 'string' ? request.lyrics.trim() : ''
+  next.lyrics = !lyrics || lyrics === '[Instrumental]' ? '' : lyrics
+  next.vocal_language = resolveVocalLanguage({ ...params, caption: params?.caption ?? request?.caption ?? '' })
+  return next
+}
+
+/** 质量档：把 /lm 返回结果变成 /synth 的 passthrough 请求（sft 预设：50 步 / guidance 1.0 / shift 1.0）。 */
 export function buildQualitySynthRequest(lmResult = {}, params = {}) {
   const request = { ...lmResult }
-  request.inference_steps = QUALITY_STEPS
-  request.guidance_scale = QUALITY_GUIDANCE
-  request.shift = QUALITY_SHIFT
+  const preset = presetForVariant('sft')
+  request.inference_steps = preset.inference_steps
+  request.guidance_scale = preset.guidance_scale
+  request.shift = preset.shift
   if (!request.duration && Number(params?.durationSec) > 0) request.duration = params.durationSec
-  return request
+  request.peak_clip = QUALITY_PEAK_CLIP
+  const withVocals = applyVocalIntentToQualityRequest(request, params)
+  // 第二道保险：LM 回显的 bpm/keyscale/timesignature 一律让位给工程值。
+  // /lm 阶段已经下发过（见 withAuthoritativeMetadata），这里再钉一次，
+  // 保证「即使 LM 改写了、或调用方没走质量档 /lm，成品也落在工程网格上」。
+  return withAuthoritativeMetadata(withVocals, params)
 }
 
 /** 合成阶段的估算进度：0.3→0.9 线性（纯函数）。 */
@@ -1599,7 +2060,7 @@ export class EngineManager {
     if (modern) {
       this.log('现代运行时：模型按请求按需加载（增强版首次任务约 30–60s），同一进程可切换变体不重启')
     } else if (variant === 'base') {
-      this.log('分轨生成模型用于 lego 分轨（generate_stem），冷启动较慢（真机实测 ~36s），请耐心等待…')
+      this.log('分轨生成模型用于音轨分离（generate_stem），冷启动较慢（真机实测 ~36s），请耐心等待…')
     }
     let child
     try {
@@ -1815,7 +2276,12 @@ function isModernRuntime() {
 }
 
 /**
- * 现代运行时：把 DiT/LM 选择（以及 WAV 输出格式）写进 /lm、/synth 请求体。
+ * 现代运行时：把 DiT/LM 选择（以及 WAV 输出格式）写进 /lm、/synth 请求体，
+ * 并**按变体统一覆盖采样预设**（见 presetForVariant 与 TURBO_STEPS / TURBO_SHIFT 等常量）。
+ *
+ * 这是采样参数唯一的收口处：turbo 类一定是 8 步 / guidance 1.0 / shift 3.0，
+ * 不允许再用「只对 xl_turbo 打补丁」的方式修 shift（那会让 2B turbo 一直吃 shift=1.0）。
+ * 只对已经是 /synth 的请求体生效（/lm 请求不带采样字段，见 buildQualityLmRequest）。
  * 纯函数（不改入参），旧运行时原样返回。
  */
 export function applyModelSelection(payload = {}, { variant, lmTier = '' } = {}) {
@@ -1824,6 +2290,14 @@ export function applyModelSelection(payload = {}, { variant, lmTier = '' } = {})
   if (variant && MODEL_FILENAMES[variant]) next.synth_model = MODEL_FILENAMES[variant]
   if (lmTier && LM_TIERS[lmTier]) next.lm_model = LM_TIERS[lmTier].file
   next.output_format = 'wav16'
+  const isSynthRequest =
+    Object.hasOwn(payload, 'inference_steps') || Object.hasOwn(payload, 'shift') || Object.hasOwn(payload, 'guidance_scale')
+  if (isSynthRequest) {
+    const preset = presetForVariant(variant)
+    next.inference_steps = preset.inference_steps
+    next.guidance_scale = preset.guidance_scale
+    next.shift = preset.shift
+  }
   return next
 }
 
@@ -2126,6 +2600,19 @@ async function postSynthWithProgress({
     } catch {
       throw new Error(`AI 音频生成引擎 返回的不是有效 WAV（${file.length} 字节）`)
     }
+    // 安全网：病态直流偏置就地校正（正常音频 |mean|<0.01 原样返回，逐字节不变）。
+    // 真正修复在「不要从无人声的源里抽人声」；这里只是保证坏 WAV 不流进工程。
+    const sanitized = sanitizeWavDcOffset(file)
+    if (sanitized.changed && sanitized.info) {
+      const before = sanitized.info.mean
+      const after = readMeanDcOffset(sanitized.buffer)
+      ctx.log(
+        `检测到异常直流偏置 (${before >= 0 ? '+' : ''}${before.toFixed(4)})，已就地校正` +
+          (after ? ` → ${after.mean >= 0 ? '+' : ''}${after.mean.toFixed(6)}` : '') +
+          '（安全网：本次生成可能缺少真实人声，建议检查是否误从纯乐器源音频分轨人声）',
+      )
+      file = sanitized.buffer
+    }
     await ctx.progress(0.94, '正在解码音频…', {
       phase: 'decoding',
       phaseLabel: PHASE_LABELS.decoding,
@@ -2288,9 +2775,8 @@ async function runGenerate(task, ctx, { engineManager }) {
       return { file, fileName: `${sanitizeFileName(task.id)}.wav` }
     }
 
-    const fastPayload = { ...basePayload }
-    if (variant === 'xl_turbo') fastPayload.shift = 3.0
-    const payload = applyModelSelection(fastPayload, { variant })
+    // 采样预设（含 turbo 的 shift=3.0）已由 buildSynthPayload / applyModelSelection 统一决定
+    const payload = applyModelSelection(basePayload, { variant })
     await ctx.progress(
       0.3,
       engine.warm ? `复用常驻引擎（${engineLabel(variant, adapterPath)}）` : `开始生成音频（${VARIANT_DISPLAY_NAMES[variant] ?? '快速生成模型'}）`,
@@ -2382,8 +2868,7 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
 }
 
 /**
- * generate_stem：用 base 变体做 lego 分轨（multipart request+audio）。
- * 注意：AI 音频生成引擎 输出的是「该 arm 独立生成的 stem」，不是源+stem 混音，也不保证与源音频逐样本对齐。
+ * cover_audio（P7-B）：保结构换编制（multipart request+audio）。
  */
 async function runCover(task, ctx, { engineManager, serverUrl }) {
   const params = task.params ?? {}
@@ -2467,8 +2952,10 @@ async function runStem(task, ctx, { engineManager, serverUrl }) {
     throw new Error('分轨生成需要分轨生成模型，但本机缺少该模型文件：请先下载“分轨能力”')
   }
   const lmTier = lmTierForTask(TASK_TYPE_STEM, params)
-  ctx.log(`执行 generate_stem（${engineLabel(variant, adapterPath)}，arm=${validated.arm}）：source=${validated.sourceAssetId}`)
-  ctx.log('说明：输出是该 arm 独立生成的 stem（不是源音频+stem 混音），不保证与源音频逐样本对齐')
+  ctx.log(
+    `执行 generate_stem（${engineLabel(variant, adapterPath)}，arm=${validated.arm} → track=${validated.track}）：source=${validated.sourceAssetId}`,
+  )
+  ctx.log('说明：extract 会按源音频时长锁定输出，分离出该乐器的 stem（不是另一首新歌）')
   await ctx.progress(0.05, '下载源音频', { phase: 'prepare', phaseLabel: PHASE_LABELS.prepare })
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: validated.sourceAssetId, ctx })
   try {
@@ -2483,7 +2970,7 @@ async function runStem(task, ctx, { engineManager, serverUrl }) {
         stepTotal: 50,
         estimated: true,
       })
-      const request = applyModelSelection(buildLegoRequest(validated), { variant, lmTier })
+      const request = applyModelSelection(buildExtractRequest(validated), { variant, lmTier })
       const sourceAudio = readFileSync(source.tempFile)
       const multipart = buildSynthMultipart({
         request,
