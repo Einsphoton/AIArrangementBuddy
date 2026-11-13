@@ -1,16 +1,38 @@
 import { useEffect, useRef } from 'react'
-import { snapToScale } from '@aiab/core'
+import { snapToScale, type Track } from '@aiab/core'
 import { getAudioEngine } from '../../audio'
 import { useStore } from '../../store/store'
 import { useUiStore } from '../../lib/uiStore'
+import { resolveRecordClipId, resolveRecordTrackId } from '../../lib/trackRules'
+
+/**
+ * 解析「这次按键该落到哪条轨道 / 哪个片段」。
+ *
+ * 顺序：录入预备（轨道头 R）> 聚焦轨道 > 选中轨道。
+ * 之前这里只读 `focusedTrackId`，而 R 按钮写的是 `armedTrackId`，两者从不同步，
+ * 于是「预备了 A 轨、实际录进 B 轨」甚至完全不录（聚焦轨没有选中片段）——用户报的 R 不好用。
+ * 现在两边共用 lib/trackRules 的同一套解析。
+ */
+function resolveTargetTrack(state: ReturnType<typeof useStore.getState>): Track | null {
+  const trackId = resolveRecordTrackId(
+    {
+      armedTrackId: useUiStore.getState().armedTrackId,
+      focusedTrackId: state.focusedTrackId,
+      selectedTrackId: state.selectedTrackId,
+    },
+    state.project.tracks,
+  )
+  return trackId ? (state.project.tracks.find((track) => track.id === trackId) ?? null) : null
+}
 
 /**
  * MIDI 键盘演奏 / 实时录入。
  *
  * - 始终「MIDI Thru」：插上键盘弹奏会立刻用当前轨道音色发声
- * - 打开录入开关（状态栏 MIDI 按钮）且处于钢琴卷帘、已选中片段时：
+ * - 打开录入开关（状态栏 MIDI 按钮 / 走带条录音键）且处于钢琴卷帘、目标轨道有可用片段时：
  *   按下的音会在播放头位置写入音符，松键确定时值（按吸附网格量化）
  *
+ * 目标轨道优先取「录入预备」（轨道头 R），其次聚焦轨道、选中轨道；
  * 没有 MIDI 设备时静默跳过，不影响其它功能。
  */
 export function useMidiPerformance(): void {
@@ -36,17 +58,19 @@ export function useMidiPerformance(): void {
         const state = useStore.getState()
         state.setMidiLastPitch(event.pitch)
 
-        const track = state.project.tracks.find((t) => t.id === state.focusedTrackId)
+        const track = resolveTargetTrack(state)
         if (track) {
           // MIDI Thru：走「轨道真实发声链」（同一乐器 / 情绪 / 采样音源），按住持续、松手释放
           if (engine.midiNoteOn) engine.midiNoteOn(track, event.pitch, event.velocity)
           else engine.previewNote(track, event.pitch, event.velocity, 0.6)
         }
 
-        const clipId = state.selection.clipId
-        const shouldRecord = state.midiRecord && state.view === 'pianoroll' && Boolean(clipId) && Boolean(track)
-        if (!shouldRecord || !track || !clipId) return
+        /* 录入只要求「目标轨道有可用片段」，不再要求选中片段恰好属于聚焦轨道 */
+        const shouldRecord = state.midiRecord && state.view === 'pianoroll' && Boolean(track)
+        if (!shouldRecord || !track) return
 
+        const clipId = resolveRecordClipId(track, state.selection.clipId)
+        if (!clipId) return
         const clip = track.clips.find((c) => c.id === clipId)
         if (!clip) return
         const relative = Math.max(0, state.playhead - clip.startBeat)
@@ -54,7 +78,8 @@ export function useMidiPerformance(): void {
       })
 
       offNoteOff = midi.onNoteOff((event) => {
-        const liveTrack = useStore.getState().project.tracks.find((t) => t.id === useStore.getState().focusedTrackId)
+        const liveState = useStore.getState()
+        const liveTrack = resolveTargetTrack(liveState)
         if (liveTrack) {
           if (engine.midiNoteOff) engine.midiNoteOff(liveTrack, event.pitch)
           else engine.stopPreview()
@@ -64,9 +89,10 @@ export function useMidiPerformance(): void {
         if (!start) return
 
         const state = useStore.getState()
-        const track = state.project.tracks.find((t) => t.id === state.focusedTrackId)
-        const clipId = state.selection.clipId
-        if (!track || !clipId) return
+        const track = resolveTargetTrack(state)
+        if (!track) return
+        const clipId = resolveRecordClipId(track, state.selection.clipId)
+        if (!clipId) return
         const clip = track.clips.find((c) => c.id === clipId)
         if (!clip) return
 

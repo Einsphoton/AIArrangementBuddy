@@ -25,7 +25,12 @@ export interface UiPrefsState {
   toolMode: EditorTool
   /** 每条轨道的自定义高度 */
   trackHeights: TrackHeights
-  /** 已预备录入的轨道（轨道头 R 按钮） */
+  /** 已预备录入的轨道（轨道头 R 按钮）。
+   *
+   * 这是「MIDI 录入写进哪条轨」的**第一优先级**（见 lib/trackRules.resolveRecordTrackId）：
+   * 录入路径优先用它，没有预备时才回落到聚焦 / 选中轨道。
+   * 同时只允许一条轨道处于预备状态（R 按钮天然互斥）。
+   * 刻意不进 `partialize`：轨道 id 跟着工程走，刷新后旧 id 可能已不存在。 */
   armedTrackId: string | null
   /** 钢琴卷帘：显示其它轨道的幽灵音符 */
   showGhostNotes: boolean

@@ -53,6 +53,7 @@ import type { LucideIcon } from 'lucide-react'
 import { getAudioEngine } from '../audio'
 import { useStore } from '../store/store'
 import { useUiStore } from './uiStore'
+import { resolveRecordClipId, resolveRecordTrackId } from './trackRules'
 import { dispatchEditorCommand } from './editorBus'
 
 export type CommandGroup = '走带' | '编辑' | '视图' | '轨道' | '工程' | 'AI' | '帮助'
@@ -177,8 +178,13 @@ export const COMMANDS: CommandDef[] = [
     title: '节拍器开关',
     group: '走带',
     icon: Timer,
-    keys: 'm',
-    keywords: 'metronome click 节拍',
+    /*
+     * 节拍器刻意**不用 M**：M / S / R 在这个产品里分别是静音 / 独奏 / 录入预备
+     * （与 Logic、Cubase、Studio One 的轨道头惯例一致）。Logic 用 K、Cubase 与
+     * Studio One 用 C，这里选 C——覆盖专业编曲主力人群，且不与任何字母键冲突。
+     */
+    keys: 'c',
+    keywords: 'metronome click 节拍 节拍器',
     run: () => {
       const store = useStore.getState()
       store.setMetronome(!store.metronome)
@@ -207,11 +213,21 @@ export const COMMANDS: CommandDef[] = [
       const store = useStore.getState()
       const next = !store.midiRecord
       store.setMidiRecord(next)
-      if (next) {
-        store.setView('pianoroll')
-        useStore
-          .getState()
-          .pushToast('info', store.selection.clipId ? 'MIDI 录入已开启：弹奏会写入当前片段' : 'MIDI 录入已开启：先在钢琴卷帘选中片段')
+      if (!next) return
+      store.setView('pianoroll')
+      /* 与走带条录音键同一套说法：报「实际写到哪条轨」，而不是笼统的「当前片段」 */
+      const armedId = useUiStore.getState().armedTrackId
+      const targetId = resolveRecordTrackId(
+        { armedTrackId: armedId, focusedTrackId: store.focusedTrackId, selectedTrackId: store.selectedTrackId },
+        store.project.tracks,
+      )
+      const target = targetId ? (store.project.tracks.find((track) => track.id === targetId) ?? null) : null
+      if (!target) {
+        store.pushToast('info', 'MIDI 录入已开启：先在轨道头点 R 预备一条轨道')
+      } else if (!resolveRecordClipId(target, store.selection.clipId)) {
+        store.pushToast('info', `「${target.name}」还没有可录的 MIDI 片段：先建一个片段`)
+      } else {
+        store.pushToast('success', `MIDI 录入已开启：弹奏会写入「${target.name}」`)
       }
     },
   },
@@ -457,6 +473,7 @@ export const COMMANDS: CommandDef[] = [
     title: '静音 / 取消静音选中轨道',
     group: '轨道',
     icon: Volume2,
+    keys: 'm',
     keywords: 'mute 静音',
     enabled: () => Boolean(selectedTrack()),
     run: () => {
@@ -469,11 +486,51 @@ export const COMMANDS: CommandDef[] = [
     title: '独奏 / 取消独奏选中轨道',
     group: '轨道',
     icon: Music4,
+    keys: 's',
     keywords: 'solo 独奏',
     enabled: () => Boolean(selectedTrack()),
     run: () => {
       const track = selectedTrack()
       if (track) useStore.getState().toggleSolo(track.id)
+    },
+  },
+  {
+    id: 'track.soloExclusive',
+    title: '独占独奏选中轨道',
+    subtitle: '清空其它独奏，只留选中轨（等同 Alt/Option 点击 S）',
+    group: '轨道',
+    icon: Music4,
+    keywords: 'exclusive solo 独占独奏 只留一条',
+    enabled: () => Boolean(selectedTrack()),
+    run: () => {
+      const track = selectedTrack()
+      if (track) useStore.getState().toggleSolo(track.id, { exclusive: true })
+    },
+  },
+  {
+    id: 'track.soloClear',
+    title: '清空全部独奏',
+    subtitle: '总控 S：退出独奏，其它轨道恢复出声（不改写静音状态）',
+    group: '轨道',
+    icon: Music4,
+    keywords: 'unsolo clear solo 清空独奏 退出独奏',
+    enabled: () => useStore.getState().project.tracks.some((track) => track.solo),
+    run: () => {
+      useStore.getState().clearAllSolos()
+    },
+  },
+  {
+    id: 'track.muteAll',
+    title: '全部静音 / 全部取消静音',
+    subtitle: '总控 M：一次切换全工程静音',
+    group: '轨道',
+    icon: Volume2,
+    keywords: 'mute all 全部静音 取消静音',
+    enabled: () => useStore.getState().project.tracks.length > 0,
+    run: () => {
+      const store = useStore.getState()
+      const muted = store.toggleMuteAll()
+      store.pushToast('info', muted ? `已静音全部 ${store.project.tracks.length} 条轨道` : '已取消全部静音')
     },
   },
   {
@@ -487,7 +544,19 @@ export const COMMANDS: CommandDef[] = [
       const track = selectedTrack()
       if (!track) return
       const ui = useUiStore.getState()
-      ui.setArmedTrackId(ui.armedTrackId === track.id ? null : track.id)
+      const next = ui.armedTrackId === track.id ? null : track.id
+      ui.setArmedTrackId(next)
+      /* 与轨道头 R 按钮一致：预备即聚焦，并如实告知当前能不能录进去 */
+      if (!next) return
+      const store = useStore.getState()
+      store.focusTrack(next)
+      if (!store.midiRecord) {
+        store.pushToast('info', `已预备「${track.name}」：打开 MIDI 录入后才会写入音符`)
+      } else if (store.view !== 'pianoroll') {
+        store.pushToast('info', `已预备「${track.name}」：切到钢琴卷帘才会写入音符`)
+      } else if (!resolveRecordClipId(track, store.selection.clipId)) {
+        store.pushToast('info', `「${track.name}」还没有可录的片段：先建一个 MIDI 片段`)
+      }
     },
   },
 

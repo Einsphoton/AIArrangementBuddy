@@ -198,7 +198,8 @@ export interface AudioEngine {
       makeupGainDb: number
     }
     routing: { mode: SoundfontRoutingMode; mainOutput: boolean }
-    channel: { volumeDb: number; mute: boolean }
+    /** muteGain：静音 / 独奏门的实际增益（0 = 该轨被静音）；mute 是推子硬静音，静音不再用它 */
+    channel: { volumeDb: number; mute: boolean; muteGain: number }
   } | null>
 
   /** 调试（P3.1）：`__debugTaps` 的别名（tap RMS 探针）。 */
@@ -215,7 +216,7 @@ export interface AudioEngine {
       makeupGainDb: number
     }
     routing: { mode: SoundfontRoutingMode; mainOutput: boolean }
-    channel: { volumeDb: number; mute: boolean }
+    channel: { volumeDb: number; mute: boolean; muteGain: number }
   } | null>
 
   /**

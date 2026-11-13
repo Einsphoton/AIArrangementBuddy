@@ -20,6 +20,7 @@ import { IconButton, Select, Slider } from '../../components/ui'
 import { subscribeEditorCommand } from '../../lib/editorBus'
 import { cn, formatClock } from '../../lib/format'
 import { useUiStore } from '../../lib/uiStore'
+import { resolveRecordClipId, resolveRecordTrackId } from '../../lib/trackRules'
 import { useStore } from '../../store/store'
 import { clamp, formatBarBeatTick } from '../arrangement/timeline'
 import { gainToDbText, levelToDbText } from '../tracks/controls'
@@ -68,10 +69,25 @@ function useViewportWidth(): number {
 function RecordButton() {
   const midiRecord = useStore((s) => s.midiRecord)
   const view = useStore((s) => s.view)
+  const project = useStore((s) => s.project)
+  const selection = useStore((s) => s.selection)
   const armedTrackId = useUiStore((s) => s.armedTrackId)
-  const armedName = useStore((s) =>
-    armedTrackId ? (s.project.tracks.find((track) => track.id === armedTrackId)?.name ?? null) : null,
+  const focusedTrackId = useStore((s) => s.focusedTrackId)
+  const selectedTrackId = useStore((s) => s.selectedTrackId)
+  /*
+   * 报告的是「实际会写进哪条轨」，与 useMidiPerformance 的解析同源：
+   * 预备（R）优先，其次聚焦 / 选中。只显示 armedTrackId 会在没预备时误报「无目标」。
+   */
+  const targetTrackId = resolveRecordTrackId(
+    { armedTrackId, focusedTrackId, selectedTrackId },
+    project.tracks,
   )
+  const target = targetTrackId ? (project.tracks.find((track) => track.id === targetTrackId) ?? null) : null
+  const targetName = target?.name ?? null
+  const armedName = armedTrackId
+    ? (project.tracks.find((track) => track.id === armedTrackId)?.name ?? null)
+    : null
+  const hasRecordableClip = Boolean(target && resolveRecordClipId(target, selection.clipId))
   const prevView = useRef(view)
 
   /* 从录音状态切走视图：录入状态保持，但明确提示 */
@@ -90,12 +106,28 @@ function RecordButton() {
       store.pushToast('info', 'MIDI 录入已关闭')
       return
     }
-    if (store.view !== 'pianoroll') {
-      store.pushToast('info', 'MIDI 录入已开启（不是音频录音）：切到钢琴卷帘并选中片段后生效')
-    } else if (!store.selection.clipId) {
-      store.pushToast('info', 'MIDI 录入已开启：请先在钢琴卷帘选中一个片段')
+    const live = useStore.getState()
+    const liveTargetId = resolveRecordTrackId(
+      {
+        armedTrackId: useUiStore.getState().armedTrackId,
+        focusedTrackId: live.focusedTrackId,
+        selectedTrackId: live.selectedTrackId,
+      },
+      live.project.tracks,
+    )
+    const liveTarget = liveTargetId
+      ? (live.project.tracks.find((track) => track.id === liveTargetId) ?? null)
+      : null
+    const liveClipId = resolveRecordClipId(liveTarget, live.selection.clipId)
+    const where = liveTarget ? `「${liveTarget.name}」` : ''
+    if (live.view !== 'pianoroll') {
+      store.pushToast('info', `MIDI 录入已开启（不是音频录音）：切到钢琴卷帘${where || ''}后才会写入音符`)
+    } else if (!liveTarget) {
+      store.pushToast('info', 'MIDI 录入已开启：先在轨道头点 R 预备一条轨道')
+    } else if (!liveClipId) {
+      store.pushToast('info', `「${liveTarget.name}」还没有可录的 MIDI 片段：先建一个片段`)
     } else {
-      store.pushToast('success', `MIDI 录入已开启${armedName ? `：已预备「${armedName}」` : ''}`)
+      store.pushToast('success', `MIDI 录入已开启：弹奏会写入${where}`)
     }
   }
 
@@ -109,7 +141,7 @@ function RecordButton() {
         data-midi-record={midiRecord ? 'on' : 'off'}
         title={
           midiRecord
-            ? 'MIDI 录入（R）：开启中——这不是音频录音。在钢琴卷帘中把 MIDI 键盘弹奏写进当前片段'
+            ? `MIDI 录入（R）：开启中——这不是音频录音。在钢琴卷帘中把 MIDI 键盘弹奏写进${targetName ? `「${targetName}」的片段` : '当前片段'}`
             : 'MIDI 录入（R）：在钢琴卷帘中把 MIDI 键盘弹奏写进当前片段（不是音频录音）'
         }
         className={cn(
@@ -136,7 +168,15 @@ function RecordButton() {
               预备：{armedName}
             </span>
           )}
+          {!armedName && targetName && (
+            <span className="max-w-[104px] truncate text-[10.5px] text-ink-4" title={`未预备：将写入聚焦轨道「${targetName}」`}>
+              目标：{targetName}
+            </span>
+          )}
           {view !== 'pianoroll' && <span className="text-[10.5px] text-accent/85">需在钢琴卷帘生效</span>}
+          {view === 'pianoroll' && !hasRecordableClip && (
+            <span className="text-[10.5px] text-accent/85">该轨没有可录片段</span>
+          )}
         </span>
       )}
     </div>
@@ -764,8 +804,9 @@ export function TransportBar() {
     }
   }, [engine, metronome])
 
-  /* 走带快捷键：L 循环 / M 节拍器 / ⌘⏎ 回到开头。
-     录音(R)、跟随(F) 等全局快捷键由 lib/commands + shortcuts 统一接管，这里不重复绑定。 */
+  /* 走带快捷键：L 循环 / C 节拍器 / ⌘⏎ 回到开头。
+     录音(R)、跟随(F)、静音(M)、独奏(S) 等全局快捷键由 lib/commands + shortcuts 统一接管，这里不重复绑定。
+     节拍器用 C 而非 M：M/S 必须留给轨道静音/独奏（Logic / Cubase / Studio One 惯例）。 */
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const store = useStore.getState()
@@ -785,9 +826,6 @@ export function TransportBar() {
       if (event.key === 'l' || event.key === 'L') {
         event.preventDefault()
         store.setLoopEnabled(!store.loopEnabled)
-      } else if (event.key === 'm' || event.key === 'M') {
-        event.preventDefault()
-        store.setMetronome(!store.metronome)
       }
     }
     window.addEventListener('keydown', handler)
@@ -840,7 +878,7 @@ export function TransportBar() {
       >
         <Repeat size={14} />
       </ToggleButton>
-      <ToggleButton active={metronome} title="节拍器（M）" onClick={() => setMetronome(!metronome)}>
+      <ToggleButton active={metronome} title="节拍器（C）" onClick={() => setMetronome(!metronome)}>
         <Timer size={14} />
       </ToggleButton>
       <ToggleButton

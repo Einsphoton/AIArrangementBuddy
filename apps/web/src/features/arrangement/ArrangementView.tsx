@@ -40,6 +40,7 @@ import { cn, formatRelativeTime } from '../../lib/format'
 import { useStore } from '../../store/store'
 import { modSymbol } from '../../lib/shortcuts'
 import { resolveTrackHeight, useUiStore, type EditorTool } from '../../lib/uiStore'
+import { computeAudibilityMap } from '../../lib/trackRules'
 import { subscribeEditorCommand } from '../../lib/editorBus'
 import { InstrumentPicker, popoverPosition } from '../tracks/InstrumentPicker'
 import { RepaintAudioDialog } from '../audio/RepaintAudioDialog'
@@ -599,6 +600,14 @@ export function ArrangementView() {
   const contentHeight = RULER_HEIGHT + rowsHeight + BOTTOM_SPACER
   const chords = useMemo(() => chordTimeline(project.chords), [project.chords])
   const totalClips = project.tracks.reduce((sum, track) => sum + track.clips.length, 0)
+  /*
+   * 每轨混音状态（audible / muted / implicitly-muted）。
+   *
+   * 为什么编曲车道也要画：solo 状态只在混音器可见是「以为音频坏了」的第一大来源。
+   * 派生静音不写回工程字段，这里只做渲染：整条车道降透明度 + 虚线覆盖，
+   * 用户一眼能看出「这条现在不该响」，而不是怀疑片段或引擎出问题。
+   */
+  const audibility = useMemo(() => computeAudibilityMap(project.tracks), [project.tracks])
 
   const heightsNow = useCallback((): number[] => {
     const ui = useUiStore.getState()
@@ -1557,18 +1566,34 @@ export function ArrangementView() {
               {project.tracks.map((track, index) => {
                 const color = trackColor(track.color)
                 const rowHeight = rowHeights[index] ?? fallbackRowHeight
+                const mixState = audibility.get(track.id) ?? 'audible'
                 return (
                   <div
                     key={track.id}
                     data-track-row
                     data-track-index={index}
                     data-track-id={track.id}
+                    data-mix-state={mixState}
                     className={cn(
-                      'relative border-b border-line/60 transition-colors',
+                      'relative border-b border-line/60 transition-[opacity,filter,background-color] duration-150',
                       track.id === selectedTrackId ? 'bg-white/[0.022]' : index % 2 === 1 ? 'bg-white/[0.008]' : '',
                       toolMode === 'split' && 'hover:bg-accent/[0.035]',
+                      /*
+                       * 不可听的车道必须一眼可辨（否则 solo 只在混音器可见 = 「以为音频坏了」）：
+                       * - 显式静音（用户的选择）：压得更狠，去饱和；
+                       * - 被独奏压住（派生）：稍轻一点，提示「这不是你静音的」。
+                       */
+                      mixState === 'muted' && 'opacity-45 saturate-[0.35]',
+                      mixState === 'implicitly-muted' && 'opacity-60 saturate-[0.5]',
                     )}
                     style={{ height: rowHeight }}
+                    title={
+                      mixState === 'muted'
+                        ? `${track.name} 已静音（M）`
+                        : mixState === 'implicitly-muted'
+                          ? `${track.name} 被其它轨道的独奏压住：清空独奏（总控 S）后恢复出声`
+                          : undefined
+                    }
                   >
                     {track.clips.length === 0 && (track.audioClips?.length ?? 0) === 0 && (
                       <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center gap-1.5 text-[10.5px] text-ink-4/70">

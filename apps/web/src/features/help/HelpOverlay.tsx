@@ -22,6 +22,8 @@ const MOUSE_TIPS: { label: string; detail: string }[] = [
   { label: '拖动片段左右边缘', detail: '调整起点 / 长度' },
   { label: '框选空白处', detail: '多选片段；Shift 点击加选' },
   { label: '右键片段 / 轨道 / 音符', detail: '打开上下文菜单' },
+  { label: 'Alt/Option 点击 S', detail: '独占独奏：清空其它，只留这条' },
+  { label: '轨道列表底部 M / S / R', detail: '总控：全部静音 / 清空独奏 / 取消预备' },
   { label: '⌘ / Ctrl + 滚轮', detail: '横向缩放时间轴' },
   { label: 'Shift + 滚轮', detail: '纵向缩放轨道 / 音符行高' },
   { label: '拖动标尺', detail: '移动播放头；在循环条拖动创建循环区' },
@@ -30,7 +32,8 @@ const MOUSE_TIPS: { label: string; detail: string }[] = [
 const MIDI_TIPS: { label: string; detail: string }[] = [
   { label: 'USB MIDI 键盘', detail: '插上后自动识别，可直接用当前音色演奏' },
   { label: 'R 键 / 走带录音', detail: '开启 MIDI 录入，在钢琴卷帘中把弹奏写进片段' },
-  { label: '轨道头 R', detail: '预备某条轨道接收录入（同时只预备一条）' },
+  { label: '轨道头 R', detail: '预备某条轨道接收录入（与总控 R 配合，同时只预备一条）' },
+  { label: '已预备但静音 / 被独奏压住', detail: '轨道头会给出警告：音符会录进去，但监听时听不到' },
   { label: 'CC1 / CC11', detail: '调制轮与表情踏板会映射到音色表现' },
 ]
 

@@ -4,12 +4,31 @@
  * 状态栏在成熟 DAW 里不只是「显示信息」，而是「最常用的状态开关」：
  * 保存状态、输入设备、录入、吸附、选中对象、工具、撤销层数都应当可点、可验证。
  * 这里把原本的一排纯文本改成「可操作状态项 + 明确 tooltip」，并保持 26px 高度不喧宾夺主。
+ *
+ * 另外常驻「S n / M n」混音汇总：忘记还开着独奏是「播放没声音」的第一大来源，
+ * 把计数做成可点的一键清空，比让用户去翻菜单便宜得多（见 docs/TRACK_CONTROLS.md）。
  */
 import { useEffect, useState } from 'react'
-import { CircleDot, Cpu, Gauge, Grid3x3, Keyboard, Magnet, Radio, Redo2, Search, Undo2, Usb, MousePointer2 } from 'lucide-react'
+import {
+  CircleDot,
+  Cpu,
+  Gauge,
+  Grid3x3,
+  Keyboard,
+  Magnet,
+  MousePointer2,
+  Music4,
+  Radio,
+  Redo2,
+  Search,
+  Undo2,
+  Usb,
+  Volume2,
+} from 'lucide-react'
 import { useStore } from '../../store/store'
 import { getHealth, type HealthInfo } from '../../lib/api'
 import { useUiStore } from '../../lib/uiStore'
+import { resolveRecordClipId, resolveRecordTrackId, summarizeMix } from '../../lib/trackRules'
 import { cn } from '../../lib/format'
 import { Kbd } from '../../components/ui/menu'
 import { modSymbol } from '../../lib/shortcuts'
@@ -50,6 +69,8 @@ export function StatusBar() {
   const pastLength = useStore((s) => s.past.length)
   const futureLength = useStore((s) => s.future.length)
   const setSettingsOpen = useStore((s) => s.setSettingsOpen)
+  const focusedTrackId = useStore((s) => s.focusedTrackId)
+  const selectedTrackId = useStore((s) => s.selectedTrackId)
   const armedTrackId = useUiStore((s) => s.armedTrackId)
   const toolMode = useUiStore((s) => s.toolMode)
   const [health, setHealth] = useState<HealthInfo | null>(null)
@@ -69,8 +90,24 @@ export function StatusBar() {
     (sum, track) => sum + track.clips.reduce((n, clip) => n + clip.notes.length, 0),
     0,
   )
+  /*
+   * 静音 / 独奏汇总：状态栏必须常驻显示「S n / M n」并可直接清空。
+   * 「以为自己没动过什么，但播放没声音」绝大多数都是忘了还开着 solo（见
+   * docs/TRACK_CONTROLS.md §反模式）；把它做成可见可点的数字是最便宜的解法。
+   */
+  const mix = summarizeMix(project.tracks)
+  const soloTracks = project.tracks.filter((track) => track.solo)
   const activeMidi = midiDevices.find((d) => d.id === midiActiveId)
-  const armedTrack = project.tracks.find((track) => track.id === armedTrackId) ?? null
+  /*
+   * 录入目标与录入路径共用同一套解析（预备 > 聚焦 > 选中）：
+   * 之前这里只认 armedTrackId，而录入路径只认 focusedTrackId，两边说法不一致。
+   */
+  const recordTargetId = resolveRecordTrackId(
+    { armedTrackId, focusedTrackId, selectedTrackId },
+    project.tracks,
+  )
+  const recordTrack = recordTargetId ? (project.tracks.find((track) => track.id === recordTargetId) ?? null) : null
+  const recordClipId = resolveRecordClipId(recordTrack, selection.clipId)
   const selectionTrack = project.tracks.find((track) => track.clips.some((clip) => clip.id === selection.clipId)) ?? null
 
   const saveLabel =
@@ -135,6 +172,50 @@ export function StatusBar() {
 
       <Divider />
 
+      {/* 混音汇总：静音数 / 独奏数常驻，点一下直接清空 */}
+      <button
+        onClick={() => useStore.getState().toggleMuteAll()}
+        disabled={trackCount === 0}
+        title={
+          mix.mutedCount > 0
+            ? `已静音 ${mix.mutedCount} 条轨道（点击全部取消静音）`
+            : '全部静音（静音所有轨道；再点一次全部取消）'
+        }
+        aria-pressed={mix.mutedCount > 0}
+        data-status-mute-count={mix.mutedCount}
+        className={cn(
+          'flex h-[19px] shrink-0 items-center gap-1 rounded-[5px] border px-1.5 text-[10px] transition-colors',
+          mix.mutedCount > 0
+            ? 'border-danger/55 bg-danger/18 text-danger'
+            : 'border-transparent text-ink-4 hover:bg-surface-2 hover:text-ink-2',
+        )}
+      >
+        <Volume2 size={10} />
+        <span className="mono tabular-nums">{mix.mutedCount}</span>
+      </button>
+      <button
+        onClick={() => useStore.getState().clearAllSolos()}
+        disabled={!mix.anySolo}
+        title={
+          mix.anySolo
+            ? `独奏中：${soloTracks.map((track) => track.name).join('、')}（点击清空全部独奏）`
+            : '当前没有独奏'
+        }
+        aria-pressed={mix.anySolo}
+        data-status-solo-count={mix.soloCount}
+        className={cn(
+          'flex h-[19px] shrink-0 items-center gap-1 rounded-[5px] border px-1.5 text-[10px] transition-colors',
+          mix.anySolo
+            ? 'border-accent/55 bg-accent/18 text-accent'
+            : 'border-transparent text-ink-4 hover:bg-surface-2 hover:text-ink-2',
+        )}
+      >
+        <Music4 size={10} />
+        <span className="mono tabular-nums">{mix.soloCount}</span>
+      </button>
+
+      <Divider />
+
       {/* 输入设备 / 录入 */}
       <button
         className={cn(
@@ -168,10 +249,10 @@ export function StatusBar() {
         录入{midiRecord ? '开' : '关'}
       </button>
 
-      {midiRecord && armedTrack && <span className="hidden text-ink-4 min-[1400px]:inline">→ {armedTrack.name}</span>}
+      {midiRecord && recordTrack && <span className="hidden text-ink-4 min-[1400px]:inline">→ {recordTrack.name}</span>}
       {midiRecord && view !== 'pianoroll' && <span className="hidden text-ink-4 lg:inline">（切到钢琴卷帘）</span>}
-      {midiRecord && view === 'pianoroll' && !selection.clipId && (
-        <span className="hidden text-ink-4 lg:inline">（选一个片段）</span>
+      {midiRecord && view === 'pianoroll' && !recordClipId && (
+        <span className="hidden text-ink-4 lg:inline">（该轨没有可录片段）</span>
       )}
 
       <Divider />

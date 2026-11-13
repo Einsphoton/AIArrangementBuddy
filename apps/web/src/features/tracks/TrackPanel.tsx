@@ -21,6 +21,7 @@ import { getAudioEngine } from '../../audio'
 import { Badge, EmptyState, IconButton } from '../../components/ui'
 import { useStore } from '../../store/store'
 import { resolveTrackHeight, TRACK_HEIGHT_LIMITS, useUiStore } from '../../lib/uiStore'
+import { computeAudibleTrackIds } from '../../lib/trackRules'
 import {
   clamp,
   MAX_ZOOM_Y,
@@ -31,6 +32,7 @@ import {
   subscribeVerticalScroll,
 } from '../arrangement/timeline'
 import { EmotionPicker, InstrumentPicker, popoverPosition } from './InstrumentPicker'
+import { MixMasterControls } from './MixMasterControls'
 import { TrackRow, type DropTarget } from './TrackRow'
 import { GenerationTrackHeader } from '../audio/GenerationTrack'
 import { useAudioJobStore } from '../audio/audioJobStore'
@@ -74,6 +76,8 @@ export function TrackPanel() {
     (sum, track) => sum + track.clips.reduce((count, clip) => count + clip.notes.length, 0),
     0,
   )
+  /* 独奏态只在这里算一次，再传给每一行：每行各自 some() 会在 24 轨时变成 O(n²) */
+  const anySolo = tracks.some((track) => track.solo)
 
   /* 与编曲视图的纵向滚动同步 */
   useEffect(() => {
@@ -98,7 +102,8 @@ export function TrackPanel() {
       const dt = Math.min(64, now - last)
       last = now
       const state = useStore.getState()
-      const anySolo = state.project.tracks.some((track) => track.solo)
+      /* 与引擎共用同一份可听判定（lib/trackRules）：电平表不能用第二套 mute/solo 语义 */
+      const audibleIds = computeAudibleTrackIds(state.project.tracks)
       const hasTrackLevels = typeof engine.getTrackLevels === 'function'
       let levels: Record<string, number> = {}
       if (hasTrackLevels) {
@@ -119,7 +124,7 @@ export function TrackPanel() {
       for (const track of state.project.tracks) {
         const fill = meterRefs.current[track.id]
         if (!fill) continue
-        const audible = !track.mute && (!anySolo || track.solo)
+        const audible = audibleIds.has(track.id)
         const target = audible
           ? hasTrackLevels
             ? clamp(levels[track.id] ?? 0, 0, 1)
@@ -149,6 +154,18 @@ export function TrackPanel() {
     window.addEventListener('aiab:track-rename', handler)
     return () => window.removeEventListener('aiab:track-rename', handler)
   }, [])
+
+  /*
+   * 录入预备对账：删除轨道 / 切换工程 / AI 整体替换工程之后，armedTrackId 可能指向
+   * 一个已经不存在的轨道。那就是「幽灵 arm」——总控 R 会显示有预备、按录音却没目标。
+   * 这里做一次幂等对账：预备轨不在了就清空。
+   */
+  useEffect(() => {
+    const armed = useUiStore.getState().armedTrackId
+    if (!armed) return
+    if (tracks.some((track) => track.id === armed)) return
+    useUiStore.getState().setArmedTrackId(null)
+  }, [tracks])
 
   const handleScroll = () => {
     const element = listRef.current
@@ -299,22 +316,26 @@ export function TrackPanel() {
         <div className="flex-1" />
       </div>
 
-      {/* 与编曲视图标尺对齐的副标题 */}
+      {/* 与编曲视图标尺对齐的副标题：左侧轨道统计，右侧常驻「总控 M / S / R」
+          —— 高度必须严格等于 RULER_HEIGHT，否则左右轨道行会错位 */}
       <div
-        className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-2.5"
+        className="flex shrink-0 flex-col justify-center gap-1 border-b border-line px-2.5"
         style={{ height: RULER_HEIGHT }}
+        data-track-master-row
+        title="总控：M 全部静音 / S 清空全部独奏 / R 取消录入预备。独奏不会改写其它轨道的静音开关。"
       >
-        <div className="min-w-0">
-          <div className="label">轨道 / 乐器</div>
-          <div className="mt-0.5 text-[10.5px] text-ink-4">
-            {clipCount} 片段 · {noteCount} 音符
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="label shrink-0">轨道 / 乐器</span>
+            <span className="min-w-0 truncate text-[10px] text-ink-4">
+              {clipCount} 片段 · {noteCount} 音符
+            </span>
           </div>
+          <span className="shrink-0 text-[10px] text-ink-4/80" title="拖动色条排序 · 右键打开轨道菜单">
+            拖色条排序
+          </span>
         </div>
-        <div className="shrink-0 text-right text-[10px] leading-tight text-ink-4">
-          拖色条排序
-          <br />
-          右键更多操作
-        </div>
+        <MixMasterControls variant="panel" />
       </div>
 
       {/* 轨道列表 */}
@@ -364,6 +385,7 @@ export function TrackPanel() {
                 }}
                 onDragOver={(event) => handleDragOverRow(event, index)}
                 onDrop={(event) => handleDropRow(event, index)}
+                anySolo={anySolo}
               />
             ))}
             {generationSlots.map((slot) => (

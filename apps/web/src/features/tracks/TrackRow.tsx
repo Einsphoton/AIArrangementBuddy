@@ -17,6 +17,7 @@ import { getAudioEngine } from '../../audio'
 import { cn } from '../../lib/format'
 import { useStore } from '../../store/store'
 import { TRACK_HEIGHT_LIMITS, useUiStore } from '../../lib/uiStore'
+import { resolveRecordClipId, trackAudibility } from '../../lib/trackRules'
 import { clamp, trackColor, withAlpha } from '../arrangement/timeline'
 import { usePointerDrag } from '../arrangement/usePointerDrag'
 import { MiniHSlider, MiniKnob } from './controls'
@@ -43,6 +44,7 @@ export function TrackRow({
   onDragEnd,
   onDragOver,
   onDrop,
+  anySolo,
 }: {
   track: Track
   index: number
@@ -60,6 +62,8 @@ export function TrackRow({
   onDragEnd: () => void
   onDragOver: (event: React.DragEvent<HTMLDivElement>) => void
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void
+  /** 工程里是否有任意轨道在独奏：用于渲染「被独奏压住」的派生状态 */
+  anySolo: boolean
 }) {
   const updateTrack = useStore((s) => s.updateTrack)
   const project = useStore((s) => s.project)
@@ -115,7 +119,19 @@ export function TrackRow({
   const showCreativeLine = showSecondRow && height >= 56
   const creative = buildTrackCreativeInfo(project, track)
   const armed = armedTrackId === track.id
-  const activityColor = track.mute ? '#4a5466' : color
+  /*
+   * 混音状态是**派生**出来的三态，不新增工程字段：
+   * - muted：用户显式按了 M；
+   * - suppressed：别的轨道在独奏，这条被「隐式静音」——它的 mute 仍是 false，
+   *   取消独奏后会自动恢复出声（绝不把派生状态写回工程，见 lib/trackRules）；
+   * - audible：正常出声。
+   */
+  const audibility = trackAudibility(track, anySolo)
+  const suppressed = audibility === 'implicitly-muted'
+  const muted = audibility === 'muted'
+  const activityColor = muted || suppressed ? '#4a5466' : color
+  /** armed + muted 是「录得进去但听不见」的经典陷阱：组合状态必须显式提示 */
+  const armedButMuted = armed && (muted || suppressed)
 
   const commitRename = () => {
     setRenaming(false)
@@ -203,6 +219,7 @@ export function TrackRow({
       data-track-row
       data-track-id={track.id}
       data-track-name={track.name}
+      data-mix-state={audibility}
       onClick={onSelect}
       onContextMenu={(event) => {
         const target = event.target as HTMLElement
@@ -293,7 +310,8 @@ export function TrackRow({
               title={`${track.name}（双击重命名，右键更多操作）`}
               className={cn(
                 'min-w-0 flex-1 truncate text-left text-[12.5px] font-medium leading-tight transition-colors',
-                track.mute ? 'text-ink-4 line-through' : selected ? 'text-ink' : 'text-ink-2 group-hover:text-ink',
+                /* 显式静音划掉；被独奏压住只变暗（不是用户的选择，不该划掉） */
+                muted ? 'text-ink-4 line-through' : suppressed ? 'text-ink-4' : selected ? 'text-ink' : 'text-ink-2 group-hover:text-ink',
               )}
             >
               <span className="block min-w-0 truncate text-[12.5px]">{track.name}</span>
@@ -303,7 +321,35 @@ export function TrackRow({
             <button
               onClick={(event) => {
                 event.stopPropagation()
-                setArmedTrackId(armed ? null : track.id)
+                const next = armed ? null : track.id
+                setArmedTrackId(next)
+                /*
+                 * 预备的同时把焦点移到这条轨道：
+                 * 录制路径优先用 armedTrackId，但「MIDI Thru 试听 / 钢琴卷帘显示哪条轨」
+                 * 仍然跟随 focusedTrackId。两边同步，点 R 之后的所见即所得才一致。
+                 */
+                if (next) useStore.getState().focusTrack(next)
+                // 预备了却录不进去的情况要如实告知，不能只点亮一个红点
+                if (next) {
+                  const state = useStore.getState()
+                  if (!state.midiRecord) {
+                    state.pushToast('info', `已预备「${track.name}」：打开 MIDI 录入后才会写入音符`)
+                  } else if (state.view !== 'pianoroll') {
+                    state.pushToast('info', `已预备「${track.name}」：切到钢琴卷帘才会写入音符`)
+                  } else if (!resolveRecordClipId(track, state.selection.clipId)) {
+                    state.pushToast('info', `「${track.name}」还没有可录的片段：先建一个 MIDI 片段`)
+                  } else if (muted || suppressed) {
+                    /* 录得进去但监听听不到：这是最容易被误判成「没录上」的组合 */
+                    state.pushToast(
+                      'info',
+                      muted
+                        ? `「${track.name}」已预备，但它是静音的：录进去也听不到，点 M 取消静音`
+                        : `「${track.name}」已预备，但被其它轨道的独奏压住：录进去也听不到，点上方总控 S 清空独奏`,
+                    )
+                  } else {
+                    state.pushToast('success', `已预备「${track.name}」：弹奏会写进这条轨道`)
+                  }
+                }
               }}
               title={armed ? '取消录入预备（同时只 arm 一条轨道）' : '录入预备：MIDI 弹奏写入这条轨道'}
               aria-label={armed ? `取消 ${track.name} 的录入预备` : `预备录入 ${track.name}`}
@@ -324,14 +370,25 @@ export function TrackRow({
                 toggleMute(track.id)
                 useStore.getState().setSaveStatus('dirty')
               }}
-              title={track.mute ? '取消静音（M）' : '静音（M）'}
-              aria-label={track.mute ? `取消静音 ${track.name}` : `静音 ${track.name}`}
-              aria-pressed={track.mute}
+              title={
+                muted
+                  ? '取消静音（M）'
+                  : suppressed
+                    ? '静音（M）· 当前已被其它轨道的独奏压住，这里按下去会把「显式静音」也置为开'
+                    : '静音（M）'
+              }
+              aria-label={muted ? `取消静音 ${track.name}` : `静音 ${track.name}`}
+              aria-pressed={muted}
+              data-track-mute={muted ? 'true' : 'false'}
+              data-implicit-mute={suppressed ? 'true' : 'false'}
               className={cn(
-                'flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border text-[9.5px] font-bold leading-none transition-colors',
-                track.mute
+                'relative flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border text-[9.5px] font-bold leading-none transition-colors',
+                muted
                   ? 'border-danger/60 bg-danger/25 text-danger'
-                  : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
+                  : suppressed
+                    ? /* 隐式静音：描边点亮但不填色 —— 明确区分「被 solo 压住」与「用户真的静音了」 */
+                      'border-danger/35 bg-surface-2 text-danger/55'
+                    : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
               )}
             >
               <span className="text-[9.5px] font-bold leading-none">M</span>
@@ -339,17 +396,31 @@ export function TrackRow({
             <button
               onClick={(event) => {
                 event.stopPropagation()
-                toggleSolo(track.id)
+                /*
+                 * 普通点击 = 累加独奏（可多条同时独奏）；
+                 * Alt/Option+点击 = 独占独奏（清空其它，只留这条）。
+                 * 与 Logic / Studio One 一致；Alt 在 Cubase 是 Solo Defeat，
+                 * 所以语义必须写进 tooltip，别让用户猜。
+                 */
+                toggleSolo(track.id, { exclusive: event.altKey })
                 useStore.getState().setSaveStatus('dirty')
               }}
-              title={track.solo ? '取消独奏（S）' : '独奏（S）'}
+              title={
+                track.solo
+                  ? '取消独奏（S）· 按住 Alt/Option 点击 = 只保留这条独奏'
+                  : '独奏（S）· 再点其它轨可多条同时独奏 · 按住 Alt/Option 点击 = 独占独奏'
+              }
               aria-label={track.solo ? `取消独奏 ${track.name}` : `独奏 ${track.name}`}
-              aria-pressed={track.solo}
+              aria-pressed={Boolean(track.solo)}
+              data-track-solo={track.solo ? 'true' : 'false'}
               className={cn(
                 'flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border text-[9.5px] font-bold leading-none transition-colors',
                 track.solo
                   ? 'border-accent/60 bg-accent/25 text-accent'
-                  : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
+                  : muted
+                    ? /* 已静音的轨：S 能点亮但不会出声，视觉上给一点提示 */
+                      'border-line-strong bg-surface-2 text-ink-4/70 hover:text-accent'
+                    : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
               )}
             >
               <span className="text-[9.5px] font-bold leading-none">S</span>
@@ -470,26 +541,47 @@ export function TrackRow({
             <span className="min-w-0 truncate">{creative.inlineSummary}</span>
           </div>
         )}
+
+        {/* armed + 静音/被压下 = 「录得进去但听不见」。这是 DAW 里最经典的自我怀疑来源，
+            必须显式说出来，而不是让用户对着一个红点猜 */}
+        {armedButMuted && (
+          <div
+            className="flex min-w-0 items-center gap-1 overflow-hidden text-[9.5px] leading-none text-danger/85"
+            data-armed-muted-warning
+            title={
+              muted
+                ? `「${track.name}」已预备录入，但轨道是静音的：音符会写进片段，但监听时听不到。点 M 取消静音。`
+                : `「${track.name}」已预备录入，但正被其它轨道的独奏压住：音符会写进片段，但监听时听不到。清空独奏（总控 S）后可听到。`
+            }
+          >
+            <span className="shrink-0">⚠</span>
+            <span className="min-w-0 truncate">{muted ? '已预备但静音 · 录进去也听不到' : '已预备但被独奏压住'}</span>
+          </div>
+        )}
       </div>
 
-      {/* 迷你电平指示：由 TrackPanel 的单条 rAF 用 engine.getTrackLevels() 实时驱动 */}
+      {/* 迷你电平指示：由 TrackPanel 的单条 rAF 用 engine.getTrackLevels() 实时驱动。
+          `data-mix-state` 让界面 / 自动化都能一眼看出这条轨是「静音」还是「被独奏压住」 */}
       <div
         data-activity-meter
         data-level="0.00"
         data-armed={armed ? 'true' : 'false'}
-        data-activity-label={`电平 ${track.name}${track.mute ? '（已静音）' : ''}`}
+        data-mix-state={audibility}
+        data-activity-label={`电平 ${track.name}${muted ? '（已静音）' : suppressed ? '（被独奏压住）' : ''}`}
         role="img"
         className="pointer-events-none absolute bottom-[6px] right-[2px] top-[3px] w-[3px] overflow-hidden rounded-full bg-white/[0.06]"
-        title={`实时电平：引擎每轨读数（-60..0 dB 映射）· 音量 ${Math.round(track.volume * 100)}%${track.mute ? ' · 已静音' : ''}`}
-        aria-label={`实时电平 ${track.name}${track.mute ? '：已静音' : ''}`}
+        title={`实时电平：引擎每轨读数（-60..0 dB 映射）· 音量 ${Math.round(track.volume * 100)}%${
+          muted ? ' · 已静音' : suppressed ? ' · 被别的轨道的独奏压住（取消独奏即恢复）' : ''
+        }`}
+        aria-label={`实时电平 ${track.name}${muted ? '：已静音' : suppressed ? '：被独奏压住' : ''}`}
       >
         <span
           ref={(element) => registerMeter(track.id, element)}
           className="absolute inset-x-0 bottom-0 rounded-full"
           style={{
             height: '0%',
-            background: withAlpha(activityColor, track.mute ? 0.35 : 0.85),
-            boxShadow: track.mute ? 'none' : `0 0 5px ${withAlpha(activityColor, 0.55)}`,
+            background: withAlpha(activityColor, muted ? 0.35 : suppressed ? 0.45 : 0.85),
+            boxShadow: muted || suppressed ? 'none' : `0 0 5px ${withAlpha(activityColor, 0.55)}`,
           }}
         />
       </div>

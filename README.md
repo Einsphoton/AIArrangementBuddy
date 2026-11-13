@@ -97,7 +97,7 @@
 | **AI 重编 / cover（P7-B）** | 生成面板「AI 重编（cover）」：把当前工程离线渲染成 WAV（含每轨链/母线链）→ 上传资产 → cover 任务（保结构换编制）→ 新音频轨；「贴近原结构」滑杆 0–1（默认 0.7），不改原 MIDI。适用场景：MIDI 编好骨架后让 AI 渲染成完整歌，再迭代加轨/重绘 |
 | **生成分轨 Stem（P5）** | 音频片段右键「生成分轨 Stem…」：按乐器（吉他/贝斯/鼓组/弦乐/键盘/合成器/人声，可多选）各提交一个 lego 任务（base 基座），完成后自动新建独立音频轨并对齐源片段位置。**注意：stem 是按原曲上下文独立生成的，不是分离音轨，不保证与源音频逐样本对齐或相加还原** |
 | **AI 生成音频（P1/P2/P7）** | 顶栏「生成音频」→ 描述/BPM/时长/风格/LoRA 适配器 → 由本地 Companion 调 ACE-Step 生成，进度条 + 可取消，完成后自动上轨（一次撤销）。**质量模式**（P7-A）：勾选后走 `LM → sft 50 步`（更慢、高频/编曲更完整，与 LoRA 互斥，20s 音频约 15–25s）。适配器含自生成数据的 `jrpg_v1/v2`、`jrock_v1`，以及**真实数据内部研究版** `real_jrpg_v1` / `real_jrock_v1`（用户提供商业录音训练，仅本地研究、不得分发；A/B 对比页在 `music-gen/lora-data/ab/<tag>/listen.html`） |
-| **Companion 工作节点（P2/P4）** | GPU 机器上运行 `node scripts/companion.mjs --server <服务地址> --acestep --engine-idle 600`：常驻引擎跨任务复用（冷启动 15s → 热任务 2s）、按任务切换 turbo/sft、支持 LoRA、真取消（杀引擎后自动恢复）、repaint 执行器；P4 起上报真实模型能力并支持任务优先级（普通/高/紧急）与排队位置/ETA |
+| **Companion 工作节点（P2/P4）** | GPU 机器上运行 `node scripts/companion.mjs --server <服务地址> --acestep --engine-idle 600`：常驻引擎跨任务复用（冷启动 15s → 热任务 2s）、按任务切换 turbo/sft、支持 LoRA、真取消（杀引擎后自动恢复）、repaint 执行器；P4 起上报真实模型能力并支持任务优先级（普通/高/紧急）与排队位置/ETA。**单机形态下界面可一键启动生成节点、提交任务时也会自动拉起**（`AIAB_COMPANION_AUTOSTART=0` 可关闭），无需手敲命令 |
 | **任务中心（P4）** | 顶栏「任务中心」：队列概览（普通/高/紧急）、任务状态/进度/优先级/排队位置/预计等待、取消排队或运行中任务、完成后定位产物；生成/重绘面板可直接选优先级 |
 | **同步 / NAS（P6）** | `POST /api/sync/export` / `import`：`.aiabsync` 真 ZIP 包（工程 + 资产 + manifest sha256）；资产按内容去重、工程冲突生成「同步副本」不覆盖；`GET /api/sync/status` 检查 NAS 挂载与占用；CLI `node scripts/sync.mjs export/import/status`。详见 [docs/SYNC.md](docs/SYNC.md) |
 | **多段压缩 + 侧链（P6）** | AI 混音面板新增「三段总线压缩」（低/中/高各自压缩后合并）与「侧链 ducking」（默认鼓组压贝斯）；导出 WAV 时离线重建每轨链 + 母线链，与实时一致 |
@@ -372,8 +372,9 @@ pnpm soundfonts --list     # 查看其他可选音色库
 | 切换视图 | `1` 编曲 · `2` 钢琴卷帘 · `3` 智能片段 |
 | AI 助手面板 | `⌘J`（再按可收成窄条） |
 | 混音器 | `⌘⇧M` |
-| 循环 / 节拍器 | `L` / `M` |
+| 循环 / 节拍器 | `L` / `C` |
 | 跟随播放头 | `F` |
+| 静音 / 独奏选中轨道 | `M` / `S`（`Alt/Option+S` = 独占独奏） |
 | MIDI 录入 | `R` |
 | 复制 / 拆分选中内容 | `⌘D` / `⌘E` |
 | 添加轨道 | `⌘⇧N` |

@@ -32,6 +32,14 @@ import type {
   ToolCallInfo,
   ViewTab,
 } from './types'
+import {
+  clearSoloPatch,
+  computeAudibleTrackIds as computeAudibleIds,
+  muteAllPatch,
+  nextMuteAllValue,
+  soloTogglePatch,
+  type FlagPatch,
+} from '../lib/trackRules'
 
 const MAX_HISTORY = 80
 
@@ -158,7 +166,16 @@ export interface AppActions {
   moveTrack: (trackId: string, direction: -1 | 1) => void
   setTrackInstrument: (trackId: string, instrumentId: string, emotionId?: string) => void
   toggleMute: (trackId: string) => void
-  toggleSolo: (trackId: string) => void
+  /** 显式设置静音（不被其它标志位连带修改） */
+  setTrackMuted: (trackId: string, muted: boolean) => void
+  /** 切换独奏；`exclusive` = Alt/Option 点击：清空其它独奏、只留这条 */
+  toggleSolo: (trackId: string, opts?: { exclusive?: boolean }) => void
+  setTrackSolo: (trackId: string, solo: boolean, opts?: { exclusive?: boolean }) => void
+  /** 总控 M：任意静音 → 全部取消；否则全部静音。返回切换后的状态 */
+  toggleMuteAll: () => boolean
+  setAllMuted: (muted: boolean) => void
+  /** 总控 S：清空全部独奏（不动任何 mute） */
+  clearAllSolos: () => void
 
   /* 片段 */
   addClip: (trackId: string, partial?: Partial<Clip>) => string | null
@@ -203,6 +220,8 @@ export interface AppActions {
   /* 选择 / 视图 */
   setView: (view: ViewTab) => void
   selectTrack: (trackId: string) => void
+  /** 只切焦点（不改变当前片段选择）：录入预备要用它，避免把用户已选的片段顶掉 */
+  focusTrack: (trackId: string) => void
   selectClip: (trackId: string, clipId: string) => void
   setSelectedNotes: (noteIds: string[]) => void
   toggleNoteSelection: (noteId: string) => void
@@ -274,6 +293,36 @@ function findClip(project: Project, trackId: string, clipId: string): Clip | und
 
 function clone<T>(value: T): T {
   return deepClone(value)
+}
+
+/**
+ * 批量写回静音 / 独奏标志位。
+ *
+ * 单独抽出来是为了三件事共用同一条写入路径：
+ * 单轨 M / S、总控 M（全部静音）、总控 S（清空独奏）。
+ *
+ * - **一条撤销记录**：先 pushHistory 再 history:false 写入，避免总控操作把
+ *   撤销栈刷成几十条单轨记录（Studio One / Logic 的总控都是一次可撤销）；
+ * - **dirty**：`mutate` 在 `history:false` 时不会把工程标脏，这里补上，
+ *   否则 M/S 改动可能不会被自动保存（历史遗留 bug：命令面板静音不入盘）。
+ * - 空补丁直接返回：没有任何变化时不产生撤销点。
+ */
+function applyFlagPatches(project: Project, patches: readonly FlagPatch[]): void {
+  if (patches.length === 0) return
+  const store = useStore.getState()
+  store.pushHistory()
+  store.mutate(
+    (draft) => {
+      for (const patch of patches) {
+        const track = draft.tracks.find((item) => item.id === patch.id)
+        if (!track) continue
+        if (typeof patch.mute === 'boolean') track.mute = patch.mute
+        if (typeof patch.solo === 'boolean') track.solo = patch.solo
+      }
+    },
+    { history: false },
+  )
+  useStore.getState().setSaveStatus('dirty')
 }
 
 const initialProject = createStarterProject()
@@ -491,18 +540,67 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
+  /*
+   * 静音 / 独奏：显式标志位，互不吞并。
+   *
+   * 「按 S 之后要不要把其它轨道都 M 掉」——不。独奏只在运行期派生「隐式静音」
+   * （见 lib/trackRules.trackAudibility），别人的 `mute` 一个字节都不写回工程；
+   * 取消独奏后原来的静音状态原样恢复。这条规则和 Logic / Cubase / Studio One 一致，
+   * 也避免了「solo 一圈之后静音全乱」的经典抱怨。
+   *
+   * 批量版本（总控 M → 全部静音 / 总控 S → 清空独奏）走同一个 applyFlagPatches：
+   * 一次 mutate 只产生**一个**撤销点，不会在历史里堆出一串单轨操作。
+   */
   toggleMute: (trackId) => {
-    get().mutate((draft) => {
-      const track = findTrack(draft, trackId)
-      if (track) track.mute = !track.mute
-    }, { history: false })
+    const state = get()
+    const track = findTrack(state.project, trackId)
+    if (!track) return
+    applyFlagPatches(state.project, [{ id: trackId, mute: !track.mute }])
   },
 
-  toggleSolo: (trackId) => {
-    get().mutate((draft) => {
-      const track = findTrack(draft, trackId)
-      if (track) track.solo = !track.solo
-    }, { history: false })
+  setTrackMuted: (trackId, muted) => {
+    const state = get()
+    const track = findTrack(state.project, trackId)
+    if (!track || Boolean(track.mute) === muted) return
+    applyFlagPatches(state.project, [{ id: trackId, mute: muted }])
+  },
+
+  toggleSolo: (trackId, opts) => {
+    const state = get()
+    applyFlagPatches(state.project, soloTogglePatch(state.project.tracks, trackId, opts))
+  },
+
+  setTrackSolo: (trackId, solo, opts) => {
+    const state = get()
+    const track = findTrack(state.project, trackId)
+    if (!track) return
+    if (opts?.exclusive && solo) {
+      applyFlagPatches(state.project, soloTogglePatch(state.project.tracks, trackId, { exclusive: true }))
+      return
+    }
+    if (Boolean(track.solo) === solo) return
+    applyFlagPatches(state.project, [{ id: trackId, solo }])
+  },
+
+  /* 总控 M：一次切换全工程的显式静音（已全部静音 → 全部取消） */
+  toggleMuteAll: () => {
+    const state = get()
+    const tracks = state.project.tracks
+    if (tracks.length === 0) return false
+    const muted = nextMuteAllValue(tracks)
+    applyFlagPatches(state.project, muteAllPatch(tracks, muted))
+    return muted
+  },
+
+  setAllMuted: (muted) => {
+    const state = get()
+    applyFlagPatches(state.project, muteAllPatch(state.project.tracks, muted))
+  },
+
+  /* 总控 S：清空全部独奏（Studio One 的 Solo Clear；不会动任何 mute） */
+  clearAllSolos: () => {
+    const state = get()
+    applyFlagPatches(state.project, clearSoloPatch(state.project.tracks))
   },
 
   /* ---------------- 片段 ---------------- */
@@ -789,6 +887,27 @@ export const useStore = create<Store>((set, get) => ({
     })
   },
   selectClip: (trackId, clipId) => set({ selectedTrackId: trackId, focusedTrackId: trackId, selection: { clipId, noteIds: [] } }),
+  /* 只同步焦点 / 选中轨道（录入预备切换轨道用）。
+   * 若当前选中的片段不属于目标轨道，就切到目标轨道自己的第一个未静音片段——
+   * 保证「预备了哪条轨」与「钢琴卷帘显示哪条轨」一致，不会再出现录 A 轨却盯着 B 轨片段。 */
+  focusTrack: (trackId) =>
+    set((state) => {
+      const target = state.project.tracks.find((track) => track.id === trackId)
+      const selectedClipId = state.selection.clipId
+      const keepsSelection = Boolean(
+        selectedClipId && target?.clips.some((clip) => clip.id === selectedClipId),
+      )
+      return {
+        selectedTrackId: trackId,
+        focusedTrackId: trackId,
+        selection: {
+          clipId: keepsSelection
+            ? selectedClipId
+            : (target?.clips.find((clip) => !clip.muted)?.id ?? target?.clips[0]?.id ?? null),
+          noteIds: [],
+        },
+      }
+    }),
   setSelectedNotes: (noteIds) => set((state) => ({ selection: { ...state.selection, noteIds } })),
   toggleNoteSelection: (noteId) =>
     set((state) => {
@@ -973,10 +1092,9 @@ export function useBarBeats(): number {
   return useStore((s) => beatsPerBar(s.project.timeSignature))
 }
 
-/** 哪些轨道实际发声（考虑 solo） */
+/** 哪些轨道实际发声（考虑 mute / solo）——与引擎 / 导出共用 lib/trackRules 的同一份判定 */
 export function audibleTrackIds(project: Project): Set<string> {
-  const anySolo = project.tracks.some((t) => t.solo)
-  return new Set(project.tracks.filter((t) => !t.mute && (!anySolo || t.solo)).map((t) => t.id))
+  return computeAudibleIds(project.tracks)
 }
 
 export { findClip, findTrack }

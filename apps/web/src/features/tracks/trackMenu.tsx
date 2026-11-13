@@ -8,6 +8,7 @@ import {
   ArrowDown,
   ArrowUp,
   Copy,
+  Music4,
   Palette,
   Pencil,
   Rows2,
@@ -15,6 +16,8 @@ import {
   Rows4,
   Trash2,
   ChevronsDownUp,
+  Volume2,
+  VolumeX,
 } from 'lucide-react'
 import { ContextMenu, MenuDivider, MenuItem, MenuLabel, Popover, popoverPosition } from '../../components/ui/menu'
 import { useStore } from '../../store/store'
@@ -71,6 +74,51 @@ export function TrackContextMenu({
         onClick={() => {
           useStore.getState().removeTrack(track.id)
           useStore.getState().pushToast('info', `已删除轨道「${track.name}」`)
+          onClose()
+        }}
+      />
+      <MenuDivider />
+      {/* 静音 / 独奏：与轨道头 M / S 同一套 store action，右键也能完成
+          （右键菜单是 DAW 里「就地操作」的通用入口，不该只留一个 M/S 小按钮） */}
+      <MenuLabel>混音</MenuLabel>
+      <MenuItem
+        icon={<Volume2 size={12} />}
+        label={track.mute ? '取消静音' : '静音'}
+        checked={Boolean(track.mute)}
+        hint="M"
+        onClick={() => {
+          useStore.getState().toggleMute(track.id)
+          onClose()
+        }}
+      />
+      <MenuItem
+        icon={<Music4 size={12} />}
+        label={track.solo ? '取消独奏' : '独奏'}
+        checked={Boolean(track.solo)}
+        hint="S"
+        onClick={() => {
+          useStore.getState().toggleSolo(track.id)
+          onClose()
+        }}
+      />
+      <MenuItem
+        icon={<Music4 size={12} />}
+        label="独占独奏（只留这条）"
+        hint="Alt+S"
+        disabled={
+          Boolean(track.solo) && useStore.getState().project.tracks.filter((item) => item.solo).length <= 1
+        }
+        onClick={() => {
+          useStore.getState().setTrackSolo(track.id, true, { exclusive: true })
+          onClose()
+        }}
+      />
+      <MenuItem
+        icon={<VolumeX size={12} />}
+        label="清空全部独奏"
+        disabled={!useStore.getState().project.tracks.some((item) => item.solo)}
+        onClick={() => {
+          useStore.getState().clearAllSolos()
           onClose()
         }}
       />

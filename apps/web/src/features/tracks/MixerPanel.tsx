@@ -6,9 +6,11 @@ import { ContextMenu, MenuDivider, MenuItem } from '../../components/ui/menu'
 import { ApiError, suggestMix, type MixSuggestResult } from '../../lib/api'
 import { cn } from '../../lib/format'
 import { MIXER_HEIGHT_LIMITS, useUiStore } from '../../lib/uiStore'
+import { computeAudibleTrackIds } from '../../lib/trackRules'
 import { useStore } from '../../store/store'
 import { clamp, trackColor, withAlpha } from '../arrangement/timeline'
 import { AiMixDialog } from './AiMixDialog'
+import { MixMasterControls } from './MixMasterControls'
 import { DbRuler, MiniKnob, VerticalFader, gainToDbText, levelToDbText } from './controls'
 
 /* ------------------------------------------------------------------ */
@@ -56,6 +58,7 @@ function ChannelStrip({
   trackId,
   faderHeight,
   dragging,
+  anySolo,
   meterRef,
   peakRef,
   onDragStateChange,
@@ -65,6 +68,8 @@ function ChannelStrip({
   trackId: string
   faderHeight: number
   dragging: boolean
+  /** 工程里是否有任意轨道在独奏（父级算一次，避免每通道 O(n) some） */
+  anySolo: boolean
   meterRef: (element: HTMLDivElement | null) => void
   peakRef: (element: HTMLDivElement | null) => void
   onDragStateChange: (trackId: string, dragging: boolean) => void
@@ -87,6 +92,9 @@ function ChannelStrip({
   if (!track) return null
   const instrument = getInstrument(track.instrumentId)
   const color = trackColor(track.color)
+  /* 派生静音（别的轨道在独奏）与显式静音要区分：前者不写回工程，M 灯不实心点亮 */
+  const suppressed = !track.mute && anySolo && !track.solo
+  const muted = Boolean(track.mute)
 
   return (
     <div
@@ -201,14 +209,24 @@ function ChannelStrip({
             toggleMute(track.id)
             useStore.getState().setSaveStatus('dirty')
           }}
-          title="静音"
-          aria-pressed={track.mute}
+          title={
+            muted
+              ? '取消静音'
+              : suppressed
+                ? '静音：当前已被其它通道的独奏压住，按下去会把「显式静音」也置为开'
+                : '静音'
+          }
+          aria-pressed={muted}
           aria-label={`${track.name} 静音`}
+          data-track-mute={muted ? 'true' : 'false'}
+          data-implicit-mute={suppressed ? 'true' : 'false'}
           className={cn(
             'flex h-[19px] flex-1 items-center justify-center rounded-[5px] border text-[10px] font-bold transition-colors',
-            track.mute
+            muted
               ? 'border-danger/60 bg-danger/25 text-danger'
-              : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
+              : suppressed
+                ? 'border-danger/35 bg-surface-2 text-danger/55'
+                : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
           )}
         >
           M
@@ -216,12 +234,18 @@ function ChannelStrip({
         <button
           onClick={(event) => {
             event.stopPropagation()
-            toggleSolo(track.id)
+            /* 普通点击累加独奏；Alt/Option = 独占（与轨道头 S 完全一致） */
+            toggleSolo(track.id, { exclusive: event.altKey })
             useStore.getState().setSaveStatus('dirty')
           }}
-          title="独奏"
-          aria-pressed={track.solo}
+          title={
+            track.solo
+              ? '取消独奏（S）· Alt/Option 点击 = 只保留本通道独奏'
+              : '独奏（S）· 可多条同时独奏 · Alt/Option 点击 = 独占独奏'
+          }
+          aria-pressed={Boolean(track.solo)}
           aria-label={`${track.name} 独奏`}
+          data-track-solo={track.solo ? 'true' : 'false'}
           className={cn(
             'flex h-[19px] flex-1 items-center justify-center rounded-[5px] border text-[10px] font-bold transition-colors',
             track.solo
@@ -322,6 +346,8 @@ export function MixerPanel() {
 
   const mixerHeight = useUiStore((s) => s.mixerHeight)
   const setMixerHeight = useUiStore((s) => s.setMixerHeight)
+  /* 一次性算好，避免每个通道条各自 some() */
+  const anySolo = tracks.some((track) => track.solo)
 
   const beginEdit = () => {
     pushHistory()
@@ -405,7 +431,8 @@ export function MixerPanel() {
       const dt = Math.min(64, now - last)
       last = now
       const state = useStore.getState()
-      const anySolo = state.project.tracks.some((track) => track.solo)
+      /* 与引擎 / 轨道头共用同一份可听判定，混音器不能有第二套 mute/solo 语义 */
+      const audibleIds = computeAudibleTrackIds(state.project.tracks)
 
       let levels: Record<string, number> = {}
       if (hasTrackLevels) {
@@ -426,7 +453,7 @@ export function MixerPanel() {
         const fill = meterRefs.current[track.id]
         const peakEl = peakRefs.current[track.id]
         if (!fill && !peakEl) continue
-        const audible = !track.mute && (!anySolo || track.solo)
+        const audible = audibleIds.has(track.id)
         const target = audible
           ? hasTrackLevels
             ? clamp(levels[track.id] ?? 0, 0, 1)
@@ -567,6 +594,9 @@ export function MixerPanel() {
         <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-4">
           {tracks.length} 条通道 · 真实每轨电平
         </span>
+        {/* 常驻总控：M 全部静音 / S 清空独奏 / R 取消录入预备（与轨道列表底部同一个组件） */}
+        <span className="mx-0.5 h-4 w-px shrink-0 bg-line" aria-hidden />
+        <MixMasterControls variant="inline" />
         <div className="flex-1" />
         <span className="hidden min-w-0 truncate text-right text-[10.5px] text-ink-4 min-[1280px]:block">
           右键通道条：复制/删除/静音/独奏 · 点击电平表重置峰值 · 拖动顶部边缘调整高度
@@ -625,6 +655,7 @@ export function MixerPanel() {
                   trackId={track.id}
                   faderHeight={faderHeight}
                   dragging={draggingTrackId === track.id}
+                  anySolo={anySolo}
                   meterRef={registerMeter(track.id)}
                   peakRef={registerPeak(track.id)}
                   onDragStateChange={(trackId, next) => setDraggingTrackId(next ? trackId : null)}
@@ -778,10 +809,29 @@ export function MixerPanel() {
               setMenu(null)
             }}
           />
+          <MenuItem
+            label="独占独奏"
+            hint="Alt+S"
+            disabled={menuTrack.solo && tracks.filter((track) => track.solo).length <= 1}
+            onClick={() => {
+              useStore.getState().setTrackSolo(menuTrack.id, true, { exclusive: true })
+              useStore.getState().setSaveStatus('dirty')
+              setMenu(null)
+            }}
+          />
+          <MenuItem
+            label="清空全部独奏"
+            hint={anySolo ? `${tracks.filter((track) => track.solo).length} 条` : undefined}
+            disabled={!anySolo}
+            onClick={() => {
+              useStore.getState().clearAllSolos()
+              setMenu(null)
+            }}
+          />
           <MenuDivider />
           <MenuItem
             label="重置声像"
-            hint="C"
+            hint="双击旋钮"
             onClick={() => {
               useStore.getState().updateTrack(menuTrack.id, { pan: 0 })
               setMenu(null)

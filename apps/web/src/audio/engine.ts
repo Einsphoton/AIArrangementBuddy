@@ -40,6 +40,7 @@ import { SoundfontEngine } from './soundfont'
 import { WebMidiInput } from './midi'
 import { renderProjectToWav } from './render'
 import { clamp } from './util'
+import { computeAudibleTrackIds } from '../lib/trackRules'
 import {
   beatAtPosition as timelineBeatAtPosition,
   beatSegments as timelineBeatSegments,
@@ -89,6 +90,16 @@ interface TrackNode {
    * 位置在处理链之后、推子/发送之前；由 duck 触发源（默认鼓组）的包络驱动衰减。
    */
   duckGain: Tone.Gain
+  /**
+   * 静音 / 独奏门（默认 1，0.02s 过渡）。
+   *
+   * 为什么单独一个节点，而不是直接用 `channel.mute`：
+   * - `Tone.Channel.mute` 是把推子直接设成 -Infinity 的**硬切**，静音瞬间会有咔哒声；
+   * - 它和 `volume.rampTo()` 抢同一个参数：先 mute 再 ramp 会被 ramp 撤销（M / S 表现为按了没用）；
+   * - 放在 makeup 之后、duckGain 之前，send 抽头（postSend）天然在它下游，
+   *   因此「静音」也能掐掉混响 / 延迟尾巴，而不只是掐干声。
+   */
+  muteGain: Tone.Gain
   sendReverb: Tone.Gain
   sendDelay: Tone.Gain
   sendChorus: Tone.Gain
@@ -700,6 +711,7 @@ export function createAudioEngine(): AudioEngine {
       node.makeup,
       node.postSend,
       node.duckGain,
+      node.muteGain,
       node.channel,
       node.widener,
       node.meter,
@@ -1018,6 +1030,8 @@ export function createAudioEngine(): AudioEngine {
     const postSend = new Tone.Gain(0)
     /* P6-A：侧链 ducking 增益（默认 1，pump 时按触发源包络压低） */
     const duckGain = new Tone.Gain(1)
+    /* 静音 / 独奏门：放在 ducking 之前、推子之前，send 抽头在其下游（见 TrackNode.muteGain 注释） */
+    const muteGain = new Tone.Gain(1)
     /* P3.1：SoundFont 逐通道抽头的入口；接 dry 后与合成器共用同一条处理链 */
     const rawContextForTrack = nativeContext ?? (Tone.getContext().rawContext as AudioContext)
     const sfIn = rawContextForTrack.createGain()
@@ -1030,7 +1044,8 @@ export function createAudioEngine(): AudioEngine {
     eqMid.connect(eqHigh)
     eqHigh.connect(compressor)
     compressor.connect(makeup)
-    makeup.connect(duckGain)
+    makeup.connect(muteGain)
+    muteGain.connect(duckGain)
     duckGain.connect(channel)
     /* send 走处理链输出（门控），避免逐通道模式下「dry 直达 send」绕过 EQ/压缩；ducking 也作用于 send */
     duckGain.connect(postSend)
@@ -1055,6 +1070,7 @@ export function createAudioEngine(): AudioEngine {
       makeup,
       postSend,
       duckGain,
+      muteGain,
       sendReverb,
       sendDelay,
       sendChorus,
@@ -1115,10 +1131,18 @@ export function createAudioEngine(): AudioEngine {
   /* 工程应用（热更新）                                                    */
   /* ------------------------------------------------------------------ */
 
-  const rebuildNoteIndex = (project: Project, audibleIds: Set<string>) => {
+  /**
+   * 重建播放用音符索引。
+   *
+   * **只跳过片段级静音（`clip.muted`），不再按轨道可听性过滤**：
+   * 轨道静音 / 独奏是混音层的事，由 `applyMix` 的通道静音承担。
+   * 早期版本把不可听轨道的音符直接从索引里删掉，导致「播放中取消静音」时
+   * 这批音符要等下一次进入 look-ahead 窗口才会被重新排上，中间几十毫秒必然丢音；
+   * 反过来把索引留着，取消静音可以立刻恢复发声，也让「播放」这一件事只有一个真相。
+   */
+  const rebuildNoteIndex = (project: Project) => {
     const notes: FlatNote[] = []
     for (const track of project.tracks) {
-      if (!audibleIds.has(track.id)) continue
       for (const clip of track.clips) {
         if (clip.muted) continue
         for (const note of clip.notes) {
@@ -1533,13 +1557,29 @@ export function createAudioEngine(): AudioEngine {
   const applyMix = (track: Track, node: TrackNode, audible: boolean) => {
     const emotion = getEmotion(track.instrumentId, track.emotionId).params
     const instrument = getInstrument(track.instrumentId)
-    node.channel.mute = !audible
+    /*
+     * 静音 / 独奏走独立的 muteGain（0.02s 过渡），不再用 `channel.mute`：
+     * - `Channel.mute` 是硬切推子（瞬间 -Infinity），会有咔哒声；
+     * - 它和下一行的 `volume.rampTo()` 抢同一个参数，先 mute 会被 ramp 撤销，
+     *   M / S 于是表现为「按了没用」（Tone 的 setRampPoint 还会把 -Infinity 换成 1e-7）。
+     * muteGain 在 send 抽头上游，静音同时掐掉混响 / 延迟尾巴。
+     */
+    node.muteGain.gain.rampTo(audible ? 1 : 0, 0.02)
+    node.channel.mute = false
     node.channel.volume.rampTo(Tone.gainToDb(Math.max(0.0005, track.volume)), 0.06)
     node.channel.pan.rampTo(clamp(track.pan, -1, 1), 0.06)
     node.widener.width.rampTo(clamp(emotion.stereoWidth, 0, 1), 0.1)
-    node.sendReverb.gain.rampTo(reverbAmount(track, emotion.reverb), 0.1)
-    node.sendDelay.gain.rampTo(delayAmount(track, emotion.delay), 0.1)
-    node.sendChorus.gain.rampTo(chorusAmount(track, emotion.chorus, instrument.synth.fx.chorus), 0.1)
+    /*
+     * send 也必须跟着可听性归零：
+     * 合成器 voice 是**前置**直连 send 的（见 attachVoice，为了绕开 dry 的处理链），
+     * 它不经过 muteGain，所以只关 muteGain 的话静音轨仍会从混响 / 延迟里漏出尾巴。
+     */
+    node.sendReverb.gain.rampTo(audible ? reverbAmount(track, emotion.reverb) : 0, 0.1)
+    node.sendDelay.gain.rampTo(audible ? delayAmount(track, emotion.delay) : 0, 0.1)
+    node.sendChorus.gain.rampTo(
+      audible ? chorusAmount(track, emotion.chorus, instrument.synth.fx.chorus) : 0,
+      0.1,
+    )
 
     /* P3：音色/动态处理链与推子参数在同一处同步（0.05–0.1s 过渡，避免爆音） */
     applyMixChain(track, node)
@@ -1573,13 +1613,8 @@ export function createAudioEngine(): AudioEngine {
     /* P3.2：总线/母带链参数同步（在任何声音进来之前先写好，避免首帧未处理） */
     applyMasterChain(project)
 
-    const anySolo = project.tracks.some((track) => track.solo)
-    const audible = new Set<string>()
-    for (const track of project.tracks) {
-      if (track.mute) continue
-      if (anySolo && !track.solo) continue
-      audible.add(track.id)
-    }
+    /* 静音 / 独奏判定抽成纯函数（lib/trackRules），界面与单测共用同一份语义 */
+    const audible = computeAudibleTrackIds(project.tracks)
 
     /* 先释放已经不存在的音频片段 Player：它们的输出还连着即将被销毁的轨道节点 */
     pruneAudioPlayback(project)
@@ -1656,7 +1691,7 @@ export function createAudioEngine(): AudioEngine {
     /* P6-A：侧链 ducking 探针随工程变化重建（目标轨/触发源/参数） */
     syncDucking(project)
 
-    rebuildNoteIndex(project, audible)
+    rebuildNoteIndex(project)
 
     scheduler.endBeat = Math.max(1, projectEndBeat(project))
     scheduler.secPerBeat = 60 / Math.max(20, project.tempo)
@@ -1665,7 +1700,13 @@ export function createAudioEngine(): AudioEngine {
       const pos = positionAt(now())
       scheduler.startPosition = pos
       scheduler.startContextTime = now()
-      scheduler.scheduledPosition = pos
+      /*
+       * 只允许「向前补排」，不允许回退：
+       * 已经排进 look-ahead（160ms）的音符是直接交给合成器的，若把 scheduledPosition
+       * 拨回当前位置，下一个 pump 会把同一批音符**再排一次**（表现为每次改静音/独奏都有一记重音）。
+       * 位置是绝对拍坐标，换映射后依然有效，所以取两者较大值即可。
+       */
+      scheduler.scheduledPosition = Math.max(pos, scheduler.scheduledPosition)
     }
     // 延迟总线跟随速度（八分音符）
     if (delayBus) {
@@ -2704,7 +2745,12 @@ export function createAudioEngine(): AudioEngine {
           makeupGainDb: Number.isFinite(makeupDbRaw) ? makeupDbRaw : -120,
         },
         routing: { mode: soundfontRouting.mode, mainOutput: soundfontRouting.mainOutput },
-        channel: { volumeDb: Number(node.channel.volume.value), mute: Boolean(node.channel.mute) },
+        channel: {
+          volumeDb: Number(node.channel.volume.value),
+          mute: Boolean(node.channel.mute),
+          /* 静音 / 独奏门：0 = 该轨被静音（或未被独奏），1 = 正常出声 */
+          muteGain: Number(node.muteGain.gain.value),
+        },
       }
     },
 

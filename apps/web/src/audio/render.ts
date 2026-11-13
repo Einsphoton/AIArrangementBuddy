@@ -28,6 +28,7 @@ import { createInstrumentVoice, noteDurationFor } from './synth'
 import type { SoundfontEngine } from './soundfont'
 import type { RenderOptions } from './types'
 import { clamp } from './util'
+import { computeAudibleTrackIds } from '../lib/trackRules'
 import {
   applyMasterChainOffline,
   autoMakeupFor,
@@ -85,10 +86,13 @@ export function encodeWav(left: Float32Array, right: Float32Array | undefined, s
 /* 轨道路由                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 当前工程里应该发声的轨道（考虑 mute / solo） */
+/** 当前工程里应该发声的轨道（考虑 mute / solo）。
+ *
+ * 判定与实时引擎共用 `computeAudibleTrackIds`，避免「导出听到的和播放听到的不一致」。
+ */
 export function audibleTracks(project: Project): Track[] {
-  const anySolo = project.tracks.some((track) => track.solo)
-  return project.tracks.filter((track) => !track.mute && (!anySolo || track.solo))
+  const audible = computeAudibleTrackIds(project.tracks)
+  return project.tracks.filter((track) => audible.has(track.id))
 }
 
 /**
