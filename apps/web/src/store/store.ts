@@ -43,6 +43,14 @@ import {
 
 const MAX_HISTORY = 80
 
+/** 轨道选择手势：普通点击 / 修饰键点击 / 框选 */
+export type TrackSelectMode = 'replace' | 'toggle' | 'range'
+export interface TrackSelectOptions {
+  mode?: TrackSelectMode
+  /** 保持当前片段选择（批量操作时不希望片段焦点跳走） */
+  keepClip?: boolean
+}
+
 /* ------------------------------------------------------------------ */
 /* 初始工程                                                            */
 /* ------------------------------------------------------------------ */
@@ -97,6 +105,16 @@ export interface AppState {
   /* 选择 / 视图 */
   view: ViewTab
   selectedTrackId: string
+  /**
+   * 多选轨道 id（按工程顺序排列；至少包含 `selectedTrackId`，工程为空时才是 []）。
+   *
+   * 为什么不是只留一个数组：`selectedTrackId` 是大量既有逻辑（钢琴卷帘 / 状态栏 / AI 上下文 /
+   * MIDI 录入目标）依赖的「主轨」，而多选是新增的「批量编辑作用域」。两者分开存，
+   * `selectedTrackId` 恒等于 anchor（最后点击的轨道），既不破坏旧调用方，也能表达多选。
+   */
+  selectedTrackIds: string[]
+  /** Shift 连选的锚点（= 最后一次普通点击 / 切换点击的轨道） */
+  trackSelectionAnchorId: string | null
   focusedTrackId: string
   selection: SelectionState
   /** 拍网格吸附：0 = 关闭，0.25 = 十六分音符 */
@@ -219,7 +237,26 @@ export interface AppActions {
 
   /* 选择 / 视图 */
   setView: (view: ViewTab) => void
-  selectTrack: (trackId: string) => void
+  /**
+   * 选中轨道。
+   * - `mode='replace'`（默认）：单选，替换整个集合；
+   * - `mode='toggle'`：Ctrl/⌘ 点击，加入或移出集合；
+   * - `mode='range'`：Shift 点击，从 anchor 到目标轨道连选。
+   */
+  selectTrack: (trackId: string, opts?: TrackSelectOptions) => void
+  /** 直接替换多选集合（框选 / 批量操作后使用），anchor 缺省取集合最后一项 */
+  selectTracks: (trackIds: string[], anchorId?: string | null) => void
+  selectAllTracks: () => void
+  /** 清空多选，只保留主轨（Esc / 点空白处） */
+  clearTrackSelection: () => void
+  /** 批量删除轨道：一次撤销点 */
+  removeTracks: (trackIds: string[]) => void
+  /** 批量复制轨道（副本插在各自源轨之后），返回新轨道 id */
+  duplicateTracks: (trackIds: string[]) => string[]
+  /** 批量静音（一次撤销点） */
+  setTracksMuted: (trackIds: string[], muted: boolean) => void
+  /** 批量独奏（一次撤销点；不改写其它轨道的 mute） */
+  setTracksSolo: (trackIds: string[], solo: boolean) => void
   /** 只切焦点（不改变当前片段选择）：录入预备要用它，避免把用户已选的片段顶掉 */
   focusTrack: (trackId: string) => void
   selectClip: (trackId: string, clipId: string) => void
@@ -295,6 +332,49 @@ function clone<T>(value: T): T {
   return deepClone(value)
 }
 
+/* ------------------------------------------------------------------ */
+/* 多选对账                                                            */
+/* ------------------------------------------------------------------ */
+
+export interface TrackSelectionSnapshot {
+  selectedTrackIds: string[]
+  anchorId: string | null
+  primaryId: string
+}
+
+/**
+ * 把多选集合对账到当前工程的轨道列表。
+ *
+ * 删除轨道 / 撤销 / AI 整轮替换工程之后，`selectedTrackIds` 里可能残留已不存在的 id。
+ * 这里统一做幂等对账，保证三条不变量：
+ * - 集合只含真实存在的轨道，且保持工程顺序；
+ * - anchor 有效且 ∈ 集合；
+ * - 工程非空时集合非空（至少保留主轨）。
+ */
+export function reconcileTrackSelection(
+  tracks: readonly Track[],
+  selectedIds: readonly string[],
+  anchorId: string | null | undefined,
+): TrackSelectionSnapshot {
+  const valid = new Set(tracks.map((track) => track.id))
+  const wanted = new Set(selectedIds.filter((id) => valid.has(id)))
+  const ordered = tracks.filter((track) => wanted.has(track.id)).map((track) => track.id)
+  const fallback = tracks[0]?.id ?? ''
+  const anchor = anchorId && valid.has(anchorId) ? anchorId : (ordered[ordered.length - 1] ?? fallback)
+  const primaryId = valid.has(anchor) ? anchor : fallback
+  return {
+    selectedTrackIds: ordered.length > 0 ? ordered : primaryId ? [primaryId] : [],
+    anchorId: primaryId || null,
+    primaryId,
+  }
+}
+
+/** 工程里是否还存在这个片段（多选删除 / 撤销后对账 selection.clipId 用） */
+function projectHasClip(project: Project, clipId: string | null): boolean {
+  if (!clipId) return false
+  return project.tracks.some((track) => track.clips.some((clip) => clip.id === clipId))
+}
+
 /**
  * 批量写回静音 / 独奏标志位。
  *
@@ -340,6 +420,8 @@ export const useStore = create<Store>((set, get) => ({
 
   view: 'arrangement',
   selectedTrackId: initialProject.tracks[0]?.id ?? '',
+  selectedTrackIds: initialProject.tracks[0]?.id ? [initialProject.tracks[0].id] : [],
+  trackSelectionAnchorId: initialProject.tracks[0]?.id ?? null,
   focusedTrackId: initialProject.tracks[0]?.id ?? '',
   selection: { clipId: initialProject.tracks[0]?.clips[0]?.id ?? null, noteIds: [] },
   snap: 0.25,
@@ -387,11 +469,29 @@ export const useStore = create<Store>((set, get) => ({
     recipe(draft)
     draft.updatedAt = Date.now()
     const recordHistory = opts?.history !== false
+    /*
+     * 多选对账放在 mutate 里：删除轨道 / 撤销 AI 工程 / 普通编辑都会走到这里。
+     * 只过滤不存在的 id 与修正 anchor，不会因为改音量之类的写操作重置选择。
+     */
+    const trackSelection = reconcileTrackSelection(
+      draft.tracks,
+      state.selectedTrackIds.length > 0 ? state.selectedTrackIds : [state.selectedTrackId],
+      state.trackSelectionAnchorId,
+    )
+    const keepClip = Boolean(state.selection.clipId && projectHasClip(draft, state.selection.clipId))
+    const primaryTrack = draft.tracks.find((track) => track.id === trackSelection.primaryId)
     set({
       project: draft,
       past: recordHistory ? [...state.past, before].slice(-MAX_HISTORY) : state.past,
       future: recordHistory ? [] : state.future,
       saveStatus: recordHistory ? 'dirty' : state.saveStatus,
+      selectedTrackIds: trackSelection.selectedTrackIds,
+      trackSelectionAnchorId: trackSelection.anchorId,
+      selectedTrackId: trackSelection.primaryId,
+      focusedTrackId: draft.tracks.some((track) => track.id === state.focusedTrackId)
+        ? state.focusedTrackId
+        : trackSelection.primaryId,
+      selection: keepClip ? state.selection : { clipId: primaryTrack?.clips[0]?.id ?? null, noteIds: [] },
     })
   },
 
@@ -404,14 +504,22 @@ export const useStore = create<Store>((set, get) => ({
     const { past, project, future } = get()
     if (past.length === 0) return
     const previous = past[past.length - 1]
+    const trackSelection = reconcileTrackSelection(previous.tracks, get().selectedTrackIds, get().trackSelectionAnchorId)
+    const primaryTrack = previous.tracks.find((track) => track.id === trackSelection.primaryId)
     set({
       project: previous,
       past: past.slice(0, -1),
       future: [project, ...future].slice(0, MAX_HISTORY),
       saveStatus: 'dirty',
-      selectedTrackId: previous.tracks.some((t) => t.id === get().selectedTrackId)
-        ? get().selectedTrackId
-        : (previous.tracks[0]?.id ?? ''),
+      selectedTrackIds: trackSelection.selectedTrackIds,
+      trackSelectionAnchorId: trackSelection.anchorId,
+      selectedTrackId: trackSelection.primaryId,
+      focusedTrackId: previous.tracks.some((track) => track.id === get().focusedTrackId)
+        ? get().focusedTrackId
+        : trackSelection.primaryId,
+      selection: projectHasClip(previous, get().selection.clipId)
+        ? get().selection
+        : { clipId: primaryTrack?.clips[0]?.id ?? null, noteIds: [] },
     })
   },
 
@@ -419,11 +527,22 @@ export const useStore = create<Store>((set, get) => ({
     const { past, project, future } = get()
     if (future.length === 0) return
     const next = future[0]
+    const trackSelection = reconcileTrackSelection(next.tracks, get().selectedTrackIds, get().trackSelectionAnchorId)
+    const primaryTrack = next.tracks.find((track) => track.id === trackSelection.primaryId)
     set({
       project: next,
       past: [...past, project].slice(-MAX_HISTORY),
       future: future.slice(1),
       saveStatus: 'dirty',
+      selectedTrackIds: trackSelection.selectedTrackIds,
+      trackSelectionAnchorId: trackSelection.anchorId,
+      selectedTrackId: trackSelection.primaryId,
+      focusedTrackId: next.tracks.some((track) => track.id === get().focusedTrackId)
+        ? get().focusedTrackId
+        : trackSelection.primaryId,
+      selection: projectHasClip(next, get().selection.clipId)
+        ? get().selection
+        : { clipId: primaryTrack?.clips[0]?.id ?? null, noteIds: [] },
     })
   },
 
@@ -431,12 +550,15 @@ export const useStore = create<Store>((set, get) => ({
   canRedo: () => get().future.length > 0,
 
   setProject: (project, opts) => {
+    const firstId = project.tracks[0]?.id ?? ''
     set({
       project,
       past: opts?.resetHistory === false ? get().past : [],
       future: [],
-      selectedTrackId: project.tracks[0]?.id ?? '',
-      focusedTrackId: project.tracks[0]?.id ?? '',
+      selectedTrackId: firstId,
+      selectedTrackIds: firstId ? [firstId] : [],
+      trackSelectionAnchorId: firstId || null,
+      focusedTrackId: firstId,
       selection: { clipId: project.tracks[0]?.clips[0]?.id ?? null, noteIds: [] },
       playhead: 0,
       saveStatus: opts?.dirty === false ? 'saved' : 'dirty',
@@ -467,19 +589,12 @@ export const useStore = create<Store>((set, get) => ({
     get().mutate((draft) => {
       draft.tracks.push(track)
     })
-    set({ selectedTrackId: track.id, focusedTrackId: track.id })
+    set({ selectedTrackId: track.id, selectedTrackIds: [track.id], trackSelectionAnchorId: track.id, focusedTrackId: track.id })
     return track.id
   },
 
   removeTrack: (trackId) => {
-    get().mutate((draft) => {
-      draft.tracks = draft.tracks.filter((t) => t.id !== trackId)
-    })
-    const state = get()
-    if (state.selectedTrackId === trackId) {
-      const next = state.project.tracks[0]?.id ?? ''
-      set({ selectedTrackId: next, focusedTrackId: next, selection: { clipId: null, noteIds: [] } })
-    }
+    get().removeTracks([trackId])
   },
 
   updateTrack: (trackId, partial, opts) => {
@@ -489,20 +604,44 @@ export const useStore = create<Store>((set, get) => ({
     }, opts)
   },
 
-  duplicateTrack: (trackId) => {
-    const source = findTrack(get().project, trackId)
-    if (!source) return
-    const copy = clone(source)
-    copy.id = newId('t')
-    copy.name = `${source.name} 2`
-    copy.clips = copy.clips.map((c) => ({ ...c, id: newId('c'), trackId: copy.id, notes: c.notes.map((n) => ({ ...n, id: newId('n') })) }))
-    /* 音频片段同样要换 id + 指向新轨道（否则会和原轨道共用 Player，播放时互相打断） */
-    copy.audioClips = (copy.audioClips ?? []).map((clip) => ({ ...clip, id: newId('ac'), trackId: copy.id }))
+  /*
+   * 批量复制轨道。
+   *
+   * 每个副本紧跟在源轨之后（多条选中时保持相对顺序），id / 片段 id / 音频 take 全部重建；
+   * 音频片段必须换 trackId —— 否则副本会和源轨共用 Player，播放时互相打断。
+   * 一次 mutate = 一个撤销点；完成后选中新产生的副本。
+   */
+  duplicateTracks: (trackIds) => {
+    const wanted = new Set(trackIds)
+    const sources = get().project.tracks.filter((track) => wanted.has(track.id))
+    if (sources.length === 0) return []
+    const newIds: string[] = []
     get().mutate((draft) => {
-      const index = draft.tracks.findIndex((t) => t.id === trackId)
-      draft.tracks.splice(index + 1, 0, copy)
+      let offset = 0
+      for (const source of sources) {
+        const index = draft.tracks.findIndex((track) => track.id === source.id)
+        if (index < 0) continue
+        const copy = clone(source)
+        copy.id = newId('t')
+        copy.name = `${source.name} 2`
+        copy.clips = copy.clips.map((clip) => ({
+          ...clip,
+          id: newId('c'),
+          trackId: copy.id,
+          notes: clip.notes.map((note) => ({ ...note, id: newId('n') })),
+        }))
+        copy.audioClips = (copy.audioClips ?? []).map((clip) => ({ ...clip, id: newId('ac'), trackId: copy.id }))
+        draft.tracks.splice(index + 1 + offset, 0, copy)
+        offset += 1
+        newIds.push(copy.id)
+      }
     })
-    set({ selectedTrackId: copy.id, focusedTrackId: copy.id })
+    if (newIds.length > 0) get().selectTracks(newIds, newIds[newIds.length - 1])
+    return newIds
+  },
+
+  duplicateTrack: (trackId) => {
+    get().duplicateTracks([trackId])
   },
 
   moveTrack: (trackId, direction) => {
@@ -580,6 +719,37 @@ export const useStore = create<Store>((set, get) => ({
     }
     if (Boolean(track.solo) === solo) return
     applyFlagPatches(state.project, [{ id: trackId, solo }])
+  },
+
+  /* 批量删除：一次 mutate（一个撤销点），多选对账由 mutate 统一处理 */
+  removeTracks: (trackIds) => {
+    const ids = new Set(trackIds.filter(Boolean))
+    if (ids.size === 0) return
+    get().mutate((draft) => {
+      draft.tracks = draft.tracks.filter((track) => !ids.has(track.id))
+    })
+  },
+
+  /* 批量静音：多选轨道头点 M 时一次写入，只产生一个撤销点 */
+  setTracksMuted: (trackIds, muted) => {
+    const state = get()
+    const ids = new Set(trackIds)
+    const patches: FlagPatch[] = state.project.tracks
+      .filter((track) => ids.has(track.id) && Boolean(track.mute) !== muted)
+      .map((track) => ({ id: track.id, mute: muted }))
+    if (patches.length === 0) return
+    applyFlagPatches(state.project, patches)
+  },
+
+  /* 批量独奏：不改写其它轨道的 mute（与单轨 S、总控 S 同一套派生语义） */
+  setTracksSolo: (trackIds, solo) => {
+    const state = get()
+    const ids = new Set(trackIds)
+    const patches: FlagPatch[] = state.project.tracks
+      .filter((track) => ids.has(track.id) && Boolean(track.solo) !== solo)
+      .map((track) => ({ id: track.id, solo }))
+    if (patches.length === 0) return
+    applyFlagPatches(state.project, patches)
   },
 
   /* 总控 M：一次切换全工程的显式静音（已全部静音 → 全部取消） */
@@ -878,15 +1048,105 @@ export const useStore = create<Store>((set, get) => ({
 
   /* ---------------- 选择 / 视图 ---------------- */
   setView: (view) => set({ view }),
-  selectTrack: (trackId) => {
-    const track = findTrack(get().project, trackId)
+
+  /*
+   * 轨道选择：所有手势都收敛到这一个 action。
+   *
+   * 多选集合与「主轨」分开维护（见 AppState.selectedTrackIds 注释），
+   * 关键约束：
+   * - `selectedTrackId` 恒等于 anchor 且 ∈ `selectedTrackIds`；
+   * - 片段焦点只在 replace（或显式允许时）跟着换，避免批量框选把钢琴卷帘的编辑对象抖来抖去；
+   * - 集合始终按工程顺序排列（Shift 连选 / 框选区间天然保序）。
+   */
+  selectTrack: (trackId, opts) => {
+    const state = get()
+    const mode = opts?.mode ?? 'replace'
+    const tracks = state.project.tracks
+    const target = tracks.find((track) => track.id === trackId)
+    if (!target) return
+    const anchor = state.trackSelectionAnchorId ?? state.selectedTrackId
+    let nextIds: string[]
+    let nextAnchor = trackId
+    if (mode === 'toggle') {
+      const exists = state.selectedTrackIds.includes(trackId)
+      nextIds = exists
+        ? state.selectedTrackIds.filter((id) => id !== trackId)
+        : [...state.selectedTrackIds, trackId]
+      nextAnchor = exists ? (nextIds[nextIds.length - 1] ?? state.selectedTrackId) : trackId
+    } else if (mode === 'range') {
+      const anchorId = tracks.some((track) => track.id === anchor) ? anchor : trackId
+      const from = tracks.findIndex((track) => track.id === anchorId)
+      const to = tracks.findIndex((track) => track.id === trackId)
+      const [start, end] = from <= to ? [from, to] : [to, from]
+      nextIds = tracks.slice(start, end + 1).map((track) => track.id)
+      nextAnchor = anchorId
+    } else {
+      nextIds = [trackId]
+      nextAnchor = trackId
+    }
+    const reconciled = reconcileTrackSelection(tracks, nextIds, nextAnchor)
+    const primaryTrack = tracks.find((track) => track.id === reconciled.primaryId)
+    const keepClip =
+      opts?.keepClip === true ||
+      (mode !== 'replace' && Boolean(state.selection.clipId && projectHasClip(state.project, state.selection.clipId)))
     set({
-      selectedTrackId: trackId,
-      focusedTrackId: trackId,
-      selection: { clipId: track?.clips[0]?.id ?? null, noteIds: [] },
+      selectedTrackIds: reconciled.selectedTrackIds,
+      trackSelectionAnchorId: reconciled.anchorId,
+      selectedTrackId: reconciled.primaryId,
+      focusedTrackId: reconciled.primaryId,
+      selection: keepClip ? state.selection : { clipId: primaryTrack?.clips[0]?.id ?? null, noteIds: [] },
     })
   },
-  selectClip: (trackId, clipId) => set({ selectedTrackId: trackId, focusedTrackId: trackId, selection: { clipId, noteIds: [] } }),
+
+  selectTracks: (trackIds, anchorId) => {
+    const state = get()
+    const reconciled = reconcileTrackSelection(
+      state.project.tracks,
+      trackIds,
+      anchorId ?? trackIds[trackIds.length - 1] ?? state.trackSelectionAnchorId,
+    )
+    const primaryTrack = state.project.tracks.find((track) => track.id === reconciled.primaryId)
+    set({
+      selectedTrackIds: reconciled.selectedTrackIds,
+      trackSelectionAnchorId: reconciled.anchorId,
+      selectedTrackId: reconciled.primaryId,
+      focusedTrackId: reconciled.primaryId,
+      selection: { clipId: primaryTrack?.clips[0]?.id ?? null, noteIds: [] },
+    })
+  },
+
+  selectAllTracks: () => {
+    const state = get()
+    const ids = state.project.tracks.map((track) => track.id)
+    get().selectTracks(ids, state.selectedTrackId || ids[0] || null)
+  },
+
+  clearTrackSelection: () => {
+    const state = get()
+    const primary = state.selectedTrackId || state.project.tracks[0]?.id || ''
+    const reconciled = reconcileTrackSelection(state.project.tracks, primary ? [primary] : [], primary || null)
+    set({
+      selectedTrackIds: reconciled.selectedTrackIds,
+      trackSelectionAnchorId: reconciled.anchorId,
+      selectedTrackId: reconciled.primaryId,
+      focusedTrackId: reconciled.primaryId,
+    })
+  },
+
+  selectClip: (trackId, clipId) => {
+    const state = get()
+    /* 点片段不破坏多选：点的是已选中的轨就保留集合，否则收敛为单轨 */
+    const ids = state.selectedTrackIds.includes(trackId) ? state.selectedTrackIds : [trackId]
+    const reconciled = reconcileTrackSelection(state.project.tracks, ids, trackId)
+    set({
+      selectedTrackIds: reconciled.selectedTrackIds,
+      trackSelectionAnchorId: trackId,
+      selectedTrackId: trackId,
+      focusedTrackId: trackId,
+      selection: { clipId, noteIds: [] },
+    })
+  },
+
   /* 只同步焦点 / 选中轨道（录入预备切换轨道用）。
    * 若当前选中的片段不属于目标轨道，就切到目标轨道自己的第一个未静音片段——
    * 保证「预备了哪条轨」与「钢琴卷帘显示哪条轨」一致，不会再出现录 A 轨却盯着 B 轨片段。 */
@@ -897,7 +1157,14 @@ export const useStore = create<Store>((set, get) => ({
       const keepsSelection = Boolean(
         selectedClipId && target?.clips.some((clip) => clip.id === selectedClipId),
       )
+      /* 预备录入是「聚焦」语义：把目标并入多选集合（不打断已有批量选择） */
+      const ids = state.selectedTrackIds.includes(trackId)
+        ? state.selectedTrackIds
+        : [...state.selectedTrackIds, trackId]
+      const reconciled = reconcileTrackSelection(state.project.tracks, ids, trackId)
       return {
+        selectedTrackIds: reconciled.selectedTrackIds,
+        trackSelectionAnchorId: trackId,
         selectedTrackId: trackId,
         focusedTrackId: trackId,
         selection: {
@@ -919,7 +1186,22 @@ export const useStore = create<Store>((set, get) => ({
         },
       }
     }),
-  clearSelection: () => set((state) => ({ selection: { ...state.selection, noteIds: [] } })),
+  clearSelection: () =>
+    set((state) => {
+      /* Esc：清掉音符选择，并把多选收敛回主轨（DAW 里 Esc 是「退出当前选择」的通用语义） */
+      const reconciled = reconcileTrackSelection(
+        state.project.tracks,
+        state.selectedTrackId ? [state.selectedTrackId] : [],
+        state.selectedTrackId || null,
+      )
+      return {
+        selection: { ...state.selection, noteIds: [] },
+        selectedTrackIds: reconciled.selectedTrackIds,
+        trackSelectionAnchorId: reconciled.anchorId,
+        selectedTrackId: reconciled.primaryId,
+        focusedTrackId: reconciled.primaryId,
+      }
+    }),
   setSnap: (snap) => set({ snap }),
   setZoom: (zoomX, zoomY) => set((state) => ({ zoomX: zoomX ?? state.zoomX, zoomY: zoomY ?? state.zoomY })),
   setScrollBeat: (beat) => set({ scrollBeat: Math.max(0, beat) }),
@@ -1014,6 +1296,7 @@ export const useStore = create<Store>((set, get) => ({
     const state = get()
     const before = state.aiUndoSnapshot ?? clone(state.project)
     project.updatedAt = Date.now()
+    const trackSelection = reconcileTrackSelection(project.tracks, state.selectedTrackIds, state.trackSelectionAnchorId)
     set({
       project,
       past: [...state.past, clone(state.project)].slice(-MAX_HISTORY),
@@ -1022,14 +1305,15 @@ export const useStore = create<Store>((set, get) => ({
       saveStatus: 'dirty',
       selection: {
         clipId:
-          project.tracks.find((t) => t.id === state.selectedTrackId)?.clips[0]?.id ??
+          project.tracks.find((t) => t.id === trackSelection.primaryId)?.clips[0]?.id ??
           project.tracks[0]?.clips[0]?.id ??
           null,
         noteIds: [],
       },
-      selectedTrackId: project.tracks.some((t) => t.id === state.selectedTrackId)
-        ? state.selectedTrackId
-        : (project.tracks[0]?.id ?? ''),
+      selectedTrackIds: trackSelection.selectedTrackIds,
+      trackSelectionAnchorId: trackSelection.anchorId,
+      selectedTrackId: trackSelection.primaryId,
+      focusedTrackId: trackSelection.primaryId,
     })
     get().pushToast('success', `AI 已更新工程：${label}`)
   },
@@ -1037,7 +1321,16 @@ export const useStore = create<Store>((set, get) => ({
   undoAiChanges: () => {
     const snapshot = get().aiUndoSnapshot
     if (!snapshot) return
-    set({ project: snapshot, aiUndoSnapshot: null, saveStatus: 'dirty' })
+    const trackSelection = reconcileTrackSelection(snapshot.tracks, get().selectedTrackIds, get().trackSelectionAnchorId)
+    set({
+      project: snapshot,
+      aiUndoSnapshot: null,
+      saveStatus: 'dirty',
+      selectedTrackIds: trackSelection.selectedTrackIds,
+      trackSelectionAnchorId: trackSelection.anchorId,
+      selectedTrackId: trackSelection.primaryId,
+      focusedTrackId: trackSelection.primaryId,
+    })
     get().pushToast('info', '已撤销 AI 的全部改动')
   },
 

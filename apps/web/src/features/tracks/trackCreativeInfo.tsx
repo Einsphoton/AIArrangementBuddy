@@ -39,8 +39,10 @@ export interface TrackCreativeInfo {
   instrumentName: string
   emotionName: string
   smart: TrackCreativeSmartInfo | null
-  /** 轨道头第三行的一行摘要 */
+  /** 轨道头第三行的一行摘要（项目级信息已上移到总控行，这里只留轨道自身信息） */
   inlineSummary: string
+  /** 轨道头第三行精简版：段落 + 智能片段类型（默认行高下也不拥挤） */
+  trackSummary: string
   /** 悬停/无障碍用的完整摘要 */
   detailTitle: string
 }
@@ -108,6 +110,15 @@ export function buildTrackCreativeInfo(project: Project, track: Track): TrackCre
     .filter(Boolean)
     .join(' · ')
 
+  /*
+   * 轨道头第三行只显示「这条轨道自己」的信息：
+   * 风格 / 调号 / BPM 是整个工程共用的，在每一行重复一遍就是纯噪声（挤占名称宽度），
+   * 现在统一上移到轨道面板总控行；这里保留段落与智能片段类型，信息量小但每行都不同。
+   */
+  const trackSummary = [section?.name ?? '未划分段落', smartInfo ? `智能${smartInfo.kindName}` : null]
+    .filter(Boolean)
+    .join(' · ')
+
   const smartSummary = smartInfo
     ? `｜智能片段：${smartInfo.kindName} ${smartInfo.bars} 小节 · 密度 ${pct(smartInfo.params.density)} · 复杂度 ${pct(
         smartInfo.params.complexity,
@@ -132,6 +143,7 @@ export function buildTrackCreativeInfo(project: Project, track: Track): TrackCre
     emotionName: emotion.name,
     smart: smartInfo,
     inlineSummary,
+    trackSummary,
     detailTitle,
   }
 }

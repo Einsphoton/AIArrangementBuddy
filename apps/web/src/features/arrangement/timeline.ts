@@ -22,8 +22,14 @@ export const LOOP_STRIP_HEIGHT = 12
 export const SECTION_STRIP_HEIGHT = 18
 export const BAR_RULER_HEIGHT = 24
 
-/** 轨道行高基线（TrackPanel 与编曲视图共用同一公式，保证严格对齐） */
-export const TRACK_ROW_BASE = 56
+/**
+ * 轨道行高基线（TrackPanel 与编曲视图共用同一公式，保证严格对齐）。
+ *
+ * 56 → 60：轨道头现在是「名称行 + 乐器/音量行 + 创作信息行」三层信息，
+ * 56px 时三行 + 竖向 R/M/S 控制轨会互相压住；60px 是能同时容纳三层的最小高度，
+ * 也与 Logic（~64）/ Cubase（~80）的默认轨道头尺度同一量级。
+ */
+export const TRACK_ROW_BASE = 60
 export const TRACK_ROW_MIN = 38
 export const TRACK_ROW_MAX = 104
 

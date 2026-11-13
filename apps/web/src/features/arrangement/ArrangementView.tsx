@@ -289,7 +289,11 @@ function Ruler({
   const showBeatTicks = pxPerBeat >= 22
 
   return (
-    <div className="sticky top-0 z-20 select-none border-b border-line-strong bg-[#0b0e14]" style={{ height: RULER_HEIGHT }}>
+    <div
+      data-arrangement-ruler
+      className="sticky top-0 z-20 select-none border-b border-line-strong bg-[#0b0e14]"
+      style={{ height: RULER_HEIGHT }}
+    >
       {/* 循环条 */}
       <div
         ref={loopStripRef}
@@ -526,6 +530,8 @@ export function ArrangementView() {
   const zoomY = useStore((s) => s.zoomY)
   const selection = useStore((s) => s.selection)
   const selectedTrackId = useStore((s) => s.selectedTrackId)
+  /* 多选集合：车道高亮 / 框选联动（selectedTrackId 是其中的主轨 = anchor） */
+  const selectedTrackIds = useStore((s) => s.selectedTrackIds)
   const setView = useStore((s) => s.setView)
   const setZoom = useStore((s) => s.setZoom)
   const setSmartClipTarget = useStore((s) => s.setSmartClipTarget)
@@ -544,6 +550,16 @@ export function ArrangementView() {
   const tooltipRef = useRef<HTMLDivElement>(null)
   const drag = usePointerDrag()
   const recentActionsRef = useRef<Record<string, number>>({})
+  /** 框选期间的自动滚动 rAF 取消函数（卸载 / 新手势 / 中断时停掉，避免一直滚） */
+  const marqueeAutoScrollRef = useRef<(() => void) | null>(null)
+
+  useEffect(
+    () => () => {
+      marqueeAutoScrollRef.current?.()
+      marqueeAutoScrollRef.current = null
+    },
+    [],
+  )
 
   const [selectedIds, setSelectedIds] = useState<string[]>(() => (selection.clipId ? [selection.clipId] : []))
   const selectedIdsRef = useRef(selectedIds)
@@ -626,6 +642,23 @@ export function ArrangementView() {
         top += heights[index]
       }
       return -1
+    },
+    [heightsNow],
+  )
+
+  /** 内容层局部坐标的纵向区间 → 覆盖到的车道行（按工程顺序；用于框选多选轨道） */
+  const trackIdsInRange = useCallback(
+    (top: number, bottom: number): string[] => {
+      const state = useStore.getState()
+      const heights = heightsNow()
+      const ids: string[] = []
+      let rowTop = RULER_HEIGHT
+      state.project.tracks.forEach((track, index) => {
+        const rowBottom = rowTop + (heights[index] ?? 0)
+        if (rowBottom >= top && rowTop <= bottom) ids.push(track.id)
+        rowTop = rowBottom
+      })
+      return ids
     },
     [heightsNow],
   )
@@ -1272,35 +1305,143 @@ export function ArrangementView() {
 
   /* ---------- 空白处：框选 / 单击定位播放头 ---------- */
 
-  const onRowsPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+  /**
+   * 内容层指针按下（挂在 `contentRef` 上，而不是轨道行容器）。
+   *
+   * 为什么上移：用户反馈「起点一旦落在轨道外（最后一行以下 / 底部留白）就框不了」。
+   * 行容器只覆盖真实轨道行 + 底部 spacer；内容层还覆盖「行之外」的空白，因此任何空白处
+   * 都能起拖。片段 / 音频片段 / 按钮面板各自 stopPropagation 或在这里被过滤；
+   * 标尺区有自己的一套手势（循环 / 段落 / 播放头），用 [data-arrangement-ruler] 跳过。
+   */
+  const onContentPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
     const target = event.target as HTMLElement
+    if (target.closest('[data-arrangement-ruler]')) return
     if (target.closest('[data-clip]') || target.closest('[data-audio-clip]')) return
-    if (target.closest('button, select, input, textarea, a')) return
+    if (target.closest('button, select, input, textarea, a, [role="slider"], [draggable="true"]')) return
     const content = contentRef.current
     if (!content) return
     const rect = content.getBoundingClientRect()
     const startX = event.clientX - rect.left
     const startY = event.clientY - rect.top
+    /* 修饰键在按下瞬间快照：拖动途中松开 Shift 不应该让语义漂移 */
+    const shiftAtDown = event.shiftKey
+    const stateAtDown = useStore.getState()
+    const baseTrackIds = stateAtDown.selectedTrackIds.slice()
+    /* 片段选择也快照：拖动中的轨道实时多选会重置 selection.clipId（进而影响本地片段选择），
+       不能在松开时拿它当 Shift 并集的基底，否则会把用户原先框选的片段吞掉 */
+    const baseClipIds = selectedIdsRef.current.slice()
+    const baseAudioIds = selectedAudioIdsRef.current.slice()
     let moved = false
+    let lastTrackKey = ''
+
+    /* 最近一次指针位置（client 坐标）：自动滚动时指针不动，框选矩形也要跟着长 */
+    const pointer = { x: event.clientX, y: event.clientY }
+    let rafId: number | null = null
+
+    const contentPoint = () => {
+      const current = content.getBoundingClientRect()
+      return { x: pointer.x - current.left, y: pointer.y - current.top }
+    }
+
+    /** 更新框选矩形，并把覆盖到的车道行实时写进多选（Shift = 与按下前的选择并集） */
+    const applyMarquee = () => {
+      const point = contentPoint()
+      setMarquee({ x1: startX, y1: startY, x2: point.x, y2: point.y })
+      const state = useStore.getState()
+      const top = Math.min(startY, point.y)
+      const bottom = Math.max(startY, point.y)
+      const hitIds = trackIdsInRange(top, bottom)
+      const orderedIds = state.project.tracks.map((track) => track.id)
+      const merged = shiftAtDown
+        ? orderedIds.filter((id) => baseTrackIds.includes(id) || hitIds.includes(id))
+        : hitIds
+      const key = merged.join('|')
+      if (key === lastTrackKey) return
+      lastTrackKey = key
+      /* 只在矩形没覆盖任何轨道时不动选择：允许用户在轨道下方空白里「空拖」而不丢当前选择 */
+      if (merged.length === 0) return
+      state.selectTracks(merged)
+    }
+
+    const stopAutoScroll = () => {
+      if (rafId != null) cancelAnimationFrame(rafId)
+      rafId = null
+    }
+
+    /*
+     * 框选自动滚动：指针贴近视口四边时按帧滚动；滚动后重新计算矩形与轨道命中。
+     * 已滚到边界（这一帧没变化）就停，避免空转。
+     */
+    const autoScrollTick = () => {
+      rafId = null
+      const scroller = scrollRef.current
+      if (!scroller) return
+      const viewport = scroller.getBoundingClientRect()
+      const EDGE = 28
+      const SPEED = 16
+      let dx = 0
+      let dy = 0
+      if (pointer.y < viewport.top + EDGE) dy = -SPEED
+      else if (pointer.y > viewport.bottom - EDGE) dy = SPEED
+      if (pointer.x < viewport.left + EDGE) dx = -SPEED
+      else if (pointer.x > viewport.right - EDGE) dx = SPEED
+      if (dx === 0 && dy === 0) return
+      const beforeLeft = scroller.scrollLeft
+      const beforeTop = scroller.scrollTop
+      scroller.scrollLeft = beforeLeft + dx
+      scroller.scrollTop = beforeTop + dy
+      if (scroller.scrollLeft === beforeLeft && scroller.scrollTop === beforeTop) return
+      applyMarquee()
+      rafId = requestAnimationFrame(autoScrollTick)
+    }
+
+    const ensureAutoScroll = () => {
+      if (rafId != null) return
+      rafId = requestAnimationFrame(autoScrollTick)
+    }
+
+    /* 新手势开始时先停掉上一轮可能残留的自动滚动；ref 里只存「停滚动」，卸载时不会 setState */
+    marqueeAutoScrollRef.current?.()
+    marqueeAutoScrollRef.current = stopAutoScroll
 
     drag(event, {
       onMove: (moveEvent) => {
-        const x = moveEvent.clientX - rect.left
-        const y = moveEvent.clientY - rect.top
-        if (!moved && Math.hypot(x - startX, y - startY) > 4) moved = true
-        if (moved) setMarquee({ x1: startX, y1: startY, x2: x, y2: y })
+        pointer.x = moveEvent.clientX
+        pointer.y = moveEvent.clientY
+        const point = contentPoint()
+        if (!moved && Math.hypot(point.x - startX, point.y - startY) > 4) moved = true
+        if (!moved) return
+        applyMarquee()
+        ensureAutoScroll()
+      },
+      onCancel: () => {
+        marqueeAutoScrollRef.current?.()
+        marqueeAutoScrollRef.current = null
+        setMarquee(null)
       },
       onUp: (upEvent) => {
+        stopAutoScroll()
+        marqueeAutoScrollRef.current = null
         setMarquee(null)
+        pointer.x = upEvent.clientX
+        pointer.y = upEvent.clientY
+        const point = contentPoint()
+        const x2 = point.x
+        const y2 = point.y
         const state = useStore.getState()
-        const currentRect = content.getBoundingClientRect()
-        const x2 = upEvent.clientX - currentRect.left
-        const y2 = upEvent.clientY - currentRect.top
         const currentPx = arrangementPxPerBeat(state.zoomX)
 
         if (!moved) {
-          /* 单击时间轴空白 = 定位播放头；同时选中该行轨道 */
+          /* 单击时间轴空白：修饰键 = 轨道多选（不移动播放头），普通 = 定位播放头 + 选中该轨 */
+          const rowIndex = rowIndexAtY(y2)
+          const track = rowIndex >= 0 ? state.project.tracks[rowIndex] : undefined
+          if (shiftAtDown || upEvent.metaKey || upEvent.ctrlKey) {
+            if (track) {
+              state.selectTrack(track.id, { mode: shiftAtDown ? 'range' : 'toggle', keepClip: true })
+            }
+            return
+          }
           const beat = Math.max(0, x2 / Math.max(1, currentPx))
           state.setPlayhead(beat)
           if (state.isPlaying) {
@@ -1310,8 +1451,6 @@ export function ArrangementView() {
               /* ignore */
             }
           }
-          const rowIndex = rowIndexAtY(y2)
-          const track = rowIndex >= 0 ? state.project.tracks[rowIndex] : undefined
           if (track) {
             state.selectTrack(track.id)
             lastStoreClipRef.current = track.clips[0]?.id ?? null
@@ -1328,10 +1467,12 @@ export function ArrangementView() {
         const bottom = Math.max(startY, y2)
         const hits: string[] = []
         const audioHits: string[] = []
+        const coveredTrackIds: string[] = []
         let rowTop = RULER_HEIGHT
         state.project.tracks.forEach((track, index) => {
           const rowBottom = rowTop + (heights[index] ?? 0)
           if (rowBottom >= top && rowTop <= bottom) {
+            coveredTrackIds.push(track.id)
             for (const clip of track.clips) {
               const clipLeft = clip.startBeat * currentPx
               const clipRight = clipLeft + clip.lengthBeats * currentPx
@@ -1347,15 +1488,33 @@ export function ArrangementView() {
           rowTop = rowBottom
         })
 
+        /*
+         * 先落轨道多选（框选覆盖到的车道行），再落片段焦点：
+         * selectTracks 会把片段焦点重置为主轨首片段，反过来调会把集合顶掉。
+         */
+        if (coveredTrackIds.length > 0) {
+          const trackAdditive = shiftAtDown || upEvent.shiftKey
+          const orderedIds = state.project.tracks.map((track) => track.id)
+          const trackIds = trackAdditive
+            ? orderedIds.filter((id) => baseTrackIds.includes(id) || coveredTrackIds.includes(id))
+            : coveredTrackIds
+          state.selectTracks(trackIds)
+        }
+
         const additive = upEvent.shiftKey
-        const base = additive ? selectedIdsRef.current : []
+        const base = additive ? baseClipIds : []
         const merged = additive ? [...base.filter((id) => !hits.includes(id)), ...hits] : hits
         setSelectedIds(merged)
-        setSelectedAudioIds(additive ? [...selectedAudioIdsRef.current, ...audioHits] : audioHits)
+        setSelectedAudioIds(additive ? [...baseAudioIds, ...audioHits] : audioHits)
         const first = locateClips(hits, state.project)[0]
         if (first) {
           lastStoreClipRef.current = first.clipId
           state.selectClip(first.trackId, first.clipId)
+        } else if (coveredTrackIds.length > 0) {
+          /* 只框到轨道、没框到片段：同步 lastStoreClipRef，避免 selection.clipId 的同步 effect
+             把「主轨首片段」重新点亮（框选语义应该只选中轨道） */
+          lastStoreClipRef.current = state.selection.clipId
+          setSelectedIds([])
         }
         if (hits.length === 0 && !additive) setSelectedIds([])
       },
@@ -1529,7 +1688,12 @@ export function ArrangementView() {
           style={{ overscrollBehavior: 'contain' }}
           onScroll={handleScroll}
         >
-          <div ref={contentRef} className="relative" style={{ width: contentWidth, minHeight: '100%' }}>
+          <div
+            ref={contentRef}
+            className="relative"
+            style={{ width: contentWidth, minHeight: '100%' }}
+            onPointerDown={onContentPointerDown}
+          >
             {/* 网格 */}
             <div className="pointer-events-none absolute inset-0" style={gridStyle} />
 
@@ -1544,7 +1708,7 @@ export function ArrangementView() {
             />
 
             {/* 轨道行 */}
-            <div onPointerDown={onRowsPointerDown} onDoubleClick={onRowsDoubleClick} onContextMenu={onRowsContextMenu}>
+            <div onDoubleClick={onRowsDoubleClick} onContextMenu={onRowsContextMenu}>
               {project.tracks.length === 0 && generationSlots.length === 0 && (
                 <div className="flex h-[260px] flex-col items-center justify-center gap-3 px-6 text-center">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-line-strong bg-surface-2 text-ink-3">
@@ -1567,16 +1731,31 @@ export function ArrangementView() {
                 const color = trackColor(track.color)
                 const rowHeight = rowHeights[index] ?? fallbackRowHeight
                 const mixState = audibility.get(track.id) ?? 'audible'
+                /* 多选：集合里的行都 tint，anchor（selectedTrackId）是主轨、色条更亮 */
+                const laneSelected = selectedTrackIds.includes(track.id)
+                const lanePrimary = laneSelected && track.id === selectedTrackId
                 return (
                   <div
                     key={track.id}
-                    data-track-row
+                    data-track-row="lane"
                     data-track-index={index}
                     data-track-id={track.id}
+                    data-track-selected={laneSelected ? 'true' : 'false'}
+                    data-track-primary={lanePrimary ? 'true' : 'false'}
                     data-mix-state={mixState}
                     className={cn(
                       'relative border-b border-line/60 transition-[opacity,filter,background-color] duration-150',
-                      track.id === selectedTrackId ? 'bg-white/[0.022]' : index % 2 === 1 ? 'bg-white/[0.008]' : '',
+                      /*
+                       * 与左侧 TrackRow 用同一套视觉语言：
+                       * 主轨更亮 + accent 内描边；多选里的其它轨 tint；未选中保持斑马纹。
+                       */
+                      laneSelected
+                        ? lanePrimary
+                          ? 'bg-surface-3/55 shadow-[inset_0_0_0_1px_rgba(240,180,41,0.16)]'
+                          : 'bg-surface-2/70'
+                        : index % 2 === 1
+                          ? 'bg-white/[0.008]'
+                          : '',
                       toolMode === 'split' && 'hover:bg-accent/[0.035]',
                       /*
                        * 不可听的车道必须一眼可辨（否则 solo 只在混音器可见 = 「以为音频坏了」）：
@@ -1595,6 +1774,12 @@ export function ArrangementView() {
                           : undefined
                     }
                   >
+                    {laneSelected && (
+                      <span
+                        className="pointer-events-none absolute inset-y-0 left-0 z-[1] w-[2px]"
+                        style={{ background: lanePrimary ? color : withAlpha(color, 0.5) }}
+                      />
+                    )}
                     {track.clips.length === 0 && (track.audioClips?.length ?? 0) === 0 && (
                       <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center gap-1.5 text-[10.5px] text-ink-4/70">
                         <span className="h-[3px] w-[3px] rounded-full" style={{ background: withAlpha(color, 0.5) }} />
@@ -1684,6 +1869,7 @@ export function ArrangementView() {
             {/* 框选 */}
             {marquee && (
               <div
+                data-track-marquee
                 className="pointer-events-none absolute z-30 rounded-[2px] border border-accent/70 bg-accent/10"
                 style={{
                   left: Math.min(marquee.x1, marquee.x2),

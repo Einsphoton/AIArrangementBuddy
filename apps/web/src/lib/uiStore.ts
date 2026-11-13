@@ -25,6 +25,8 @@ export interface UiPrefsState {
   toolMode: EditorTool
   /** 每条轨道的自定义高度 */
   trackHeights: TrackHeights
+  /** 轨道面板宽度（px）：轨道头信息密度高，允许用户按屏幕/习惯加宽 */
+  trackPanelWidth: number
   /** 已预备录入的轨道（轨道头 R 按钮）。
    *
    * 这是「MIDI 录入写进哪条轨」的**第一优先级**（见 lib/trackRules.resolveRecordTrackId）：
@@ -52,6 +54,7 @@ export interface UiPrefsActions {
   setToolMode: (tool: EditorTool) => void
   setTrackHeight: (trackId: string, height: number | null) => void
   resetTrackHeights: () => void
+  setTrackPanelWidth: (width: number) => void
   setArmedTrackId: (trackId: string | null) => void
   setShowGhostNotes: (value: boolean) => void
   setScaleLock: (value: boolean) => void
@@ -65,6 +68,11 @@ export type UiPrefsStore = UiPrefsState & UiPrefsActions
 
 /** 轨道高度夹取范围：折叠条 / 最小 / 最大 */
 export const TRACK_HEIGHT_LIMITS = { min: 38, max: 240, collapsed: 26 } as const
+/**
+ * 轨道面板宽度：默认 288（264 时轨道头信息挤成一团，288 能让名称 + 乐器 + 情绪 + 音量/声像
+ * 都有呼吸空间），允许拉到 460 给「多轨批量编辑」留出信息量。
+ */
+export const TRACK_PANEL_WIDTH_LIMITS = { min: 240, max: 460, default: 288 } as const
 export const MIXER_HEIGHT_LIMITS = { min: 200, max: 620 } as const
 export const CHAT_WIDTH_LIMITS = { min: 300, max: 620 } as const
 
@@ -76,6 +84,7 @@ export const useUiStore = create<UiPrefsStore>()(
       followPlayhead: true,
       toolMode: 'select',
       trackHeights: {},
+      trackPanelWidth: TRACK_PANEL_WIDTH_LIMITS.default,
       armedTrackId: null,
       showGhostNotes: true,
       scaleLock: false,
@@ -95,6 +104,8 @@ export const useUiStore = create<UiPrefsStore>()(
           return { trackHeights: next }
         }),
       resetTrackHeights: () => set({ trackHeights: {} }),
+      setTrackPanelWidth: (width) =>
+        set({ trackPanelWidth: Math.round(clamp(width, TRACK_PANEL_WIDTH_LIMITS.min, TRACK_PANEL_WIDTH_LIMITS.max)) }),
       setArmedTrackId: (armedTrackId) => set({ armedTrackId }),
       setShowGhostNotes: (showGhostNotes) => set({ showGhostNotes }),
       setScaleLock: (scaleLock) => set({ scaleLock }),
@@ -110,6 +121,7 @@ export const useUiStore = create<UiPrefsStore>()(
         followPlayhead: state.followPlayhead,
         toolMode: state.toolMode,
         trackHeights: state.trackHeights,
+        trackPanelWidth: state.trackPanelWidth,
         showGhostNotes: state.showGhostNotes,
         scaleLock: state.scaleLock,
         velocityLane: state.velocityLane,

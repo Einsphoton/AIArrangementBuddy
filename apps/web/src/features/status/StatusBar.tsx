@@ -71,6 +71,7 @@ export function StatusBar() {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen)
   const focusedTrackId = useStore((s) => s.focusedTrackId)
   const selectedTrackId = useStore((s) => s.selectedTrackId)
+  const selectedTrackIds = useStore((s) => s.selectedTrackIds)
   const armedTrackId = useUiStore((s) => s.armedTrackId)
   const toolMode = useUiStore((s) => s.toolMode)
   const [health, setHealth] = useState<HealthInfo | null>(null)
@@ -272,13 +273,26 @@ export function StatusBar() {
         {toolMode === 'select' ? '选择' : toolMode === 'split' ? '切片' : '绘制'}
       </span>
 
-      <span className="hidden shrink-0 items-center gap-1 whitespace-nowrap text-ink-4 min-[1240px]:flex" title="当前选中">
+      <span
+        className={cn(
+          'hidden shrink-0 items-center gap-1 whitespace-nowrap min-[1240px]:flex',
+          selectedTrackIds.length > 1 ? 'text-accent-soft' : 'text-ink-4',
+        )}
+        title={
+          selectedTrackIds.length > 1
+            ? `多选 ${selectedTrackIds.length} 条轨道：M / S、删除、复制、改色、音量会作用于全部选中轨`
+            : '当前选中'
+        }
+        data-status-track-selection={selectedTrackIds.length}
+      >
         <Grid3x3 size={11} />
-        {selection.noteIds.length > 0
-          ? `${selection.noteIds.length} 音符`
-          : selection.clipId
-            ? `${selectionTrack?.clips.find((clip) => clip.id === selection.clipId)?.name ?? '片段'}`
-            : '未选中'}
+        {selectedTrackIds.length > 1
+          ? `已选 ${selectedTrackIds.length} 轨`
+          : selection.noteIds.length > 0
+            ? `${selection.noteIds.length} 音符`
+            : selection.clipId
+              ? `${selectionTrack?.clips.find((clip) => clip.id === selection.clipId)?.name ?? '片段'}`
+              : '未选中'}
       </span>
 
       <div className="flex-1" />

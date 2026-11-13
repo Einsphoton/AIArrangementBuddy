@@ -1,14 +1,20 @@
 /**
  * 单条轨道头（编曲视图左侧）。
  *
- * 对标 Logic / Cubase 的轨道头信息密度：
- * - R 录入预备（同时只 arm 一条）+ M 静音 + S 独奏 + 试听；
- * - 活动指示（按音量/静音估算的静态电平，非实时）；
- * - 点击色条选色、拖动色条排序；
- * - 底部 4px 热区拖动改行高（写入 uiStore，两侧视图同步），双击重置；
- * - 右键菜单：重命名 / 改色 / 复制 / 删除 / 上移下移 / 行高 / 折叠。
+ * 对标 Logic / Cubase 的轨道头信息密度，但不再把所有东西塞进同一行：
+ * - **第一行**：序号 + 名称（优先占满可用宽度）+ 试听 / 创作信息 / 折叠；
+ * - **第二行**：乐器（音频轨为片段数）· 情绪 + 音量 / 声像；
+ * - **第三行**：只属于这条轨道的创作信息（段落 / 智能片段类型）。项目级风格 / 调号 / BPM
+ *   上移到 `TrackPanel` 总控行，不再每行重复——重复行是「拥挤」的最大来源；
+ * - **右侧竖排控制轨**：R / M / S 三个按钮竖排（Cubase / Logic 的既有范式），
+ *   把横向空间还给名称；窄行高自动降级为紧凑尺寸；
+ * - 行尾实时电平条；底部 4px 热区拖动改行高（写入 uiStore，两侧视图同步），双击重置；
+ * - 右键菜单：重命名 / 改色 / 复制 / 删除 / 上移下移 / 行高 / 折叠 / 试听。
  *
- * 行高由父级传入（与编曲车道用同一 uiStore 值），保证严格对齐。
+ * 多选（本轮新增）：
+ * - 行高亮由 `selectedTrackIds` 决定，`selectedTrackId`（anchor）是主轨；
+ * - 在多选状态下点 M / S = 批量作用到全部选中轨；音量 / 声像相对同步；换色应用到全部；
+ * - 行本身的普通点击 / Shift / Ctrl 选择由 `TrackPanel` 的列表容器统一处理（见 TrackPanel 注释）。
  */
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, GripVertical, Info, Play, Waves } from 'lucide-react'
@@ -29,11 +35,22 @@ export interface DropTarget {
   after: boolean
 }
 
+/** 行内点击的修饰键语义（由列表容器 / 名称按钮转发） */
+export interface TrackSelectGesture {
+  /** Ctrl / ⌘：切换该轨的选中状态 */
+  additive: boolean
+  /** Shift：从 anchor 连选到该轨 */
+  range: boolean
+}
+
 export function TrackRow({
   track,
   index,
   height,
   selected,
+  primary,
+  selectionIds,
+  panelWidth,
   dropTarget,
   renameSignal,
   registerMeter,
@@ -49,13 +66,20 @@ export function TrackRow({
   track: Track
   index: number
   height: number
+  /** 是否在多选集合中 */
   selected: boolean
+  /** 是否为主轨（anchor）：主轨的左侧色条/背景更亮 */
+  primary: boolean
+  /** 当前全部选中轨道 id（批量 M / S / 音量 / 声像 / 换色用） */
+  selectionIds: string[]
+  /** 轨道面板当前宽度（px）：窄面板降级隐藏次要按钮 */
+  panelWidth: number
   dropTarget: DropTarget | null
   /** 父级收到 rename-track 命令时递增，用于弹出重命名输入框 */
   renameSignal: number
   /** 注册迷你电平填充元素（由 TrackPanel 的单条 rAF 统一驱动） */
   registerMeter: (trackId: string, element: HTMLSpanElement | null) => void
-  onSelect: () => void
+  onSelect: (gesture: TrackSelectGesture) => void
   onOpenInstrument: (rect: DOMRect) => void
   onOpenEmotion: (rect: DOMRect) => void
   onDragStart: (trackId: string) => void
@@ -66,6 +90,8 @@ export function TrackRow({
   anySolo: boolean
 }) {
   const updateTrack = useStore((s) => s.updateTrack)
+  const setTracksMuted = useStore((s) => s.setTracksMuted)
+  const setTracksSolo = useStore((s) => s.setTracksSolo)
   const project = useStore((s) => s.project)
   const pushHistory = useStore((s) => s.pushHistory)
   const setSaveStatus = useStore((s) => s.setSaveStatus)
@@ -86,6 +112,12 @@ export function TrackRow({
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [colorAnchor, setColorAnchor] = useState<{ left: number; right: number; top: number; bottom: number } | null>(null)
   const [infoAnchor, setInfoAnchor] = useState<DOMRect | null>(null)
+
+  /** 音量 / 声像多选相对编辑：手势开始时快照所有目标轨道的基准值 */
+  const gainGesture = useRef<{
+    base: number
+    targets: { id: string; value: number }[]
+  } | null>(null)
 
   /** 手势开始：记一次撤销点，并标记工程已修改（后续连续更新用 history:false） */
   const beginEdit = () => {
@@ -114,9 +146,14 @@ export function TrackRow({
   const emotion = instrument.emotions.find((item) => item.id === track.emotionId) ?? instrument.emotions[0]
   const color = trackColor(track.color)
   const collapsed = height <= TRACK_HEIGHT_LIMITS.collapsed + 2
-  const showSecondRow = height >= 48 && !collapsed
-  /** 第三行「创作信息」：默认行高 56px 起显示，紧凑/折叠行不强行塞入 */
+  /** 第二行（乐器 / 音量）从 48px 起显示；更矮时只保留名称行 */
+  const showSecondRow = !collapsed && height >= 48
+  /** 第三行创作信息：默认 60px 行高下显示（比旧版多 4px 呼吸空间），更矮时隐藏 */
   const showCreativeLine = showSecondRow && height >= 56
+  /** 右侧 R/M/S 竖排控制轨：折叠条或过矮行放不下三个按钮时不显示（右键菜单仍可操作） */
+  const showRail = !collapsed && height >= 44
+  /** 竖排按钮在较矮行里收紧到 12px，保证 3 个按钮 + 间距不溢出 */
+  const compactRail = height < 58
   const creative = buildTrackCreativeInfo(project, track)
   const armed = armedTrackId === track.id
   /*
@@ -132,6 +169,10 @@ export function TrackRow({
   const activityColor = muted || suppressed ? '#4a5466' : color
   /** armed + muted 是「录得进去但听不见」的经典陷阱：组合状态必须显式提示 */
   const armedButMuted = armed && (muted || suppressed)
+  /** 多选状态下 M / S / 音量 / 声像 / 换色作用到整个选中集合 */
+  const multiSelected = selectionIds.length > 1 && selectionIds.includes(track.id)
+  const narrow = panelWidth < 292
+  const showPreviewButton = panelWidth >= 320 && !collapsed
 
   const commitRename = () => {
     setRenaming(false)
@@ -210,23 +251,119 @@ export function TrackRow({
     setColorAnchor({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom })
   }
 
+  /* ---------------- 多选批量手势 ---------------- */
+
+  const muteTargets = () => (multiSelected ? selectionIds : [track.id])
+  const soloTargets = () => (multiSelected ? selectionIds : [track.id])
+
+  const applyMute = (event: React.MouseEvent) => {
+    event.stopPropagation()
+    const next = !muted
+    if (muteTargets().length > 1) {
+      setTracksMuted(selectionIds, next)
+      setSaveStatus('dirty')
+      return
+    }
+    toggleMute(track.id)
+    setSaveStatus('dirty')
+  }
+
+  const applySolo = (event: React.MouseEvent) => {
+    event.stopPropagation()
+    /* Alt/Option = 独占独奏：只保留这一条（与单轨语义一致，多选时也以点中的那条为准） */
+    if (event.altKey) {
+      toggleSolo(track.id, { exclusive: event.altKey })
+      setSaveStatus('dirty')
+      return
+    }
+    const next = !Boolean(track.solo)
+    if (soloTargets().length > 1) {
+      setTracksSolo(selectionIds, next)
+      setSaveStatus('dirty')
+      return
+    }
+    toggleSolo(track.id, { exclusive: event.altKey })
+    setSaveStatus('dirty')
+  }
+
+  /**
+   * 音量 / 声像的多选相对编辑：
+   * 手势开始时快照全部目标轨道的值，拖动时按「被拖轨道的增量」同步到其它选中轨，
+   * 保持多条轨道之间的相对差（Logic 多选推子的行为），而不是把它们压成同一个值。
+   */
+  const beginGainGesture = (field: 'volume' | 'pan') => {
+    beginEdit()
+    const state = useStore.getState()
+    const ids = multiSelected ? state.selectedTrackIds : [track.id]
+    gainGesture.current = {
+      base: field === 'volume' ? track.volume : track.pan,
+      targets: state.project.tracks
+        .filter((item) => ids.includes(item.id))
+        .map((item) => ({ id: item.id, value: field === 'volume' ? item.volume : item.pan })),
+    }
+  }
+
+  const changeVolume = (value: number) => {
+    const gesture = gainGesture.current
+    const next = clamp(value, 0, 1.5)
+    if (!gesture || gesture.targets.length <= 1) {
+      updateTrack(track.id, { volume: next }, { history: false })
+      return
+    }
+    const delta = next - gesture.base
+    for (const target of gesture.targets) {
+      updateTrack(target.id, { volume: clamp(target.value + delta, 0, 1.5) }, { history: false })
+    }
+  }
+
+  const changePan = (value: number) => {
+    const gesture = gainGesture.current
+    const next = clamp(value, -1, 1)
+    if (!gesture || gesture.targets.length <= 1) {
+      updateTrack(track.id, { pan: next }, { history: false })
+      return
+    }
+    const delta = next - gesture.base
+    for (const target of gesture.targets) {
+      updateTrack(target.id, { pan: clamp(target.value + delta, -1, 1) }, { history: false })
+    }
+  }
+
+  const pickColor = (nextColor: string) => {
+    const ids = multiSelected ? selectionIds : [track.id]
+    if (ids.length > 1) {
+      pushHistory()
+      for (const id of ids) updateTrack(id, { color: nextColor }, { history: false })
+    } else {
+      updateTrack(track.id, { color: nextColor })
+    }
+    setColorAnchor(null)
+    setSaveStatus('dirty')
+  }
+
   const showBefore = dropTarget?.index === index && !dropTarget.after
   const showAfter = dropTarget?.index === index && dropTarget.after
+  const warnTitle = muted
+    ? `「${track.name}」已预备录入，但轨道是静音的：音符会写进片段，但监听时听不到。点 M 取消静音。`
+    : `「${track.name}」已预备录入，但正被其它轨道的独奏压住：音符会写进片段，但监听时听不到。清空独奏（总控 S）后可听到。`
 
   return (
     <div
       ref={rowRef}
-      data-track-row
+      data-track-row="panel"
       data-track-id={track.id}
       data-track-name={track.name}
+      data-track-index={index}
+      data-track-selected={selected ? 'true' : 'false'}
+      data-track-primary={primary ? 'true' : 'false'}
       data-mix-state={audibility}
-      onClick={onSelect}
       onContextMenu={(event) => {
         const target = event.target as HTMLElement
         if (target.tagName === 'INPUT') return
         event.preventDefault()
         event.stopPropagation()
-        onSelect()
+        /* 右键未选中的轨：先把它设为单选，菜单里的批量操作才有明确作用域 */
+        if (!selected) onSelect({ additive: false, range: false })
         setColorAnchor(null)
         setMenu({ x: event.clientX, y: event.clientY })
       }}
@@ -234,13 +371,22 @@ export function TrackRow({
       onDrop={onDrop}
       className={cn(
         'group relative flex cursor-default select-none border-b border-line/70 transition-colors',
-        selected ? 'bg-surface-2' : 'bg-transparent hover:bg-surface-2/55',
+        selected
+          ? primary
+            ? 'bg-surface-3/55 shadow-[inset_0_0_0_1px_rgba(240,180,41,0.16)]'
+            : 'bg-surface-2/70'
+          : 'bg-transparent hover:bg-surface-2/55',
       )}
       style={{ height }}
     >
-      {selected && <span className="pointer-events-none absolute inset-y-0 left-0 z-[1] w-[2px]" style={{ background: color }} />}
+      {selected && (
+        <span
+          className="pointer-events-none absolute inset-y-0 left-0 z-[1] w-[2px]"
+          style={{ background: primary ? color : withAlpha(color, 0.5) }}
+        />
+      )}
       {showBefore && <span className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[2px] bg-accent shadow-[0_0_8px_rgba(240,180,41,0.8)]" />}
-      {showAfter && <span className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[2px] bg-accent shadow-[0_0_8px_rgba(240,180,41,0.8)]" />}
+      {showAfter && <span className="pointer-events-none absolute inset-x-0 bottom-0 z-[10] h-[2px] bg-accent shadow-[0_0_8px_rgba(240,180,41,0.8)]" />}
 
       {/* 色条：拖动排序 / 点击选色 */}
       <div
@@ -256,9 +402,9 @@ export function TrackRow({
           event.stopPropagation()
           openColor()
         }}
-        title="拖动排序 · 点击选择轨道颜色"
+        title="拖动排序 · 点击选择轨道颜色（多选时应用到全部选中轨）"
         aria-label={`轨道颜色：${color}`}
-        className="group/handle relative z-[2] flex w-[16px] shrink-0 cursor-grab items-center justify-center active:cursor-grabbing"
+        className="group/handle relative z-[2] flex w-[14px] shrink-0 cursor-grab items-center justify-center active:cursor-grabbing"
         style={{ background: withAlpha(color, 0.16), boxShadow: `inset -1px 0 0 ${withAlpha(color, 0.3)}` }}
       >
         <span
@@ -274,11 +420,10 @@ export function TrackRow({
         )}
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1 overflow-hidden px-1.5">
-        {/* 第一行：序号 / 名称 / R M S / 折叠 */}
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-[3px] px-2">
+        {/* 第一行：序号 / 名称 / 试听 / 创作信息 / 折叠 */}
         <div className="flex min-w-0 items-center gap-1">
-          {/* 折叠态只保留「序号 + 名称 + 展开箭头」，避免 26px 行高下文字被裁 */}
-          <span className="mono w-3.5 shrink-0 text-[9.5px] text-ink-4">{index + 1}</span>
+          <span className="mono w-[14px] shrink-0 text-right text-[9.5px] leading-none text-ink-4/85">{index + 1}</span>
           {renaming ? (
             <input
               autoFocus
@@ -298,174 +443,83 @@ export function TrackRow({
               className="h-[22px] min-w-0 flex-1 rounded-[5px] border border-accent/60 bg-bg px-1.5 text-[12px] outline-none"
             />
           ) : (
-            <button
+            /*
+             * 名称用 span 而不是 button：轨道名的横向面积最大，若它是 button，
+             * 列表的框选就会把它当成「控件」跳过——用户最自然的起拖点直接失效。
+             * 单击选择交给 TrackPanel 的列表统一处理（避免 Ctrl 切换被触发两次），
+             * 双击重命名仍在这里。
+             */
+            <span
+              role="button"
+              tabIndex={0}
               onDoubleClick={() => {
                 setDraft(track.name)
                 setRenaming(true)
               }}
-              onClick={(event) => {
-                event.stopPropagation()
-                onSelect()
+              onKeyDown={(event) => {
+                if (event.key === 'F2' || event.key === 'Enter') {
+                  event.preventDefault()
+                  setDraft(track.name)
+                  setRenaming(true)
+                }
               }}
-              title={`${track.name}（双击重命名，右键更多操作）`}
+              title={`${track.name}（双击重命名；Shift 连选 / Ctrl 加选；拖动可框选多条）`}
+              data-track-name={track.name}
               className={cn(
-                'min-w-0 flex-1 truncate text-left text-[12.5px] font-medium leading-tight transition-colors',
+                'min-w-0 flex-1 cursor-default truncate text-left text-[12.5px] font-medium leading-tight outline-none transition-colors',
                 /* 显式静音划掉；被独奏压住只变暗（不是用户的选择，不该划掉） */
                 muted ? 'text-ink-4 line-through' : suppressed ? 'text-ink-4' : selected ? 'text-ink' : 'text-ink-2 group-hover:text-ink',
               )}
             >
               <span className="block min-w-0 truncate text-[12.5px]">{track.name}</span>
-            </button>
+            </span>
           )}
-          <div className={cn('flex shrink-0 items-center gap-[3px]', collapsed && 'hidden')}>
+          <div className="flex shrink-0 items-center gap-0.5">
+            {showPreviewButton && (
+              <button
+                onClick={(event) => {
+                  event.stopPropagation()
+                  preview()
+                }}
+                title="试听音色"
+                aria-label="试听音色"
+                className={cn(
+                  'flex h-[16px] w-[16px] items-center justify-center rounded-[4px] text-ink-3/80 transition-colors hover:bg-surface-3 hover:text-accent',
+                  previewing && 'animate-pulse text-accent',
+                )}
+              >
+                <Play size={9} />
+              </button>
+            )}
+            {!collapsed && (
+              <button
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setInfoAnchor(event.currentTarget.getBoundingClientRect())
+                }}
+                title="创作信息：风格 / 调式 / BPM / 段落 / 乐器 / 智能片段参数"
+                aria-label={`查看 ${track.name} 的创作信息`}
+                data-creative-info-trigger
+                className="flex h-[16px] w-[16px] items-center justify-center rounded-[4px] text-ink-3/80 transition-colors hover:bg-surface-3 hover:text-accent"
+              >
+                <Info size={9} />
+              </button>
+            )}
             <button
-              onClick={(event) => {
-                event.stopPropagation()
-                const next = armed ? null : track.id
-                setArmedTrackId(next)
-                /*
-                 * 预备的同时把焦点移到这条轨道：
-                 * 录制路径优先用 armedTrackId，但「MIDI Thru 试听 / 钢琴卷帘显示哪条轨」
-                 * 仍然跟随 focusedTrackId。两边同步，点 R 之后的所见即所得才一致。
-                 */
-                if (next) useStore.getState().focusTrack(next)
-                // 预备了却录不进去的情况要如实告知，不能只点亮一个红点
-                if (next) {
-                  const state = useStore.getState()
-                  if (!state.midiRecord) {
-                    state.pushToast('info', `已预备「${track.name}」：打开 MIDI 录入后才会写入音符`)
-                  } else if (state.view !== 'pianoroll') {
-                    state.pushToast('info', `已预备「${track.name}」：切到钢琴卷帘才会写入音符`)
-                  } else if (!resolveRecordClipId(track, state.selection.clipId)) {
-                    state.pushToast('info', `「${track.name}」还没有可录的片段：先建一个 MIDI 片段`)
-                  } else if (muted || suppressed) {
-                    /* 录得进去但监听听不到：这是最容易被误判成「没录上」的组合 */
-                    state.pushToast(
-                      'info',
-                      muted
-                        ? `「${track.name}」已预备，但它是静音的：录进去也听不到，点 M 取消静音`
-                        : `「${track.name}」已预备，但被其它轨道的独奏压住：录进去也听不到，点上方总控 S 清空独奏`,
-                    )
-                  } else {
-                    state.pushToast('success', `已预备「${track.name}」：弹奏会写进这条轨道`)
-                  }
-                }
-              }}
-              title={armed ? '取消录入预备（同时只 arm 一条轨道）' : '录入预备：MIDI 弹奏写入这条轨道'}
-              aria-label={armed ? `取消 ${track.name} 的录入预备` : `预备录入 ${track.name}`}
-              aria-pressed={armed}
-              data-arm={armed ? 'true' : 'false'}
-              className={cn(
-                'flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border transition-colors',
-                armed
-                  ? 'animate-[pulse-dot_1.4s_ease-in-out_infinite] border-danger/70 bg-danger/30 text-danger'
-                  : 'border-line-strong bg-surface-2 text-ink-4 hover:text-danger',
-              )}
-            >
-              <span className="text-[9.5px] font-bold leading-none">R</span>
-            </button>
-            <button
-              onClick={(event) => {
-                event.stopPropagation()
-                toggleMute(track.id)
-                useStore.getState().setSaveStatus('dirty')
-              }}
-              title={
-                muted
-                  ? '取消静音（M）'
-                  : suppressed
-                    ? '静音（M）· 当前已被其它轨道的独奏压住，这里按下去会把「显式静音」也置为开'
-                    : '静音（M）'
-              }
-              aria-label={muted ? `取消静音 ${track.name}` : `静音 ${track.name}`}
-              aria-pressed={muted}
-              data-track-mute={muted ? 'true' : 'false'}
-              data-implicit-mute={suppressed ? 'true' : 'false'}
-              className={cn(
-                'relative flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border text-[9.5px] font-bold leading-none transition-colors',
-                muted
-                  ? 'border-danger/60 bg-danger/25 text-danger'
-                  : suppressed
-                    ? /* 隐式静音：描边点亮但不填色 —— 明确区分「被 solo 压住」与「用户真的静音了」 */
-                      'border-danger/35 bg-surface-2 text-danger/55'
-                    : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
-              )}
-            >
-              <span className="text-[9.5px] font-bold leading-none">M</span>
-            </button>
-            <button
-              onClick={(event) => {
-                event.stopPropagation()
-                /*
-                 * 普通点击 = 累加独奏（可多条同时独奏）；
-                 * Alt/Option+点击 = 独占独奏（清空其它，只留这条）。
-                 * 与 Logic / Studio One 一致；Alt 在 Cubase 是 Solo Defeat，
-                 * 所以语义必须写进 tooltip，别让用户猜。
-                 */
-                toggleSolo(track.id, { exclusive: event.altKey })
-                useStore.getState().setSaveStatus('dirty')
-              }}
-              title={
-                track.solo
-                  ? '取消独奏（S）· 按住 Alt/Option 点击 = 只保留这条独奏'
-                  : '独奏（S）· 再点其它轨可多条同时独奏 · 按住 Alt/Option 点击 = 独占独奏'
-              }
-              aria-label={track.solo ? `取消独奏 ${track.name}` : `独奏 ${track.name}`}
-              aria-pressed={Boolean(track.solo)}
-              data-track-solo={track.solo ? 'true' : 'false'}
-              className={cn(
-                'flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border text-[9.5px] font-bold leading-none transition-colors',
-                track.solo
-                  ? 'border-accent/60 bg-accent/25 text-accent'
-                  : muted
-                    ? /* 已静音的轨：S 能点亮但不会出声，视觉上给一点提示 */
-                      'border-line-strong bg-surface-2 text-ink-4/70 hover:text-accent'
-                    : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
-              )}
-            >
-              <span className="text-[9.5px] font-bold leading-none">S</span>
-            </button>
-            <button
-              onClick={(event) => {
-                event.stopPropagation()
-                preview()
-              }}
-              title="试听音色"
-              aria-label="试听音色"
-              className={cn(
-                'hidden h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-transparent text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-accent sm:flex',
-                previewing && 'animate-pulse text-accent',
-              )}
-            >
-              <Play size={10} />
-            </button>
-            <button
-              onClick={(event) => {
-                event.stopPropagation()
-                setInfoAnchor(event.currentTarget.getBoundingClientRect())
-              }}
-              title="创作信息：风格 / 调式 / BPM / 段落 / 乐器 / 智能片段参数"
-              aria-label={`查看 ${track.name} 的创作信息`}
-              data-creative-info-trigger
-              className="flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-transparent text-ink-4 transition-colors hover:border-line-strong hover:bg-surface-3 hover:text-accent"
-            >
-              <Info size={10} />
-            </button>
-          </div>
-          <button
-            onClick={toggleCollapse}
+              onClick={toggleCollapse}
               title={collapsed ? '展开轨道' : '折叠轨道'}
               aria-label={collapsed ? `展开轨道 ${track.name}` : `折叠轨道 ${track.name}`}
               aria-expanded={!collapsed}
-              className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] text-ink-4 transition-colors hover:bg-surface-3 hover:text-ink-2"
+              className="flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded-[4px] text-ink-3/80 transition-colors hover:bg-surface-3 hover:text-ink-2"
             >
-            {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-          </button>
+              {collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+            </button>
+          </div>
         </div>
 
         {/* 第二行：乐器 / 情绪 / 音量 / 声像（行高不足时自动隐藏） */}
         {showSecondRow && (
-          <div className="flex min-w-0 items-center gap-1">
+          <div className="flex min-w-0 items-center gap-1.5">
             {track.kind === 'audio' ? (
               /* 音频轨没有乐器/情绪：显示片段数与来源提示，避免误显示「三角钢琴」 */
               <span
@@ -496,10 +550,13 @@ export function TrackRow({
                   onOpenEmotion(event.currentTarget.getBoundingClientRect())
                 }}
                 title={`情绪 / 演奏法（当前：${emotion.name} · ${emotion.hint}）`}
-                className="flex h-[18px] shrink-0 items-center gap-1 rounded-full border border-line-strong/80 bg-surface-2 px-1.5 text-[10px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink"
+                className={cn(
+                  'flex h-[17px] shrink-0 items-center gap-1 rounded-full border border-line-strong/80 bg-surface-2 text-[10px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink',
+                  narrow ? 'px-1' : 'px-1.5',
+                )}
               >
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: emotion.color }} />
-                <span className="max-w-[58px] shrink-0 whitespace-nowrap text-[10px]">{emotion.name}</span>
+                {!narrow && <span className="max-w-[54px] shrink-0 truncate whitespace-nowrap text-[10px]">{emotion.name}</span>}
               </button>
             )}
 
@@ -508,20 +565,20 @@ export function TrackRow({
                 value={track.volume}
                 min={0}
                 max={1.5}
-                width={40}
+                width={panelWidth >= 320 ? 38 : 30}
                 title="音量"
-                onGestureStart={beginEdit}
-                onChange={(value) => updateTrack(track.id, { volume: clamp(value, 0, 1.5) }, { history: false })}
+                onGestureStart={() => beginGainGesture('volume')}
+                onChange={changeVolume}
                 formatValue={(value) => `${Math.round(value * 100)}%`}
                 fillColor={`linear-gradient(90deg, ${withAlpha(color, 0.35)}, ${color})`}
               />
               <MiniKnob
                 value={track.pan}
-                size={17}
+                size={15}
                 title="声像"
                 accent="#3ddbd9"
-                onGestureStart={beginEdit}
-                onChange={(value) => updateTrack(track.id, { pan: clamp(value, -1, 1) }, { history: false })}
+                onGestureStart={() => beginGainGesture('pan')}
+                onChange={changePan}
                 formatValue={(value) =>
                   Math.abs(value) < 0.03 ? 'C' : `${value < 0 ? 'L' : 'R'}${Math.round(Math.abs(value) * 100)}`
                 }
@@ -530,35 +587,152 @@ export function TrackRow({
           </div>
         )}
 
-        {/* 第三行：创作信息（只读摘要；完整信息点第一行的 i 按钮） */}
-        {showCreativeLine && (
+        {/* 第三行：只属于这条轨道的创作信息（段落 / 智能片段）；armed+静音警告优先占这一行 */}
+        {showCreativeLine && !armedButMuted && (
           <div
             className="flex min-w-0 items-center gap-1 overflow-hidden text-[9.5px] leading-none text-ink-4"
             title={creative.detailTitle}
             data-creative-line
           >
             <span className="h-[3px] w-[3px] shrink-0 rounded-full" style={{ background: withAlpha(color, 0.5) }} />
-            <span className="min-w-0 truncate">{creative.inlineSummary}</span>
+            <span className="min-w-0 truncate">{creative.trackSummary}</span>
           </div>
         )}
 
         {/* armed + 静音/被压下 = 「录得进去但听不见」。这是 DAW 里最经典的自我怀疑来源，
             必须显式说出来，而不是让用户对着一个红点猜 */}
-        {armedButMuted && (
+        {armedButMuted && height >= 58 && (
           <div
             className="flex min-w-0 items-center gap-1 overflow-hidden text-[9.5px] leading-none text-danger/85"
             data-armed-muted-warning
-            title={
-              muted
-                ? `「${track.name}」已预备录入，但轨道是静音的：音符会写进片段，但监听时听不到。点 M 取消静音。`
-                : `「${track.name}」已预备录入，但正被其它轨道的独奏压住：音符会写进片段，但监听时听不到。清空独奏（总控 S）后可听到。`
-            }
+            title={warnTitle}
           >
             <span className="shrink-0">⚠</span>
             <span className="min-w-0 truncate">{muted ? '已预备但静音 · 录进去也听不到' : '已预备但被独奏压住'}</span>
           </div>
         )}
       </div>
+
+      {/* 右侧竖排控制轨：R / M / S（Cubase / Logic 范式，把横向空间留给名称） */}
+      {showRail && (
+        <div className="flex w-[22px] shrink-0 flex-col items-center justify-center gap-[2px]" data-track-rail>
+          <button
+            onClick={(event) => {
+              event.stopPropagation()
+              const next = armed ? null : track.id
+              setArmedTrackId(next)
+              /*
+               * 预备的同时把焦点移到这条轨道：
+               * 录制路径优先用 armedTrackId，但「MIDI Thru 试听 / 钢琴卷帘显示哪条轨」
+               * 仍然跟随 focusedTrackId。两边同步，点 R 之后的所见即所得才一致。
+               */
+              if (next) useStore.getState().focusTrack(next)
+              // 预备了却录不进去的情况要如实告知，不能只点亮一个红点
+              if (next) {
+                const state = useStore.getState()
+                if (!state.midiRecord) {
+                  state.pushToast('info', `已预备「${track.name}」：打开 MIDI 录入后才会写入音符`)
+                } else if (state.view !== 'pianoroll') {
+                  state.pushToast('info', `已预备「${track.name}」：切到钢琴卷帘才会写入音符`)
+                } else if (!resolveRecordClipId(track, state.selection.clipId)) {
+                  state.pushToast('info', `「${track.name}」还没有可录的片段：先建一个 MIDI 片段`)
+                } else if (muted || suppressed) {
+                  /* 录得进去但监听听不到：这是最容易被误判成「没录上」的组合 */
+                  state.pushToast(
+                    'info',
+                    muted
+                      ? `「${track.name}」已预备，但它是静音的：录进去也听不到，点 M 取消静音`
+                      : `「${track.name}」已预备，但被其它轨道的独奏压住：录进去也听不到，点上方总控 S 清空独奏`,
+                  )
+                } else {
+                  state.pushToast('success', `已预备「${track.name}」：弹奏会写进这条轨道`)
+                }
+              }
+            }}
+            title={armed ? '取消录入预备（同时只 arm 一条轨道）' : '录入预备：MIDI 弹奏写入这条轨道'}
+            aria-label={armed ? `取消 ${track.name} 的录入预备` : `预备录入 ${track.name}`}
+            aria-pressed={armed}
+            data-arm={armed ? 'true' : 'false'}
+            className={cn(
+              'flex w-[18px] items-center justify-center rounded-[4px] border transition-colors',
+              compactRail ? 'h-[12px]' : 'h-[14px]',
+              armed
+                ? 'animate-[pulse-dot_1.4s_ease-in-out_infinite] border-danger/70 bg-danger/30 text-danger'
+                : 'border-line-strong bg-surface-2 text-ink-4 hover:text-danger',
+            )}
+          >
+            <span className="text-[9px] font-bold leading-none">R</span>
+          </button>
+          <button
+            onClick={applyMute}
+            title={
+              multiSelected
+                ? muted
+                  ? `取消静音（M）· 将同时作用于已选 ${selectionIds.length} 条轨道`
+                  : `静音（M）· 将同时作用于已选 ${selectionIds.length} 条轨道`
+                : muted
+                  ? '取消静音（M）'
+                  : suppressed
+                    ? '静音（M）· 当前已被其它轨道的独奏压住，这里按下去会把「显式静音」也置为开'
+                    : '静音（M）'
+            }
+            aria-label={muted ? `取消静音 ${track.name}` : `静音 ${track.name}`}
+            aria-pressed={muted}
+            data-track-mute={muted ? 'true' : 'false'}
+            data-implicit-mute={suppressed ? 'true' : 'false'}
+            className={cn(
+              'relative flex w-[18px] items-center justify-center rounded-[4px] border text-[9px] font-bold leading-none transition-colors',
+              compactRail ? 'h-[12px]' : 'h-[14px]',
+              muted
+                ? 'border-danger/60 bg-danger/25 text-danger'
+                : suppressed
+                  ? /* 隐式静音：描边点亮但不填色 —— 明确区分「被 solo 压住」与「用户真的静音了」 */
+                    'border-danger/35 bg-surface-2 text-danger/55'
+                  : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
+            )}
+          >
+            <span className="text-[9px] font-bold leading-none">M</span>
+          </button>
+          <button
+            onClick={applySolo}
+            title={
+              multiSelected
+                ? track.solo
+                  ? `取消独奏（S）· 将同时作用于已选 ${selectionIds.length} 条轨道 · Alt/Option 点击 = 只保留这条`
+                  : `独奏（S）· 将同时作用于已选 ${selectionIds.length} 条轨道 · Alt/Option 点击 = 只保留这条`
+                : track.solo
+                  ? '取消独奏（S）· 按住 Alt/Option 点击 = 只保留这条独奏'
+                  : '独奏（S）· 再点其它轨可多条同时独奏 · 按住 Alt/Option 点击 = 独占独奏'
+            }
+            aria-label={track.solo ? `取消独奏 ${track.name}` : `独奏 ${track.name}`}
+            aria-pressed={Boolean(track.solo)}
+            data-track-solo={track.solo ? 'true' : 'false'}
+            className={cn(
+              'flex w-[18px] items-center justify-center rounded-[4px] border text-[9px] font-bold leading-none transition-colors',
+              compactRail ? 'h-[12px]' : 'h-[14px]',
+              track.solo
+                ? 'border-accent/60 bg-accent/25 text-accent'
+                : muted
+                  ? /* 已静音的轨：S 能点亮但不会出声，视觉上给一点提示 */
+                    'border-line-strong bg-surface-2 text-ink-4/70 hover:text-accent'
+                  : 'border-line-strong bg-surface-2 text-ink-4 hover:text-ink-2',
+            )}
+          >
+            <span className="text-[9px] font-bold leading-none">S</span>
+          </button>
+        </div>
+      )}
+
+      {/* 折叠行放不下竖排控制轨时，用极小的 ⚠ 提醒「已预备但听不见」 */}
+      {armedButMuted && height < 58 && (
+        <span
+          data-armed-muted-warning
+          title={warnTitle}
+          className="absolute right-[26px] top-[3px] z-[5] text-[10px] leading-none text-danger"
+        >
+          ⚠
+        </span>
+      )}
 
       {/* 迷你电平指示：由 TrackPanel 的单条 rAF 用 engine.getTrackLevels() 实时驱动。
           `data-mix-state` 让界面 / 自动化都能一眼看出这条轨是「静音」还是「被独奏压住」 */}
@@ -569,7 +743,10 @@ export function TrackRow({
         data-mix-state={audibility}
         data-activity-label={`电平 ${track.name}${muted ? '（已静音）' : suppressed ? '（被独奏压住）' : ''}`}
         role="img"
-        className="pointer-events-none absolute bottom-[6px] right-[2px] top-[3px] w-[3px] overflow-hidden rounded-full bg-white/[0.06]"
+        className={cn(
+          'pointer-events-none absolute bottom-[5px] top-[4px] w-[3px] overflow-hidden rounded-full bg-white/[0.06]',
+          showRail ? 'right-[23px]' : 'right-[2px]',
+        )}
         title={`实时电平：引擎每轨读数（-60..0 dB 映射）· 音量 ${Math.round(track.volume * 100)}%${
           muted ? ' · 已静音' : suppressed ? ' · 被别的轨道的独奏压住（取消独奏即恢复）' : ''
         }`}
@@ -599,7 +776,7 @@ export function TrackRow({
         <span className="absolute inset-x-0 bottom-0 h-px bg-transparent transition-colors group-hover/resize:bg-accent/70" />
       </div>
 
-      {/* 右键菜单 / 颜色弹层 */}
+      {/* 右键菜单 / 颜色弹层 / 创作信息 */}
       {menu && (
         <TrackContextMenu
           x={menu.x}
@@ -608,6 +785,8 @@ export function TrackRow({
           index={index}
           height={height}
           hasCustomHeight={hasCustomHeight}
+          selectionIds={selectionIds.includes(track.id) ? selectionIds : [track.id]}
+          onPreview={preview}
           onClose={() => setMenu(null)}
           onRequestRename={() => {
             setDraft(track.name)
@@ -621,11 +800,7 @@ export function TrackRow({
           anchor={colorAnchor}
           current={track.color}
           onClose={() => setColorAnchor(null)}
-          onPick={(nextColor) => {
-            updateTrack(track.id, { color: nextColor })
-            setColorAnchor(null)
-            useStore.getState().setSaveStatus('dirty')
-          }}
+          onPick={pickColor}
         />
       )}
       {infoAnchor && (

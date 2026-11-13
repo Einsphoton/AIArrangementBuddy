@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef } from 'react'
 interface DragHandlers {
   onMove: (event: PointerEvent) => void
   onUp?: (event: PointerEvent) => void
+  /** 指针被系统打断（pointercancel）时的收尾：清理 rAF / 临时 UI */
+  onCancel?: () => void
 }
 
 /**
@@ -38,6 +40,9 @@ export function usePointerDrag() {
       },
       { signal, once: true },
     )
-    window.addEventListener('pointercancel', () => controller.abort(), { signal, once: true })
+    window.addEventListener('pointercancel', () => {
+      handlers.onCancel?.()
+      controller.abort()
+    }, { signal, once: true })
   }, [])
 }

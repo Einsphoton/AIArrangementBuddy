@@ -63,3 +63,4 @@ music-gen/
 # 生成到该目录再 docker build）
 docker/engine-package/*
 !docker/engine-package/README.md
+.verify-track-ui/

@@ -1,27 +1,34 @@
 /**
- * 左侧轨道面板：轨道头列表 + 行高工具条。
+ * 左侧轨道面板：轨道头列表 + 行高工具条 + 多选 / 框选。
  *
- * 与编曲视图严格对齐的三段结构（相对主编辑区顶部）：
+ * 与编曲视图严格对齐的四段结构（相对主编辑区顶部）：
  *   38px 标题栏（对齐主编辑区 tab 栏）
  *   38px 行高工具条（对齐编曲视图的时间轴工具条）
- *   54px 标尺占位（对齐 LOOP/SECT/BAR 标尺）
+ *   54px 总控行（对齐 LOOP/SECT/BAR 标尺）
+ *   轨道列表
  * 因此两边的第 N 条轨道在同一 y 位置，且共用 uiStore.trackHeights 的行高。
+ *
+ * 多选交互（本轮新增，对标 Logic / Cubase / Studio One）：
+ * - 单击 = 单选；Ctrl/⌘ 点击 = 切换；Shift 点击 = 从 anchor 连选；
+ * - 在列表任意位置按下拖动 = 框选（**包含最后一条轨以下的空白区域**，
+ *   旧实现只能从行内起拖，鼠标落在轨道外就完全失效）；
+ * - 拖动时靠近列表上下边缘自动滚动；
+ * - 表头 / 右键菜单的批量操作作用到整个选中集合。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Copy,
-  Minus,
-  Plus,
-  Trash2,
-} from 'lucide-react'
+import { CheckSquare, ChevronsDownUp, ChevronsUpDown, Copy, Minus, Plus, Trash2 } from 'lucide-react'
 import { getInstrument } from '@aiab/core'
 import { getAudioEngine } from '../../audio'
 import { Badge, EmptyState, IconButton } from '../../components/ui'
 import { useStore } from '../../store/store'
-import { resolveTrackHeight, TRACK_HEIGHT_LIMITS, useUiStore } from '../../lib/uiStore'
+import {
+  resolveTrackHeight,
+  TRACK_HEIGHT_LIMITS,
+  TRACK_PANEL_WIDTH_LIMITS,
+  useUiStore,
+} from '../../lib/uiStore'
 import { computeAudibleTrackIds } from '../../lib/trackRules'
+import { keyScaleLabel, resolveProjectStyle, styleLabel } from '../../lib/studioMeta'
 import {
   clamp,
   MAX_ZOOM_Y,
@@ -33,7 +40,7 @@ import {
 } from '../arrangement/timeline'
 import { EmotionPicker, InstrumentPicker, popoverPosition } from './InstrumentPicker'
 import { MixMasterControls } from './MixMasterControls'
-import { TrackRow, type DropTarget } from './TrackRow'
+import { TrackRow, type DropTarget, type TrackSelectGesture } from './TrackRow'
 import { GenerationTrackHeader } from '../audio/GenerationTrack'
 import { useAudioJobStore } from '../audio/audioJobStore'
 
@@ -42,14 +49,24 @@ type PickerState =
   | { kind: 'instrument'; mode: 'change'; rect: DOMRect; trackId: string }
   | { kind: 'emotion'; rect: DOMRect; trackId: string }
 
+/** 框选矩形（相对轨道列表视口） */
+interface MarqueeBox {
+  top: number
+  height: number
+}
+
 export function TrackPanel() {
   const tracks = useStore((s) => s.project.tracks)
+  const project = useStore((s) => s.project)
   const selectedTrackId = useStore((s) => s.selectedTrackId)
+  const selectedTrackIds = useStore((s) => s.selectedTrackIds)
   const zoomY = useStore((s) => s.zoomY)
   const selectTrack = useStore((s) => s.selectTrack)
+  const selectTracks = useStore((s) => s.selectTracks)
+  const selectAllTracks = useStore((s) => s.selectAllTracks)
   const addTrack = useStore((s) => s.addTrack)
-  const removeTrack = useStore((s) => s.removeTrack)
-  const duplicateTrack = useStore((s) => s.duplicateTrack)
+  const removeTracks = useStore((s) => s.removeTracks)
+  const duplicateTracks = useStore((s) => s.duplicateTracks)
   const setTrackInstrument = useStore((s) => s.setTrackInstrument)
   const setZoom = useStore((s) => s.setZoom)
   const pushToast = useStore((s) => s.pushToast)
@@ -57,6 +74,8 @@ export function TrackPanel() {
   const pushHistory = useStore((s) => s.pushHistory)
   const setSaveStatus = useStore((s) => s.setSaveStatus)
   const trackHeights = useUiStore((s) => s.trackHeights)
+  const panelWidth = useUiStore((s) => s.trackPanelWidth)
+  const setTrackPanelWidth = useUiStore((s) => s.setTrackPanelWidth)
   /* 生成中的占位轨：编曲车道与轨道头同步出现，落轨后逐条移除 */
   const generationSlots = useAudioJobStore((s) => s.slots)
   const audioJob = useAudioJobStore((s) => s.job)
@@ -65,6 +84,10 @@ export function TrackPanel() {
   /* 每轨电平：单条 rAF 直接改 DOM style（与 MixerPanel 同一策略），不触发 React 重渲染 */
   const meterRefs = useRef<Record<string, HTMLSpanElement | null>>({})
   const meterLevels = useRef<Map<string, number>>(new Map())
+  /* 框选：拖动超过阈值后抑制随后的 click，避免拖完又被复位成单选 */
+  const suppressClickRef = useRef(false)
+  const marqueeDragRef = useRef<{ top: number; height: number } | null>(null)
+  const [marquee, setMarquee] = useState<MarqueeBox | null>(null)
   const [picker, setPicker] = useState<PickerState | null>(null)
   const [dragTrackId, setDragTrackId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
@@ -78,6 +101,12 @@ export function TrackPanel() {
   )
   /* 独奏态只在这里算一次，再传给每一行：每行各自 some() 会在 24 轨时变成 O(n²) */
   const anySolo = tracks.some((track) => track.solo)
+  const multiSelected = selectedTrackIds.length > 1
+  const projectStyle = styleLabel(resolveProjectStyle(project))
+  const projectMeta = [projectStyle ?? '风格未标注', keyScaleLabel(project.key, project.scale), `${project.tempo} BPM`]
+    .filter(Boolean)
+    .join(' · ')
+  const narrow = panelWidth < 280
 
   /* 与编曲视图的纵向滚动同步 */
   useEffect(() => {
@@ -172,12 +201,148 @@ export function TrackPanel() {
     if (element) publishVerticalScroll(element.scrollTop, 'tracks')
   }
 
+  /* ---------------- 面板宽度拖拽 ---------------- */
+
+  const startPanelResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    const startX = event.clientX
+    const startWidth = useUiStore.getState().trackPanelWidth
+    const onMove = (moveEvent: PointerEvent) => {
+      setTrackPanelWidth(
+        clamp(
+          startWidth + (moveEvent.clientX - startX),
+          TRACK_PANEL_WIDTH_LIMITS.min,
+          TRACK_PANEL_WIDTH_LIMITS.max,
+        ),
+      )
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      document.body.style.cursor = ''
+    }
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  /* ---------------- 多选：点击 / 框选 ---------------- */
+
+  const applyRowGesture = (trackId: string, gesture: TrackSelectGesture) => {
+    if (gesture.range) selectTrack(trackId, { mode: 'range' })
+    else if (gesture.additive) selectTrack(trackId, { mode: 'toggle' })
+    else selectTrack(trackId, { mode: 'replace' })
+  }
+
+  /** 列表里所有轨道行（顺序 = 工程顺序） */
+  const rowElements = (): HTMLElement[] =>
+    Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-track-row]') ?? [])
+
+  /** clientY → 行序号；clamp=true 时把「最后一行以下」吸附到最后一行（框选锚点用） */
+  const rowIndexAtClientY = (rows: HTMLElement[], clientY: number, clampToRows: boolean): number | null => {
+    if (rows.length === 0) return null
+    for (let index = 0; index < rows.length; index += 1) {
+      const rect = rows[index].getBoundingClientRect()
+      if (clientY >= rect.top && clientY < rect.bottom) return index
+    }
+    const lastRect = rows[rows.length - 1].getBoundingClientRect()
+    const firstRect = rows[0].getBoundingClientRect()
+    if (!clampToRows) return null
+    if (clientY >= lastRect.bottom) return rows.length - 1
+    if (clientY <= firstRect.top) return 0
+    return null
+  }
+
+  const startListGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    /* 上一轮拖选若没等到 click（例如在窗口外松开），不要吞掉下一次点击 */
+    suppressClickRef.current = false
+    const target = event.target as HTMLElement
+    /* 控件自己的点击语义（M/S/R/滑杆/重命名/行高热区/拖色条排序）不要被框选抢走 */
+    if (target.closest('button, input, select, textarea, a, [role="slider"], [role="separator"], [draggable="true"]')) return
+    const list = listRef.current
+    if (!list) return
+    const rows = rowElements()
+    if (rows.length === 0) return
+    const startY = event.clientY
+    const anchorIndex = rowIndexAtClientY(rows, startY, true)
+    if (anchorIndex == null) return
+    const anchorId = rows[anchorIndex]?.dataset.trackId ?? null
+    const additiveBase = event.shiftKey ? useStore.getState().selectedTrackIds : null
+    const startX = event.clientX
+    let moved = false
+    let lastIndex = anchorIndex
+
+    const applyRange = (index: number) => {
+      const [from, to] = anchorIndex <= index ? [anchorIndex, index] : [index, anchorIndex]
+      const ids = rows
+        .slice(from, to + 1)
+        .map((row) => row.dataset.trackId)
+        .filter((id): id is string => Boolean(id))
+      const next = additiveBase ? [...new Set([...additiveBase, ...ids])] : ids
+      selectTracks(next, anchorId)
+    }
+
+    const onMove = (moveEvent: PointerEvent) => {
+      if (!moved && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 4) moved = true
+      if (!moved) return
+      const listNow = listRef.current
+      if (!listNow) return
+      const rect = listNow.getBoundingClientRect()
+      /* 靠近上下边缘时自动滚动，长列表也能一路拖选 */
+      if (moveEvent.clientY < rect.top + 24) listNow.scrollTop -= 14
+      else if (moveEvent.clientY > rect.bottom - 24) listNow.scrollTop += 14
+      const index = rowIndexAtClientY(rowElements(), moveEvent.clientY, true) ?? lastIndex
+      lastIndex = index
+      marqueeDragRef.current = {
+        top: Math.min(startY, moveEvent.clientY) - rect.top,
+        height: Math.abs(moveEvent.clientY - startY),
+      }
+      setMarquee(marqueeDragRef.current)
+      applyRange(index)
+    }
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      marqueeDragRef.current = null
+      setMarquee(null)
+      if (moved) {
+        suppressClickRef.current = true
+        /* 按最终区间落一次选择；anchor 仍是按下时那一条，后续 Shift 连选有明确起点 */
+        applyRange(lastIndex)
+      }
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+  }
+
+  const handleListClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    const target = event.target as HTMLElement
+    if (target.closest('button, input, select, textarea, a, [role="slider"], [role="separator"], [draggable="true"]')) return
+    const row = target.closest('[data-track-row]') as HTMLElement | null
+    const trackId = row?.dataset.trackId
+    if (!trackId) return
+    applyRowGesture(trackId, {
+      additive: event.metaKey || event.ctrlKey,
+      range: event.shiftKey,
+    })
+  }
+
   const openInstrumentPicker = (rect: DOMRect) => setPicker({ kind: 'instrument', mode: 'new', rect })
   const openInstrumentForTrack = (trackId: string, rect: DOMRect) =>
     setPicker({ kind: 'instrument', mode: 'change', rect, trackId })
   const openEmotionForTrack = (trackId: string, rect: DOMRect) =>
     setPicker({ kind: 'emotion', rect, trackId })
-
   const closePicker = () => setPicker(null)
 
   const collapseAll = () => {
@@ -189,20 +354,38 @@ export function TrackPanel() {
     useUiStore.getState().resetTrackHeights()
   }
 
+  /**
+   * 拖动排序：若拖动的轨道在多选集合里，则整体移动选中块（保持相对顺序）。
+   * `targetIndex` 是「插入点」（已按 before/after 换算）。
+   */
   const reorder = (trackId: string, targetIndex: number) => {
-    const current = useStore.getState().project.tracks
+    const state = useStore.getState()
+    const current = state.project.tracks
     const from = current.findIndex((track) => track.id === trackId)
     if (from < 0) return
+    const selection = state.selectedTrackIds
+    const movingIds =
+      selection.includes(trackId) && selection.length > 1 ? new Set(selection) : new Set([trackId])
     let to = targetIndex
-    if (from < to) to -= 1
-    to = Math.max(0, Math.min(current.length - 1, to))
-    if (to === from) return
+    to = Math.max(0, Math.min(current.length, to))
+    /* 插入点落在选中块内部：不移动，避免原地抖动 */
+    if (current[to] && movingIds.has(current[to].id)) return
+    const before = current.slice(0, to).filter((track) => movingIds.has(track.id)).length
+    const insertAt = Math.max(0, Math.min(current.length - movingIds.size, to - before))
+    const fromMoving = current.findIndex((track) => movingIds.has(track.id))
+    if (fromMoving === from && insertAt === fromMoving) return
+    const nextOrder = (() => {
+      const moving = current.filter((track) => movingIds.has(track.id))
+      const rest = current.filter((track) => !movingIds.has(track.id))
+      rest.splice(insertAt, 0, ...moving)
+      return rest
+    })()
+    if (nextOrder.every((track, index) => track.id === current[index]?.id)) return
     pushHistory()
     setSaveStatus('dirty')
     commitReorder(
       (draft) => {
-        const [moved] = draft.tracks.splice(from, 1)
-        if (moved) draft.tracks.splice(to, 0, moved)
+        draft.tracks = nextOrder
       },
       { history: false },
     )
@@ -230,11 +413,25 @@ export function TrackPanel() {
   }
 
   return (
-    <aside className="relative flex w-[264px] shrink-0 flex-col border-r border-line bg-surface" data-track-panel>
+    <aside
+      className="relative flex shrink-0 flex-col border-r border-line bg-surface"
+      style={{ width: panelWidth }}
+      data-track-panel
+      data-track-panel-width={panelWidth}
+    >
       {/* 标题栏（与主编辑区 tab 栏同高 38px） */}
-      <header className="flex h-[38px] shrink-0 items-center gap-1.5 border-b border-line px-2.5">
+      <header className="flex h-[38px] shrink-0 items-center gap-1 border-b border-line px-2">
         <span className="label">轨道</span>
         <Badge>{tracks.length}</Badge>
+        {multiSelected && (
+          <span
+            data-track-selection-count={selectedTrackIds.length}
+            className="inline-flex h-[16px] shrink-0 items-center rounded-full border border-accent/35 bg-accent/12 px-1.5 text-[10px] font-semibold leading-none text-accent-soft"
+            title={`已选中 ${selectedTrackIds.length} 条轨道：M / S、删除、复制、改色、音量会作用于全部选中轨`}
+          >
+            已选 {selectedTrackIds.length}
+          </span>
+        )}
         {generationSlots.length > 0 && (
           <span
             data-gen-track-count
@@ -248,35 +445,51 @@ export function TrackPanel() {
         )}
         <div className="flex-1" />
         <IconButton
+          title={multiSelected ? '清空多选（只保留主轨）' : '全选轨道'}
+          onClick={() => {
+            if (multiSelected || selectedTrackIds.length === tracks.length) {
+              useStore.getState().clearTrackSelection()
+            } else {
+              selectAllTracks()
+            }
+          }}
+          className="h-6 w-6"
+        >
+          <CheckSquare size={12} />
+        </IconButton>
+        <IconButton
           title="添加轨道"
           onClick={(event) => openInstrumentPicker(event.currentTarget.getBoundingClientRect())}
-          className="h-7 w-7"
+          className="h-6 w-6"
         >
           <Plus size={13} />
         </IconButton>
         <IconButton
-          title="复制选中轨道"
-          disabled={!selectedTrackId}
+          title={multiSelected ? `复制选中的 ${selectedTrackIds.length} 条轨道` : '复制选中轨道'}
+          disabled={selectedTrackIds.length === 0}
           onClick={() => {
-            if (selectedTrackId) {
-              duplicateTrack(selectedTrackId)
-              pushToast('success', '已复制轨道')
-            }
+            const ids = duplicateTracks(selectedTrackIds)
+            if (ids.length > 0) pushToast('success', ids.length > 1 ? `已复制 ${ids.length} 条轨道` : '已复制轨道')
           }}
-          className="h-7 w-7"
+          className="h-6 w-6"
         >
           <Copy size={12} />
         </IconButton>
         <IconButton
-          title="删除选中轨道"
-          disabled={!selectedTrackId}
+          title={multiSelected ? `删除选中的 ${selectedTrackIds.length} 条轨道（⌘Z 可撤销）` : '删除选中轨道'}
+          disabled={selectedTrackIds.length === 0}
           onClick={() => {
-            if (!selectedTrackId) return
-            const track = tracks.find((item) => item.id === selectedTrackId)
-            removeTrack(selectedTrackId)
-            pushToast('info', `已删除轨道「${track?.name ?? ''}」`)
+            if (selectedTrackIds.length === 0) return
+            const names = tracks
+              .filter((track) => selectedTrackIds.includes(track.id))
+              .map((track) => track.name)
+            removeTracks(selectedTrackIds)
+            pushToast(
+              'info',
+              names.length > 1 ? `已删除 ${names.length} 条轨道（⌘Z 可撤销）` : `已删除轨道「${names[0] ?? ''}」`,
+            )
           }}
-          className="h-7 w-7 hover:text-danger"
+          className="h-6 w-6 hover:text-danger"
         >
           <Trash2 size={12} />
         </IconButton>
@@ -316,8 +529,8 @@ export function TrackPanel() {
         <div className="flex-1" />
       </div>
 
-      {/* 与编曲视图标尺对齐的副标题：左侧轨道统计，右侧常驻「总控 M / S / R」
-          —— 高度必须严格等于 RULER_HEIGHT，否则左右轨道行会错位 */}
+      {/* 总控行：项目级信息只在这一次显示（旧版每行重复「风格 · 调号 · BPM」，是拥挤的根源），
+          第二行是常驻的 M / S / R 总控。高度必须严格等于 RULER_HEIGHT，否则左右轨道行会错位 */}
       <div
         className="flex shrink-0 flex-col justify-center gap-1 border-b border-line px-2.5"
         style={{ height: RULER_HEIGHT }}
@@ -326,89 +539,130 @@ export function TrackPanel() {
       >
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
-            <span className="label shrink-0">轨道 / 乐器</span>
-            <span className="min-w-0 truncate text-[10px] text-ink-4">
-              {clipCount} 片段 · {noteCount} 音符
+            <span className="label shrink-0">工程</span>
+            <span className="min-w-0 truncate text-[10px] text-ink-4" title={projectMeta}>
+              {projectMeta}
             </span>
           </div>
-          <span className="shrink-0 text-[10px] text-ink-4/80" title="拖动色条排序 · 右键打开轨道菜单">
-            拖色条排序
+          <span
+            data-track-selection-count={selectedTrackIds.length}
+            className={multiSelected ? 'shrink-0 text-[10px] font-semibold text-accent-soft' : 'shrink-0 text-[10px] text-ink-4/80'}
+            title={
+              multiSelected
+                ? `已选中 ${selectedTrackIds.length} 条轨道`
+                : `当前工程：${clipCount} 个片段 · ${noteCount} 个音符`
+            }
+          >
+            {multiSelected ? `已选 ${selectedTrackIds.length} 轨` : narrow ? '' : `${clipCount} 片段 · ${noteCount} 音符`}
           </span>
         </div>
-        <MixMasterControls variant="panel" />
+        <div className="flex min-w-0 items-center gap-1">
+          <MixMasterControls variant="panel" />
+        </div>
       </div>
 
-      {/* 轨道列表 */}
-      <div
-        ref={listRef}
-        onScroll={handleScroll}
-        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
-        aria-label="轨道列表"
-      >
-        {tracks.length === 0 && generationSlots.length === 0 ? (
-          <EmptyState
-            icon={<Plus size={20} />}
-            title="还没有轨道"
-            hint="添加一条轨道，开始你的编曲。可以先用钢琴打底，再加鼓组与贝斯。"
-            action={
+      {/* 轨道列表 + 框选覆盖层（覆盖层放在滚动视口外层，滚动时矩形不跟着内容跑） */}
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={listRef}
+          onScroll={handleScroll}
+          onPointerDown={startListGesture}
+          onClick={handleListClick}
+          className="h-full overflow-y-auto overflow-x-hidden"
+          aria-label="轨道列表"
+          data-track-list
+        >
+          {tracks.length === 0 && generationSlots.length === 0 ? (
+            <EmptyState
+              icon={<Plus size={20} />}
+              title="还没有轨道"
+              hint="添加一条轨道，开始你的编曲。可以先用钢琴打底，再加鼓组与贝斯。"
+              action={
+                <button
+                  className="btn btn-accent mt-1 h-7 px-2.5 text-[11.5px]"
+                  onClick={(event) => openInstrumentPicker(event.currentTarget.getBoundingClientRect())}
+                >
+                  <Plus size={12} />
+                  <span className="text-[11.5px]">添加第一条轨道</span>
+                </button>
+              }
+            />
+          ) : (
+            <>
+              {tracks.map((track, index) => (
+                <TrackRow
+                  key={track.id}
+                  track={track}
+                  index={index}
+                  height={resolveTrackHeight(trackHeights, track.id, fallbackRowHeight)}
+                  selected={selectedTrackIds.includes(track.id)}
+                  primary={track.id === selectedTrackId}
+                  selectionIds={selectedTrackIds}
+                  panelWidth={panelWidth}
+                  dropTarget={dropTarget}
+                  renameSignal={renameRequest?.trackId === track.id ? renameRequest.token : 0}
+                  registerMeter={registerMeter}
+                  onSelect={(gesture) => applyRowGesture(track.id, gesture)}
+                  onOpenInstrument={(rect) => openInstrumentForTrack(track.id, rect)}
+                  onOpenEmotion={(rect) => openEmotionForTrack(track.id, rect)}
+                  onDragStart={(trackId) => {
+                    setDragTrackId(trackId)
+                    setDropTarget(null)
+                  }}
+                  onDragEnd={() => {
+                    setDragTrackId(null)
+                    setDropTarget(null)
+                  }}
+                  onDragOver={(event) => handleDragOverRow(event, index)}
+                  onDrop={(event) => handleDropRow(event, index)}
+                  anySolo={anySolo}
+                />
+              ))}
+              {generationSlots.map((slot) => (
+                <GenerationTrackHeader
+                  key={slot.id}
+                  slot={slot}
+                  job={audioJob}
+                  height={resolveTrackHeight(trackHeights, slot.id, fallbackRowHeight)}
+                />
+              ))}
               <button
-                className="btn btn-accent mt-1 h-7 px-2.5 text-[11.5px]"
                 onClick={(event) => openInstrumentPicker(event.currentTarget.getBoundingClientRect())}
+                className="group flex h-9 w-full items-center justify-center gap-1.5 border-b border-line/60 text-[11.5px] text-ink-4 transition-colors hover:bg-surface-3/50 hover:text-ink-2"
+                title="添加轨道"
               >
                 <Plus size={12} />
-                <span className="text-[11.5px]">添加第一条轨道</span>
+                <span className="text-[11.5px]">添加轨道</span>
               </button>
-            }
+              {/* 底部留白 58px：36(添加轨道按钮) + 58 = 94 = 编曲视图底部留白 84 + 横向滚动条 10，
+                  保证两边的最大滚动距离一致，滚到底部时轨道仍严格对齐 */}
+              <div className="h-[58px]" />
+            </>
+          )}
+        </div>
+
+        {/* 框选矩形：竖条覆盖整个列表宽度，起点即使在最后一条轨道以下也能拖 */}
+        {marquee && (
+          <div
+            data-track-marquee
+            className="pointer-events-none absolute inset-x-0 z-20 border-y border-accent/70 bg-accent/10"
+            style={{ top: marquee.top, height: Math.max(2, marquee.height) }}
           />
-        ) : (
-          <>
-            {tracks.map((track, index) => (
-              <TrackRow
-                key={track.id}
-                track={track}
-                index={index}
-                height={resolveTrackHeight(trackHeights, track.id, fallbackRowHeight)}
-                selected={track.id === selectedTrackId}
-                dropTarget={dropTarget}
-                renameSignal={renameRequest?.trackId === track.id ? renameRequest.token : 0}
-                registerMeter={registerMeter}
-                onSelect={() => selectTrack(track.id)}
-                onOpenInstrument={(rect) => openInstrumentForTrack(track.id, rect)}
-                onOpenEmotion={(rect) => openEmotionForTrack(track.id, rect)}
-                onDragStart={(trackId) => {
-                  setDragTrackId(trackId)
-                  setDropTarget(null)
-                }}
-                onDragEnd={() => {
-                  setDragTrackId(null)
-                  setDropTarget(null)
-                }}
-                onDragOver={(event) => handleDragOverRow(event, index)}
-                onDrop={(event) => handleDropRow(event, index)}
-                anySolo={anySolo}
-              />
-            ))}
-            {generationSlots.map((slot) => (
-              <GenerationTrackHeader
-                key={slot.id}
-                slot={slot}
-                job={audioJob}
-                height={resolveTrackHeight(trackHeights, slot.id, fallbackRowHeight)}
-              />
-            ))}
-            <button
-              onClick={(event) => openInstrumentPicker(event.currentTarget.getBoundingClientRect())}
-              className="group flex h-9 w-full items-center justify-center gap-1.5 border-b border-line/60 text-[11.5px] text-ink-4 transition-colors hover:bg-surface-3/50 hover:text-ink-2"
-              title="添加轨道"
-            >
-              <Plus size={12} />
-              <span className="text-[11.5px]">添加轨道</span>
-            </button>
-            {/* 底部留白 58px：36(添加轨道按钮) + 58 = 94 = 编曲视图底部留白 84 + 横向滚动条 10，
-                保证两边的最大滚动距离一致，滚到底部时轨道仍严格对齐 */}
-            <div className="h-[58px]" />
-          </>
         )}
+      </div>
+
+      {/* 面板宽度拖拽条 */}
+      <div
+        data-track-panel-splitter
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整轨道面板宽度"
+        title="拖动调整轨道面板宽度，双击复位 288px"
+        onPointerDown={startPanelResize}
+        onDoubleClick={() => setTrackPanelWidth(TRACK_PANEL_WIDTH_LIMITS.default)}
+        className="group/splitter absolute inset-y-0 -right-[2px] z-30 w-[5px] cursor-col-resize"
+      >
+        <span className="absolute inset-y-0 left-[2px] w-[1.5px] bg-transparent transition-colors group-hover/splitter:bg-accent/60" />
       </div>
 
       {/* 弹层 */}
