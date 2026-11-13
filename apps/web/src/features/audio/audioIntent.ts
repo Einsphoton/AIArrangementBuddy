@@ -19,6 +19,7 @@
 import { projectEndBeat } from '@aiab/core'
 import {
   cancelCompanionTask,
+  createCompanionCoverTask,
   createCompanionGenerateTask,
   createCompanionStemTask,
   getAssetPeaks,
@@ -47,7 +48,7 @@ import { TRACK_COLORS } from '../arrangement/timeline'
 import { primeAssetPeaks } from './peaks'
 import { resolveCompanionHint } from './CompanionBadge'
 
-export type AudioMode = 'text_to_audio' | 'midi_to_audio' | 'audio_with_stems' | 'midi_then_audio'
+export type AudioMode = 'text_to_audio' | 'midi_to_audio' | 'ai_cover' | 'audio_with_stems'
 
 export interface AudioPlan {
   mode: AudioMode
@@ -76,6 +77,8 @@ export interface AudioPlan {
    * 线索推断（Japanese/anime/J-ROCK → ja），不能推断时给 'en'。
    */
   vocalLanguage?: string
+  /** AI 重编贴近度（仅 ai_cover，0–1）：越大越贴近原结构，缺省 0.7 */
+  coverStrength?: number
   startBeat?: number
   trackName?: string
   quality?: boolean
@@ -95,9 +98,9 @@ const round3 = (value: number) => Math.round(value * 1000) / 1000
 
 const MODE_TITLE: Record<AudioMode, string> = {
   text_to_audio: '生成整首音频',
-  midi_to_audio: 'MIDI 渲染为音频',
+  midi_to_audio: 'MIDI 渲染为音频（忠实）',
+  ai_cover: 'AI 重编（保结构再创作）',
   audio_with_stems: '生成整首音频 + 分轨',
-  midi_then_audio: '编曲后渲染为音频',
 }
 
 const TERMINAL = new Set<CompanionTaskStatus>(['done', 'failed', 'canceled'])
@@ -128,10 +131,19 @@ const AUDIO_ACTION_RE =
   /(生成|制作|做|来|写|出|渲染|导出|转|变|输出|bounce|render|export|generate|make).{0,24}(音频|audio|wav|mp3|成品|声音文件)/i
 const AUDIO_EXPLICIT_RE = /(音频|audio|wav|mp3|分轨|stem|text.?to.?audio|文生音乐|整曲音频|成品音频)/i
 
+/**
+ * 「AI 重编」类说法（只用于意图提示 + 外部后端兜底）：
+ * 用户说「用 AI 渲染 / AI 重编 / 换编制 / 重新配器 / 别只是 MIDI 转音频」时，
+ * 他要的是模型参与再创作，不是采样器忠实导出。
+ */
+const COVER_INTENT_RE =
+  /(ai\s*重编|ai\s*cover|重编成|换编制|重新配器|换音色|用\s*ai.{0,10}(重编|重新编曲|配器|渲染|做成|发挥)|让\s*ai\s*发挥|别只是.{0,6}midi|不是.{0,6}midi.{0,6}(转|变))/i
+
 /** 用户这句话是否明确要求「音频」而不是「MIDI 编曲」 */
 export function detectAudioIntent(text: string): boolean {
   const source = text.trim()
   if (!source) return false
+  if (COVER_INTENT_RE.test(source)) return true
   if (!AUDIO_EXPLICIT_RE.test(source)) return false
   if (AUDIO_ACTION_RE.test(source)) return true
   // 「把这段编曲做成成品」「按这首 MIDI 导出」这类省略了“音频”二字的说法
@@ -167,8 +179,15 @@ export function buildHeuristicAudioPlan(text: string): AudioPlan | null {
   if (stems) {
     return { mode: 'audio_with_stems', caption: source.slice(0, 600), stems, ...vocalFlag, reason: '按你的描述识别为「整曲 + 分轨」' }
   }
+  if (COVER_INTENT_RE.test(source)) {
+    // cover 的 caption 走英文文本编码器：中文原文没法直接用，给一句通用英文重编描述兜底
+    const caption = /[A-Za-z]{3}/.test(source)
+      ? source.slice(0, 600)
+      : 're-orchestrate the current arrangement into a fuller, more polished production with richer instrumentation and a modern mix'
+    return { mode: 'ai_cover', caption, reason: '识别为「AI 重编」：保留编曲骨架，交给 AI 重新配器' }
+  }
   if (/(midi|工程|编曲|伴奏|这段|这首|当前).{0,14}(渲染|导出|转成|变成|做成|输出)|渲染成音频|导出成音频/i.test(source)) {
-    return { mode: 'midi_to_audio', reason: '工程里已有素材，识别为「MIDI → 音频」' }
+    return { mode: 'midi_to_audio', reason: '工程里已有素材，识别为「忠实渲染为音频」' }
   }
   return { mode: 'text_to_audio', caption: source.slice(0, 600), ...vocalFlag, reason: '识别为「文本 → 音频」' }
 }
@@ -213,7 +232,7 @@ export function resolveStemPlan(input: { stems: StemArm[]; instrumental?: boolea
 /* ------------------------------------------------------------------ */
 
 function isAudioMode(value: unknown): value is AudioMode {
-  return value === 'text_to_audio' || value === 'midi_to_audio' || value === 'audio_with_stems' || value === 'midi_then_audio'
+  return value === 'text_to_audio' || value === 'midi_to_audio' || value === 'ai_cover' || value === 'audio_with_stems'
 }
 
 /** 本工程调式 id → 引擎 keyscale 里的英文调式名 */
@@ -304,6 +323,11 @@ export function parseAudioPlan(data: unknown): AudioPlan | null {
     startBeat: toNumber(value.startBeat),
     trackName: typeof value.trackName === 'string' ? value.trackName.slice(0, 60) : undefined,
     quality: value.quality === true,
+    // AI 重编贴近度：clamp 到 0–1，非法值当没给（执行阶段用 0.7 兜底）
+    coverStrength: (() => {
+      const parsed = toNumber(value.coverStrength)
+      return parsed === undefined ? undefined : Math.min(1, Math.max(0, parsed))
+    })(),
     engine: value.engine === 'xl' ? 'xl' : value.engine === '2b' ? '2b' : undefined,
     priority: toPriority(value.priority),
     reason: typeof value.reason === 'string' ? value.reason.slice(0, 200) : undefined,
@@ -505,7 +529,12 @@ export function telemetryFromTask(task: CompanionTaskState): AudioJobTelemetry {
   })
 }
 
-async function waitCompanionTask(jobId: string, stepKey: string, taskId: string): Promise<string> {
+async function waitCompanionTask(
+  jobId: string,
+  stepKey: string,
+  taskId: string,
+  mapProgress: (progress: number) => number = (progress) => progress,
+): Promise<string> {
   for (;;) {
     assertActive(jobId)
     const { task } = await getCompanionTask(taskId)
@@ -513,7 +542,7 @@ async function waitCompanionTask(jobId: string, stepKey: string, taskId: string)
     const queued = task.status === 'queued'
     useAudioJobStore.getState().updateStep(stepKey, {
       status: stepStatus,
-      progress: task.status === 'done' ? 1 : clamp(task.progress ?? 0, 0, 1),
+      progress: task.status === 'done' ? 1 : mapProgress(clamp(task.progress ?? 0, 0, 1)),
       error: task.error,
       message: task.message,
       // 排队信息只在 queued 阶段有意义（服务端其它状态返回 0）
@@ -709,6 +738,96 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
   }
 }
 
+/**
+ * AI 重编（cover）：先把当前工程离线渲染成参考音频 → 上传资产 →
+ * 交给 Companion 的 cover_audio（保结构换编制）→ 落一条新音频轨。
+ *
+ * 与 `runMidiRender` 的区别是这个函数**会启动 AI 引擎**：
+ * - 参考音频只是条件输入，产物由模型重新生成（会改细节、不保证逐音对齐）；
+ * - 参考音频是整工程从 0 拍渲染的，产物固定落 0 拍；
+ * - 进度按「渲染 0–15% / 模型 15–100%」加权，避免任务卡一开始就跳到 50%。
+ */
+async function runCoverFlow(jobId: string, plan: AudioPlan, bpm: number) {
+  const store = useStore.getState()
+  const project = store.project
+  const hasContent = project.tracks.some((track) => track.clips.length > 0 || track.audioClips.length > 0)
+  if (!hasContent) {
+    fail(jobId, '工程还是空的：先编一段 MIDI，再让 AI 重编。', { blockReason: 'empty-project' })
+    return
+  }
+  const caption = (plan.caption ?? '').trim()
+  if (!caption) {
+    fail(jobId, 'AI 重编需要一句英文描述（希望重编成什么风格 / 编制）。')
+    return
+  }
+  const stepKey = 'cover'
+  const RENDER_SHARE = 0.15
+  const baseName = (plan.trackName || project.name || 'AI 重编').slice(0, 40)
+  useAudioJobStore.getState().updateStep(stepKey, { status: 'running', progress: 0, startedAt: Date.now() })
+  useAudioJobStore.getState().update({
+    telemetry: { phase: 'prepare', phaseLabel: '准备渲染参考音频', engine: { state: 'ready', device: '浏览器离线渲染（AI 源）' } },
+  })
+  try {
+    const engine = getAudioEngine()
+    const blob = await engine.renderToWav(project, {
+      sampleRate: 48000,
+      bitDepth: 24,
+      loudnessTargetLufs: -14,
+      onProgress: (ratio) => {
+        if (canceledJobs.has(jobId)) return
+        useAudioJobStore.getState().updateStep(stepKey, { progress: clamp(ratio, 0, 1) * RENDER_SHARE, status: 'running' })
+        useAudioJobStore.getState().update({
+          telemetry: { phase: 'render', phaseLabel: '渲染参考音频（AI 源）', engine: { state: 'ready', device: '浏览器离线渲染' } },
+        })
+      },
+    })
+    assertActive(jobId)
+    useAudioJobStore.getState().updateStep(stepKey, { progress: RENDER_SHARE, status: 'running' })
+    useAudioJobStore.getState().update({
+      // 仍停留在「渲染参考」阶段：这里上传的是 AI 的输入，不是产物写入
+      telemetry: { phase: 'prepare', phaseLabel: '上传参考音频', engine: { state: 'ready', device: '浏览器离线渲染' } },
+    })
+    const file = new File([blob], `${baseName}-cover-source.wav`, { type: 'audio/wav' })
+    const uploaded = await uploadAudioAsset(file)
+    assertActive(jobId)
+    const created = await createCompanionCoverTask(
+      {
+        sourceAssetId: uploaded.asset.id,
+        caption,
+        audioCoverStrength: plan.coverStrength ?? 0.7,
+        engine: plan.engine,
+      },
+      project.id,
+      plan.priority ?? 0,
+    )
+    assertActive(jobId)
+    useAudioJobStore.getState().update({ taskId: created.taskId })
+    const assetId = await waitCompanionTask(jobId, stepKey, created.taskId, (progress) => RENDER_SHARE + progress * (1 - RENDER_SHARE))
+    const slot = useAudioJobStore.getState().slots.find((item) => item.key === stepKey)
+    const trackName = slot?.name ?? `AI 重编 · ${baseName}`
+    await placeGeneratedAsset(jobId, stepKey, assetId, {
+      name: baseName,
+      trackName,
+      // 参考音频是整工程从 0 拍渲染的，产物必须落 0 拍（否则整首后移）
+      startBeat: 0,
+      caption,
+      bpm,
+    })
+    useAudioJobStore.getState().updateStep(stepKey, { status: 'done', progress: 1 })
+    useAudioJobStore.getState().finish('done')
+    useStore
+      .getState()
+      .pushToast('success', `AI 重编完成：${trackName}（AI 会改细节，不是逐音还原；原 MIDI 未改动，⌘Z 可撤销）`)
+  } catch (error) {
+    if (error instanceof JobCanceledError) {
+      useAudioJobStore.getState().updateStep(stepKey, { status: 'canceled' })
+      useAudioJobStore.getState().finish('canceled')
+      return
+    }
+    fail(jobId, error instanceof Error ? error.message : 'AI 重编失败')
+  }
+}
+
 /** 文本 → 音频（可带分轨） */
 async function runCompanionFlow(
   jobId: string,
@@ -843,35 +962,54 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
     return
   }
   // 只记住真正开始执行的计划：被「已有任务进行中」拦下的计划不应覆盖当前任务的重试依据
-  lastPlan = plan
-  const mode: AudioMode = plan.mode
+  // 忠实渲染不跑模型：外部后端 / 旧计划若硬塞 engine/quality，剥掉并明确告知，绝不让它"看起来生效"
+  let effectivePlan: AudioPlan = plan
+  if (plan.mode === 'midi_to_audio' && (plan.engine || plan.quality)) {
+    effectivePlan = { ...plan, engine: undefined, quality: undefined }
+    useStore.getState().pushToast('info', '忠实渲染不使用 AI 引擎 / 精修参数，已忽略')
+  } else if (plan.mode === 'ai_cover' && plan.quality) {
+    // cover 固定 8 步快模式；sft 精修尚未开放，静默当没看见会让任务卡参数说谎
+    effectivePlan = { ...plan, quality: undefined }
+    useStore.getState().pushToast('info', 'AI 重编固定 8 步，精修参数已忽略（要更高质量请选 XL 引擎）')
+  }
+  lastPlan = effectivePlan
+  const mode: AudioMode = effectivePlan.mode
   const project = useStore.getState().project
-  const bpm = Number.isFinite(plan.bpm) ? Math.round(clamp(Number(plan.bpm), 20, 320)) : Math.round(project.tempo)
+  const bpm = Number.isFinite(effectivePlan.bpm)
+    ? Math.round(clamp(Number(effectivePlan.bpm), 20, 320))
+    : Math.round(project.tempo)
   const needsStems = mode === 'audio_with_stems'
+  const isRenderMode = mode === 'midi_to_audio'
+  const isCoverMode = mode === 'ai_cover'
+  if (isCoverMode && !(effectivePlan.caption ?? '').trim()) {
+    useStore.getState().pushToast('error', 'AI 重编需要一句英文描述（希望重编成什么风格 / 编制）')
+    return
+  }
   const requestedStems: StemArm[] = needsStems
-    ? plan.stems?.length
-      ? plan.stems
+    ? effectivePlan.stems?.length
+      ? effectivePlan.stems
       : ['guitar', 'bass', 'drums']
     : []
   /* 分轨护栏：纯乐器整曲不拆人声（源里没人声，只能拆出噪声）。
      去掉的臂连占位轨都不建，避免用户看到一条空的「Stem · 人声」轨。 */
-  const stemPlan = resolveStemPlan({ stems: requestedStems, instrumental: plan.instrumental })
+  const stemPlan = resolveStemPlan({ stems: requestedStems, instrumental: effectivePlan.instrumental })
   const stems = stemPlan.stems
   const skippedStems = stemPlan.skipped
-  const durationSec = Number.isFinite(plan.durationSec)
-    ? Math.round(clamp(Number(plan.durationSec), 5, 300))
+  const durationSec = Number.isFinite(effectivePlan.durationSec)
+    ? Math.round(clamp(Number(effectivePlan.durationSec), 5, 300))
     : needsStems
       ? 45
       : 30
-  const title = plan.trackName || MODE_TITLE[mode]
-  const isRenderMode = mode === 'midi_to_audio' || mode === 'midi_then_audio'
+  const title = effectivePlan.trackName || MODE_TITLE[mode]
 
   const stepDefs = isRenderMode
-    ? [{ key: 'render', label: '离线渲染当前工程 → WAV' }]
-    : [
-        { key: 'song', label: needsStems ? '生成整曲音频' : '生成音频' },
-        ...stems.map((arm) => ({ key: `stem:${arm}`, label: `分轨 · ${STEM_ARM_LABEL[arm]}` })),
-      ]
+    ? [{ key: 'render', label: '离线渲染当前工程 → WAV（忠实，采样器）' }]
+    : isCoverMode
+      ? [{ key: 'cover', label: '渲染参考音频 → AI 重编（cover）' }]
+      : [
+          { key: 'song', label: needsStems ? '生成整曲音频' : '生成音频' },
+          ...stems.map((arm) => ({ key: `stem:${arm}`, label: `分轨 · ${STEM_ARM_LABEL[arm]}` })),
+        ]
 
   /* 任务一开始就在 DAW 里占好音频轨：不用等生成完才看到结果。
      配色优先避开工程里已有的颜色，至少让整曲 / 每条分轨之间一眼可分。 */
@@ -887,12 +1025,13 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
     }
     return TRACK_COLORS[start]
   }
-  const startBeat = Math.max(0, plan.startBeat ?? useStore.getState().playhead)
+  const startBeat = Math.max(0, effectivePlan.startBeat ?? useStore.getState().playhead)
   // 兜底 caption 不能说 "instrumental"：要人声时那会与歌词条件自相矛盾
-  const fallbackKind = plan.instrumental === false ? 'song with vocals' : 'instrumental'
-  const caption = (plan.caption ?? '').trim() || `${plan.style ?? ''} ${fallbackKind}, ${bpm} bpm`.trim()
-  const songName = plan.trackName || caption.slice(0, 32) || 'AI 生成音频'
-  const renderBaseName = (plan.trackName || project.name || 'AI 渲染').slice(0, 40)
+  const fallbackKind = effectivePlan.instrumental === false ? 'song with vocals' : 'instrumental'
+  const caption = (effectivePlan.caption ?? '').trim() || `${effectivePlan.style ?? ''} ${fallbackKind}, ${bpm} bpm`.trim()
+  const songName = effectivePlan.trackName || caption.slice(0, 32) || 'AI 生成音频'
+  const renderBaseName = (effectivePlan.trackName || project.name || 'AI 渲染').slice(0, 40)
+  const coverBaseName = (effectivePlan.trackName || project.name || 'AI 重编').slice(0, 40)
   const projectDurationSec = Math.max(
     4,
     Math.round((projectEndBeat(project) / Math.max(20, project.tempo)) * 60),
@@ -905,35 +1044,49 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
           label: '工程',
           role: 'render',
           color: colorAt(0),
-          startBeat,
+          // 渲染的是整工程、从 0 拍开始：占位轨也必须在 0 拍，不能跟播放头
+          startBeat: 0,
           durationSec: projectDurationSec,
         },
       ]
-    : [
-        {
-          key: 'song',
-          name: `生成 · ${songName.slice(0, 20)}`,
-          label: '整曲',
-          role: 'song',
-          color: colorAt(0),
-          startBeat,
-          durationSec,
-        },
-        ...stems.map((arm, index) => ({
-          key: `stem:${arm}`,
-          name: `Stem · ${STEM_ARM_LABEL[arm]}`,
-          label: STEM_ARM_LABEL[arm],
-          role: 'stem' as const,
-          color: colorAt(index + 1),
-          startBeat,
-          durationSec,
-        })),
-      ]
+    : isCoverMode
+      ? [
+          {
+            key: 'cover',
+            name: `AI 重编 · ${coverBaseName}`,
+            label: 'AI 重编',
+            role: 'cover',
+            color: colorAt(0),
+            // 参考音频是整工程从 0 拍渲染的，产物固定落 0 拍
+            startBeat: 0,
+            durationSec: projectDurationSec,
+          },
+        ]
+      : [
+          {
+            key: 'song',
+            name: `生成 · ${songName.slice(0, 20)}`,
+            label: '整曲',
+            role: 'song',
+            color: colorAt(0),
+            startBeat,
+            durationSec,
+          },
+          ...stems.map((arm, index) => ({
+            key: `stem:${arm}`,
+            name: `Stem · ${STEM_ARM_LABEL[arm]}`,
+            label: STEM_ARM_LABEL[arm],
+            role: 'stem' as const,
+            color: colorAt(index + 1),
+            startBeat,
+            durationSec,
+          })),
+        ]
 
   const jobId = useAudioJobStore.getState().start({
     mode,
     title,
-    caption: plan.caption ?? '',
+    caption: effectivePlan.caption ?? '',
     steps: stepDefs,
     slots: slotSpecs,
   })
@@ -942,7 +1095,7 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
   useStore.getState().pushToast('info', `AI 已安排音频任务：${MODE_TITLE[mode]}`)
 
   if (isRenderMode) {
-    await runMidiRender(jobId, plan)
+    await runMidiRender(jobId, effectivePlan)
     return
   }
 
@@ -971,7 +1124,12 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
     return
   }
 
-  await runCompanionFlow(jobId, plan, stems, bpm, durationSec, skippedStems)
+  if (isCoverMode) {
+    await runCoverFlow(jobId, effectivePlan, bpm)
+    return
+  }
+
+  await runCompanionFlow(jobId, effectivePlan, stems, bpm, durationSec, skippedStems)
 }
 
 /**

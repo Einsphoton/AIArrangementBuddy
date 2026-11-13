@@ -293,6 +293,34 @@ const STATES = [
     `,
   },
   {
+    id: 'cover-running',
+    label: 'AI 重编（渲染参考 + 模型重编）',
+    expectStatus: 'running',
+    requireAnimation: true,
+    textIncludes: ['AI 重编'],
+    setup: `
+      const s = window.AIAB.useAudioJobStore.getState()
+      s.start({
+        mode: 'ai_cover',
+        title: 'AI 重编 · 日式摇滚',
+        caption: 'epic orchestral rock, 116 bpm',
+        steps: [{ key: 'cover', label: '渲染参考音频 → AI 重编（cover）' }],
+      })
+      s.updateStep('cover', { status: 'running', progress: 0.58, startedAt: Date.now() - 14000 })
+      s.update({
+        telemetry: {
+          phase: 'sampling',
+          phaseLabel: '重编中（cover）',
+          step: 12,
+          stepTotal: 20,
+          speed: 1.6,
+          engine: { state: 'busy', device: 'Metal', warm: true },
+        },
+      })
+      return true
+    `,
+  },
+  {
     id: 'compact',
     label: 'compact 面板（1440x760，必要时自动降高）',
     expectStatus: 'running',
@@ -993,6 +1021,15 @@ async function runAutoResume(page, baseUrl) {
             { id: 'essential', label: '基础', ready: true, installed: true, downloadBytes: 0 },
             { id: 'stems', label: '分轨', ready: true, installed: true, downloadBytes: 0 },
           ] })
+        }
+        // 关键：把「一键启动节点」也 mock 成启动失败。
+        // 否则服务端会真的 spawn 一个 companion（可能在本机常驻并注册），
+        // 阻塞场景就永远等不到 start-companion，测试还会留下孤儿进程。
+        if (pathname === '/api/companion/node/start') {
+          return json({ ok: true, online: false, node: { available: true, controllable: true, state: 'stopped', reason: 'mock：节点未启动' } })
+        }
+        if (pathname === '/api/companion/node') {
+          return json({ available: true, controllable: true, state: 'stopped', reason: 'mock：节点未启动' })
         }
         if (pathname === '/api/companion/tasks' && method === 'POST') {
           return json({ taskId: 'stage_mock_task', status: 'queued', summary: '排队中' })

@@ -75,6 +75,12 @@ export const TOOL_ALIASES: Record<string, ToolAlias> = {
   bounce_audio: { name: 'generate_audio', args: { mode: 'midi_to_audio' } },
   render_midi: { name: 'generate_audio', args: { mode: 'midi_to_audio' } },
   export_audio: { name: 'generate_audio', args: { mode: 'midi_to_audio' } },
+  // AI 重编类 → generate_audio(mode=ai_cover)：用户说「AI 渲染/重编/换编制」时走模型
+  ai_cover: { name: 'generate_audio', args: { mode: 'ai_cover' } },
+  cover_audio: { name: 'generate_audio', args: { mode: 'ai_cover' } },
+  ai_rearrange: { name: 'generate_audio', args: { mode: 'ai_cover' } },
+  rearrange_audio: { name: 'generate_audio', args: { mode: 'ai_cover' } },
+  remix_audio: { name: 'generate_audio', args: { mode: 'ai_cover' } },
   generate_stems: { name: 'generate_audio', args: { mode: 'audio_with_stems' } },
   split_stems: { name: 'generate_audio', args: { mode: 'audio_with_stems' } },
   stem_audio: { name: 'generate_audio', args: { mode: 'audio_with_stems' } },

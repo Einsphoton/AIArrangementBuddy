@@ -141,7 +141,13 @@ const QUICK_ACTIONS: SamplePrompt[] = [
   {
     title: 'MIDI → 音频',
     description: '',
-    prompt: '把当前工程按现有编配渲染成音频并加入工程；如果工程还是空的，先补一段完整编曲再渲染。',
+    prompt: '把当前工程按现有编配忠实渲染成音频并加入工程（只要导出，不要 AI 重编）；如果工程还是空的，先补一段完整编曲再渲染。',
+    intent: 'audio',
+  },
+  {
+    title: 'AI 重编成成品',
+    description: '',
+    prompt: '保留当前工程的编曲骨架，用 AI 重编成一首更完整的成品：音色更现代、层次更丰满，会改细节也没关系；把结果作为新的音频轨加入工程，原 MIDI 不要动。',
     intent: 'audio',
   },
   {

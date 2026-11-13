@@ -938,6 +938,127 @@ check('placeAudioClip：不传 volume 时仍是 0.8（导入/渲染/重绘行为
   return '缺省 0.8 保持向后兼容，分轨路径可覆写'
 })
 
+/* ================================================================== */
+/* F. 「忠实渲染 / AI 重编」必须分开：渲染不接受引擎参数，cover 才跑模型   */
+/* ================================================================== */
+
+console.log(`\n${C.bold}F. 渲染 vs AI 重编：参数、回执、意图判定${C.reset}`)
+
+const contentCtx = () =>
+  toolContext({
+    tracks: [{ id: 't1', clips: [{ id: 'c1', notes: [], startBeat: 0, lengthBeats: 4 }], audioClips: [] }],
+  })
+
+check('generate_audio：midi_to_audio 拒绝 engine（不再假称用了 XL 引擎）', async () => {
+  const result = await runGenerateAudio({ mode: 'midi_to_audio', engine: 'xl' }, contentCtx())
+  if (result.ok) throw new Error('渲染模式不该接受 engine')
+  if (!/忠实渲染/.test(result.message)) throw new Error(`回执应说明是忠实渲染，实际：${result.message}`)
+  if (!/ai_cover/.test(result.message)) throw new Error(`回执应指向 ai_cover，实际：${result.message}`)
+  return 'engine 被拒绝，回执指向 ai_cover'
+})
+
+check('generate_audio：midi_to_audio 拒绝 quality，回执不再出现「引擎：XL」', async () => {
+  const bad = await runGenerateAudio({ mode: 'midi_to_audio', quality: true }, contentCtx())
+  if (bad.ok) throw new Error('渲染模式不该接受 quality')
+  const good = await runGenerateAudio({ mode: 'midi_to_audio' }, contentCtx())
+  if (!good.ok) throw new Error(good.message)
+  if (/引擎：/.test(good.message)) throw new Error(`渲染回执仍在暗示 AI 引擎：${good.message}`)
+  if (!/忠实/.test(good.message)) throw new Error(`渲染回执应说明忠实渲染：${good.message}`)
+  expectEq('engine', good.data?.audioPlan?.engine, undefined)
+  expectEq('quality', good.data?.audioPlan?.quality, undefined)
+  return 'quality 被拒绝；正常渲染回执不含引擎字样'
+})
+
+check('generate_audio：ai_cover 计划带 caption / coverStrength / engine', async () => {
+  const result = await runGenerateAudio(
+    { mode: 'ai_cover', caption: 'epic orchestral rock with distorted guitars', coverStrength: 0.8, engine: '2b' },
+    contentCtx(),
+  )
+  if (!result.ok) throw new Error(result.message)
+  const plan = result.data?.audioPlan
+  expectEq('mode', plan?.mode, 'ai_cover')
+  expectEq('coverStrength', plan?.coverStrength, 0.8)
+  expectEq('engine', plan?.engine, '2b')
+  expectEq('durationSec（跟随工程，不写死）', plan?.durationSec, undefined)
+  if (!/AI 重编/.test(result.message)) throw new Error(`回执应说明 AI 重编：${result.message}`)
+  if (!/不是逐音渲染/.test(result.message)) throw new Error(`回执应提示会改细节：${result.message}`)
+  return 'ai_cover 计划完整，回执明确「不是逐音渲染」'
+})
+
+check('generate_audio：非 Windows 平台拒绝 XL（不再承诺跑不了的引擎）', async () => {
+  if (process.platform === 'win32') return 'Windows：XL 走能力校验，跳过平台拒绝断言'
+  const result = await runGenerateAudio(
+    { mode: 'ai_cover', caption: 'epic orchestral rock', engine: 'xl' },
+    contentCtx(),
+  )
+  if (result.ok) throw new Error(`非 Windows 平台不该接受 XL：${JSON.stringify(result.data?.audioPlan)}`)
+  if (!/Windows/.test(result.message) || !/2b/.test(result.message)) {
+    throw new Error(`拒绝原因应说明 XL 仅 Windows 并给出 2b 退路：${result.message}`)
+  }
+  return 'macOS/Linux 传 xl 被拒绝，回执指向 2b'
+})
+
+check('generate_audio：ai_cover 缺 strength 默认 0.7', async () => {
+  const result = await runGenerateAudio({ mode: 'ai_cover', caption: 'jazz trio re-orchestration' }, contentCtx())
+  if (!result.ok) throw new Error(result.message)
+  expectEq('coverStrength', result.data?.audioPlan?.coverStrength, 0.7)
+  return '缺省 0.7（与生成面板一致）'
+})
+
+check('generate_audio：ai_cover 缺 caption / 带 quality / 要人声 → 明确拒绝', async () => {
+  const noCaption = await runGenerateAudio({ mode: 'ai_cover' }, contentCtx())
+  if (noCaption.ok) throw new Error('ai_cover 缺 caption 应失败')
+  if (!/caption/.test(noCaption.message)) throw new Error(noCaption.message)
+  const quality = await runGenerateAudio({ mode: 'ai_cover', caption: 'x', quality: true }, contentCtx())
+  if (quality.ok) throw new Error('ai_cover 不该接受 quality')
+  const vocal = await runGenerateAudio({ mode: 'ai_cover', caption: 'x', instrumental: false }, contentCtx())
+  if (vocal.ok) throw new Error('ai_cover 不该支持人声')
+  return 'caption / quality / 人声三种非法组合都被挡住'
+})
+
+check('generate_audio：midi_then_audio 已废弃并给出迁移路径', async () => {
+  const result = await runGenerateAudio({ mode: 'midi_then_audio' }, contentCtx())
+  if (result.ok) throw new Error('midi_then_audio 应被拒绝')
+  if (!/ai_cover/.test(result.message) || !/midi_to_audio/.test(result.message)) {
+    throw new Error(`回执应同时指向 ai_cover / midi_to_audio：${result.message}`)
+  }
+  return '旧 mode 被拒绝，回执给出两条正确路径'
+})
+
+check('parseAudioPlan：ai_cover 保留 coverStrength 并 clamp 到 0–1', () => {
+  const base = parseAudioPlan({ audioPlan: { mode: 'ai_cover', caption: 'x', coverStrength: 1.7 } })
+  expectEq('>1 clamp', base?.coverStrength, 1)
+  const low = parseAudioPlan({ audioPlan: { mode: 'ai_cover', caption: 'x', coverStrength: -0.2 } })
+  expectEq('<0 clamp', low?.coverStrength, 0)
+  const garbage = parseAudioPlan({ audioPlan: { mode: 'ai_cover', caption: 'x', coverStrength: 'loud' } })
+  expectEq('非法值', garbage?.coverStrength, undefined)
+  const okPlan = parseAudioPlan({ audioPlan: { mode: 'ai_cover', caption: 'x', coverStrength: 0.55 } })
+  expectEq('正常值', okPlan?.coverStrength, 0.55)
+  return 'clamp + 丢弃非法值'
+})
+
+check('buildHeuristicAudioPlan：AI 重编说法 → ai_cover，纯渲染 → midi_to_audio', () => {
+  const { buildHeuristicAudioPlan } = audioIntent
+  const cover1 = buildHeuristicAudioPlan('用 AI 引擎把这个编曲渲染成高品质成品')
+  expectEq('用 AI 引擎渲染', cover1?.mode, 'ai_cover')
+  const cover2 = buildHeuristicAudioPlan('别只是把 MIDI 转成音频，用 AI 重编成摇滚版')
+  expectEq('AI 重编', cover2?.mode, 'ai_cover')
+  const render = buildHeuristicAudioPlan('把当前编曲渲染成音频')
+  expectEq('纯渲染', render?.mode, 'midi_to_audio')
+  const render2 = buildHeuristicAudioPlan('把这段 MIDI 导出成 wav')
+  expectEq('导出 wav', render2?.mode, 'midi_to_audio')
+  return 'AI 说法走 cover，导出说法仍走渲染'
+})
+
+check('detectAudioIntent：AI 重编 / 换编制 也算音频意图', () => {
+  const { detectAudioIntent } = audioIntent
+  for (const text of ['用 AI 重编这版编曲', '帮我换编制，做成摇滚版', '重新配器一下', '让 AI 发挥一下']) {
+    if (!detectAudioIntent(text)) throw new Error(`应识别为音频意图：${text}`)
+  }
+  if (detectAudioIntent('把和弦改成 C-G-Am-F')) throw new Error('编曲请求不该被识别为音频')
+  return '4 条 AI 重编说法命中，和声编辑不误判'
+})
+
 /* ------------------------------------------------------------------ */
 
 console.log('')

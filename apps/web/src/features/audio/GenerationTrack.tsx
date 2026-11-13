@@ -76,7 +76,8 @@ function remainingText(slot: AudioJobTrackSlot): string {
 /** 槽位 + 任务状态 → 车道 / 轨道头要显示的内容 */
 export function resolveSlotVisual(slot: AudioJobTrackSlot, job: AudioJob | null): GenerationSlotVisual {
   const percent = slot.status === 'done' ? 100 : Math.round(Math.max(0, Math.min(1, slot.progress)) * 100)
-  const roleLabel = slot.role === 'song' ? '整曲' : slot.role === 'render' ? '渲染' : slot.label
+  const roleLabel =
+    slot.role === 'song' ? '整曲' : slot.role === 'render' ? '渲染' : slot.role === 'cover' ? 'AI 重编' : slot.label
 
   if (slot.status === 'done') {
     return { state: 'done', title: `已写入音频轨 · ${roleLabel}`, detail: '完成', percent: 100, active: false }

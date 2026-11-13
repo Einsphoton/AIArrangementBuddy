@@ -22,8 +22,8 @@ import {
   MicVocal,
   Music4,
   Piano,
-  Scissors,
   SlidersHorizontal,
+  Sparkles,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { companionVariantLabel } from '../../lib/api'
@@ -43,15 +43,15 @@ import type {
 export const MODE_ICON: Record<AudioJobMode, LucideIcon> = {
   text_to_audio: Music4,
   midi_to_audio: AudioLines,
+  ai_cover: Sparkles,
   audio_with_stems: Layers,
-  midi_then_audio: Scissors,
 }
 
 export const MODE_SHORT: Record<AudioJobMode, string> = {
   text_to_audio: '整曲',
-  midi_to_audio: '渲染',
+  midi_to_audio: '忠实渲染',
+  ai_cover: 'AI 重编',
   audio_with_stems: '分轨',
-  midi_then_audio: '编曲→音频',
 }
 
 const ARM_META: Record<string, { label: string; icon: LucideIcon }> = {
@@ -64,7 +64,7 @@ const ARM_META: Record<string, { label: string; icon: LucideIcon }> = {
   strings: { label: '弦乐', icon: AudioLines },
 }
 
-export type StepKind = 'song' | 'stem' | 'render'
+export type StepKind = 'song' | 'stem' | 'render' | 'cover'
 
 export interface StepMeta {
   label: string
@@ -77,6 +77,7 @@ export interface StepMeta {
 export function stepMeta(step: AudioJobStep): StepMeta {
   if (step.key === 'song') return { label: '整曲', icon: Disc3, kind: 'song' }
   if (step.key === 'render') return { label: '渲染', icon: AudioLines, kind: 'render' }
+  if (step.key === 'cover') return { label: 'AI 重编', icon: Sparkles, kind: 'cover' }
   const arm = step.key.startsWith('stem:') ? step.key.slice('stem:'.length) : step.key
   const meta = ARM_META[arm]
   const fallbackLabel = step.label.replace(/^分轨\s*·\s*/, '').slice(0, 4)
@@ -101,6 +102,7 @@ export function pipelineSummary(steps: AudioJobStep[]): string {
   const parts = [`第 ${bounded + 1}/${steps.length} 步`]
   if (meta.kind === 'stem') parts.push('分轨', meta.label)
   else if (meta.kind === 'render') parts.push('渲染')
+  else if (meta.kind === 'cover') parts.push('AI 重编')
   else parts.push('整曲')
   return parts.join(' · ')
 }
@@ -284,6 +286,16 @@ const RENDER_STAGES: StageDef[] = [
   { key: 'upload', label: '写入轨道' },
 ]
 
+/** AI 重编 = 先渲染参考音频，再交给模型；阶段比纯生成多一个「渲染参考」 */
+const COVER_STAGES: StageDef[] = [
+  { key: 'render', label: '渲染参考' },
+  { key: 'queued', label: '排队' },
+  { key: 'engine', label: '载入模型' },
+  { key: 'sampling', label: '重编' },
+  { key: 'decoding', label: '封装' },
+  { key: 'upload', label: '写入' },
+]
+
 const PHASE_STAGE_INDEX: Record<string, number> = {
   queued: 0,
   prepare: 0,
@@ -297,12 +309,37 @@ const PHASE_STAGE_INDEX: Record<string, number> = {
   render: 1,
 }
 
+const COVER_STAGE_INDEX: Record<string, number> = {
+  prepare: 0,
+  render: 0,
+  queued: 1,
+  engine: 2,
+  prompt: 3,
+  sampling: 3,
+  decoding: 4,
+  upload: 5,
+  done: 6,
+  idle: 0,
+}
+
+function stageIndexOf(mode: AudioJobMode, phase: AudioJobPhase): number {
+  const table = mode === 'ai_cover' ? COVER_STAGE_INDEX : PHASE_STAGE_INDEX
+  return table[phase] ?? 0
+}
+
 /** 没有服务端阶段时的兜底：按进度推断（旧 Companion / 注入状态都能显示合理的阶段） */
 export function fallbackPhase(jobMode: AudioJobMode, progress: number, queued: boolean): AudioJobPhase {
   if (queued) return 'queued'
   if (jobMode === 'midi_to_audio') {
     if (progress >= 0.92) return 'upload'
     return progress <= 0.01 ? 'prepare' : 'render'
+  }
+  if (jobMode === 'ai_cover') {
+    // 渲染参考占 0–15%，之后是模型阶段；没有遥测时按进度推断
+    if (progress <= 0.15) return progress <= 0.01 ? 'prepare' : 'render'
+    if (progress >= 0.94) return 'upload'
+    if (progress >= 0.9) return 'decoding'
+    return 'sampling'
   }
   if (progress <= 0.04) return 'engine'
   if (progress >= 0.94) return 'upload'
@@ -325,9 +362,9 @@ export function GenerationStageRail({
   done: boolean
   className?: string
 }) {
-  const stages = mode === 'midi_to_audio' ? RENDER_STAGES : COMPANION_STAGES
+  const stages = mode === 'midi_to_audio' ? RENDER_STAGES : mode === 'ai_cover' ? COVER_STAGES : COMPANION_STAGES
   const resolved = phase ?? fallbackPhase(mode, progress, queued)
-  const activeIndex = done ? stages.length : Math.min(stages.length - 1, PHASE_STAGE_INDEX[resolved] ?? 0)
+  const activeIndex = done ? stages.length : Math.min(stages.length - 1, stageIndexOf(mode, resolved))
   return (
     <div
       className={cn('gen-stages', className)}

@@ -6,7 +6,7 @@
  */
 import { create } from 'zustand'
 
-export type AudioJobMode = 'text_to_audio' | 'midi_to_audio' | 'audio_with_stems' | 'midi_then_audio'
+export type AudioJobMode = 'text_to_audio' | 'midi_to_audio' | 'ai_cover' | 'audio_with_stems'
 export type AudioJobStatus = 'running' | 'done' | 'failed' | 'canceled' | 'blocked'
 
 export type AudioStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled'
@@ -84,7 +84,7 @@ export type AudioJobBlockReason = 'provision' | 'start-companion' | 'empty-proje
  * 「这条轨正在生成」承诺。生成完成后由 audioIntent 落成真实音频轨并
  * `removeSlot`，占位轨无缝变成真实片段，不会在工程里留下空轨。
  */
-export type AudioJobTrackRole = 'song' | 'stem' | 'render'
+export type AudioJobTrackRole = 'song' | 'stem' | 'render' | 'cover'
 
 export interface AudioJobTrackSlot {
   id: string

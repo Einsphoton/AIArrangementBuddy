@@ -97,6 +97,9 @@ async function main() {
           ['把当前编曲渲染成音频并分轨', true],
           ['导出成 wav 给我', true],
           ['生成整曲然后分轨', true],
+          ['用 AI 引擎把这个编曲渲染成高品质成品', true],
+          ['别只是把 MIDI 转成音频，用 AI 重编成摇滚版', true],
+          ['帮我换编制，做成管弦乐版', true],
           ['加一条鼓组轨道', false],
           ['优化一下和弦进行', false],
           ['打开音频设置', false],
@@ -189,7 +192,7 @@ async function main() {
         return true
       `)
       await page.waitFor('document.querySelector("[data-audio-job]")', 15000)
-      await page.waitFor('document.querySelector("[data-audio-job-status=\\"done\\"],[data-audio-job-status=\\"failed\\"]")', 120000)
+      await page.waitFor('document.querySelector("[data-audio-job-status=done],[data-audio-job-status=failed]")', 120000)
       await page.screenshot(PNG('02-midi-rendered-audio-track.png'))
       const after = await page.evaluate(`
         const project = window.AIAB.useStore.getState().project
@@ -207,6 +210,137 @@ async function main() {
       return `轨道 ${before.tracks} -> ${after.tracks}，音频轨 ${after.audioTracks} 条，保存状态 ${after.saveStatus}`
     })
 
+    await check('AI 重编（ai_cover）走模型链路：无引擎时 blocked，且不会偷偷本地渲染', async () => {
+      const before = await page.evaluate(`
+        return {
+          audioTracks: window.AIAB.useStore.getState().project.tracks.filter(
+            (track) => track.kind === 'audio' && track.audioClips.length > 0,
+          ).length,
+        }
+      `)
+      await page.evaluate(`
+        window.AIAB.audio.handleAudioPlanFromToolData({ audioPlan: {
+          mode: 'ai_cover',
+          caption: 'epic orchestral rock with distorted guitars and live drums, 116 bpm',
+          coverStrength: 0.7,
+          reason: 'verify'
+        } })
+        return true
+      `)
+      await page.waitFor('document.querySelector("[data-audio-job]")', 15000)
+      await page.waitFor(
+        'document.querySelector("[data-audio-job-status=blocked],[data-audio-job-status=failed],[data-audio-job-status=done]")',
+        20000,
+      )
+      await page.screenshot(PNG('03-ai-cover-blocked.png'))
+      const after = await page.evaluate(`
+        const job = document.querySelector('[data-audio-job]')
+        return {
+          status: job?.getAttribute('data-audio-job-status'),
+          audioTracks: window.AIAB.useStore.getState().project.tracks.filter(
+            (track) => track.kind === 'audio' && track.audioClips.length > 0,
+          ).length,
+          provisionOpen: Boolean(document.querySelector('[data-provision-panel]')),
+        }
+      `)
+      // 测试环境没有模型/节点：cover 必须停在 blocked（或直接 failed），绝不能像渲染那样直接落音频轨
+      if (after.status !== 'blocked' && after.status !== 'failed') {
+        throw new Error(`ai_cover 在没有引擎时应 blocked/failed，实际 ${after.status}`)
+      }
+      if (after.audioTracks !== before.audioTracks) {
+        throw new Error(`ai_cover 不该在模型未运行时落音频轨（${before.audioTracks} → ${after.audioTracks}）`)
+      }
+      return `状态 ${after.status}，音频轨 ${after.audioTracks} 条（未增加）${after.provisionOpen ? '，安装对话框已打开' : ''}`
+    })
+
+    await check('AI 重编全链路（mock 节点）：渲染参考 → cover_audio 参数 → 落 0 拍新轨', async () => {
+      // 关掉上一个 blocked 任务卡/安装面板，避免状态互相干扰
+      await page.evaluate(`
+        document.querySelector('[data-provision-panel] button[aria-label="关闭安装面板"]')?.click()
+        document.querySelector('[data-audio-job] button[aria-label="关闭音频任务卡"]')?.click()
+        return true
+      `)
+      await sleep(150)
+      // 只 mock Companion 的三个接口：节点在线、任务提交、任务完成。
+      // 渲染 / 上传 / peaks 仍走真实链路，验证 runCoverFlow 的接线。
+      await page.evaluate(`
+        window.__coverCalls = []
+        window.__coverSourceId = null
+        const original = window.fetch
+        window.__coverRestore = () => { window.fetch = original }
+        const json = (value) => new Response(JSON.stringify(value), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+        window.fetch = async (url, init) => {
+          const target = String(url)
+          if (target.includes('/api/companion/status')) {
+            return json({ online: true, summary: { workers: 1 }, workers: [], tasks: [] })
+          }
+          if (target.includes('/api/companion/tasks') && init?.method === 'POST') {
+            const body = JSON.parse(String(init.body ?? '{}'))
+            window.__coverCalls.push(body)
+            window.__coverSourceId = body?.params?.sourceAssetId ?? null
+            return json({ taskId: 'task_cover_mock', status: 'queued', summary: 'mock cover' })
+          }
+          if (target.includes('/api/companion/tasks/task_cover_mock')) {
+            return json({ task: { id: 'task_cover_mock', status: 'done', progress: 1, assetId: window.__coverSourceId } })
+          }
+          return original(url, init)
+        }
+        return true
+      `)
+      const before = await page.evaluate(`
+        return window.AIAB.useStore.getState().project.tracks.length
+      `)
+      await page.evaluate(`
+        window.AIAB.audio.handleAudioPlanFromToolData({ audioPlan: {
+          mode: 'ai_cover',
+          caption: 'epic orchestral rock with distorted guitars and live drums, 116 bpm',
+          coverStrength: 0.7,
+          reason: 'verify'
+        } })
+        return true
+      `)
+      await page.waitFor('document.querySelector("[data-audio-job]")', 15000)
+      await page.waitFor(
+        'document.querySelector("[data-audio-job-status=done],[data-audio-job-status=failed]")',
+        120000,
+      )
+      const result = await page.evaluate(`
+        const state = window.AIAB.useStore.getState()
+        const project = state.project
+        const coverTrack = project.tracks.find((track) => track.name.includes('AI 重编'))
+        const clip = coverTrack?.audioClips?.[0]
+        const calls = window.__coverCalls ?? []
+        const post = calls[0] ?? null
+        return {
+          status: document.querySelector('[data-audio-job]')?.getAttribute('data-audio-job-status'),
+          error: document.querySelector('[data-audio-job]')?.getAttribute('data-audio-job-error'),
+          tracks: project.tracks.length,
+          coverTrack: coverTrack?.name ?? null,
+          startBeat: clip?.startBeat ?? null,
+          type: post?.type ?? null,
+          caption: post?.params?.caption ?? null,
+          strength: post?.params?.audioCoverStrength ?? null,
+          sourceAssetId: post?.params?.sourceAssetId ?? null,
+          jobMode: window.AIAB.useAudioJobStore.getState().job?.mode ?? null,
+        }
+      `)
+      await page.evaluate(`window.__coverRestore?.(); return true`)
+      await page.screenshot(PNG('04-ai-cover-done.png'))
+      if (result.status !== 'done') throw new Error(`任务状态 ${result.status}${result.error ? `：${result.error}` : ''}`)
+      if (result.jobMode !== 'ai_cover') throw new Error(`任务模式应为 ai_cover，实际 ${result.jobMode}`)
+      if (result.tracks <= before) throw new Error(`没有新增 AI 重编轨：${before} → ${result.tracks}`)
+      if (!result.coverTrack) throw new Error('找不到「AI 重编」音频轨')
+      if (result.type !== 'cover_audio') throw new Error(`提交的任务类型应为 cover_audio，实际 ${result.type}`)
+      if (!String(result.caption).includes('orchestral rock')) throw new Error(`caption 没有透传：${result.caption}`)
+      if (Number(result.strength) !== 0.7) throw new Error(`coverStrength 没有透传：${result.strength}`)
+      if (!result.sourceAssetId) throw new Error('cover_audio 缺少 sourceAssetId（参考音频没有上传）')
+      if (Number(result.startBeat) !== 0) throw new Error(`AI 重编产物应落 0 拍，实际 ${result.startBeat}`)
+      return `cover_audio · strength=${result.strength} · 参考 ${result.sourceAssetId.slice(0, 12)}… · 落轨 0 拍`
+    })
+
     await check('顶栏「新建」打开新建工程向导', async () => {
       const opened = await page.evaluate(`
         const btn = [...document.querySelectorAll('header button')].find((b) => (b.textContent || '').includes('新建'))
@@ -215,7 +349,7 @@ async function main() {
         await new Promise((r) => setTimeout(r, 500))
         return Boolean(document.querySelector('[data-new-project-dialog]'))
       `)
-      await page.screenshot(PNG('03-new-project-wizard.png'))
+      await page.screenshot(PNG('05-new-project-wizard.png'))
       await page.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true`)
       if (!opened) throw new Error('向导没有打开')
       return '向导已打开'

@@ -208,7 +208,17 @@ async function main() {
       if (!/本次任务意图（audio）/.test(system)) throw new Error('系统提示缺少 intent=audio 指令')
       const tools = (first.tools ?? []).map((tool) => tool.function?.name)
       if (!tools.includes('generate_audio')) throw new Error('工具列表缺少 generate_audio')
-      return `工具 ${tools.length} 个，system ${system.length} 字`
+      if (!/ai_cover/.test(system)) throw new Error('系统提示缺少 ai_cover 判定（AI 重编）')
+      if (!/忠实渲染/.test(system)) throw new Error('系统提示没说明 midi_to_audio 是忠实渲染（不跑 AI）')
+      // 工具 schema 是模型路由的硬约束：必须暴露 ai_cover，且不再有含糊的 midi_then_audio
+      const audioTool = (first.tools ?? []).find((tool) => tool.function?.name === 'generate_audio')
+      const modes = audioTool?.function?.parameters?.properties?.mode?.enum ?? []
+      if (!modes.includes('ai_cover')) throw new Error(`generate_audio.mode 缺少 ai_cover：${JSON.stringify(modes)}`)
+      if (modes.includes('midi_then_audio')) throw new Error('generate_audio.mode 仍暴露已废弃的 midi_then_audio')
+      if (!modes.includes('midi_to_audio') || !modes.includes('text_to_audio')) {
+        throw new Error(`generate_audio.mode 缺少基础模式：${JSON.stringify(modes)}`)
+      }
+      return `工具 ${tools.length} 个，system ${system.length} 字，mode ${modes.join('/')}`
     })
 
     await check('前端自动执行 audioPlan：任务卡完成并新增音频轨', async () => {

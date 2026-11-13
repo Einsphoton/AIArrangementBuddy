@@ -16,7 +16,13 @@ const INTENT_INSTRUCTIONS: Record<string, string> = {
   optimize:
     '用户想优化当前编排。先 analyze_harmony 找问题（缺低音/缺鼓/密度/段落），再逐项修正：缺内容用生成器补；结构单调用 copy_clip / repeat_section 扩展；时值不齐用 quantize_clip；音高不贴调用 transpose_clip / scale_lock_clip；机械感用 humanize_clip / velocity_curve。优先编辑已有素材，不要推倒全部重新生成，改完说明理由。',
   audio:
-    '用户想生成/渲染音频。先根据用户原话判断并直接执行，不要反问「你要 MIDI 还是音频」：要成品音频、没有可用 MIDI → generate_audio(mode:"text_to_audio")；工程已有编曲、要导出/渲染听到成品 → generate_audio(mode:"midi_to_audio")；要分轨/分开乐器 → generate_audio(mode:"audio_with_stems")；要「先编曲再出音频」→ 先用 MIDI 工具完成编曲，再 generate_audio(mode:"midi_to_audio")。caption 必须是英文提示词（风格/乐器/情绪/BPM）。调用后简短说明你选了哪种模式与原因，音频任务的执行进度由界面展示。',
+    '用户想生成/渲染音频。先判断他要「忠实导出」还是「AI 成品」，再直接执行，不要反问：' +
+    '只是把现有编曲导出/转 WAV/听现在这样 → generate_audio(mode:"midi_to_audio")（采样器忠实渲染，不跑 AI 模型，结果与 MIDI 一一对应，不要称它为 AI 生成）；' +
+    '要用 AI 把现有编曲做成成品/换编制/换音色/更好听 → generate_audio(mode:"ai_cover", caption:"...")（AI 重编，会改细节、不保证逐音对齐）；' +
+    '从零要一首新歌、或工程里没有可用素材 → mode:"text_to_audio"；要分轨/分开乐器 → mode:"audio_with_stems"。' +
+    '用户说「用 AI 引擎渲染 / 让 AI 发挥 / 别只是把 MIDI 转音频」时选 ai_cover。' +
+    'caption 必须是英文提示词（风格/乐器/情绪/BPM），ai_cover 用它描述目标编制。' +
+    '调用后简短说明选了哪种模式与原因，音频任务在界面异步执行并自动落轨。',
 }
 
 const TOOL_GUIDE = `可用工具（调用时严格遵守 JSON Schema）：
@@ -29,29 +35,34 @@ const TOOL_GUIDE = `可用工具（调用时严格遵守 JSON Schema）：
   quantize_clip（量化时值，可带 swing/strength）、humanize_clip（人性化时值与力度）、
   scale_lock_clip（把音符锁到调内音阶）、velocity_curve（按形状重设力度曲线）
 - 编曲核心：arrange_from_melody（旋律→整套伴奏）、melody_from_chords（和弦→旋律）
-- 音频产出：generate_audio（按用户意图选择 text_to_audio / midi_to_audio / audio_with_stems / midi_then_audio；只决定「做什么」，实际生成由界面异步执行并自动落轨）
+- 音频产出：generate_audio（text_to_audio=从零生成 / midi_to_audio=忠实渲染（采样器，不跑 AI）/ ai_cover=用 AI 把现有编曲重编成成品 / audio_with_stems=整曲+分轨；只决定「做什么」，实际执行由界面异步完成并自动落轨）
 - 工程：set_tempo、set_key_scale、set_chords、set_sections、set_master_volume、
   set_swing、set_time_signature、set_loop、transpose_project
 - 界面：ui_action（请求 DAW 播放/停止/跳转播放头/切视图/选中片段/打开导出或设置/撤销重做/开关循环与节拍器）
 - 工具名别名：常见叫法（add_drums、add_bass、duplicate_clip、quantize_notes、rename_track、mute_track、render_audio、generate_stems 等）会被自动映射到真实工具，可以放心使用。`
 
 /**
- * 音频产出意图判定：让 AI 自己决定「MIDI / 音频 / 先 MIDI 再音频 / 分轨」，
+ * 音频产出意图判定：让 AI 自己决定「忠实渲染 / AI 重编 / 从零生成 / 分轨」，
  * 而不是让用户去顶栏找「生成音频」按钮。工具只产出执行计划，前端负责异步生成与落轨。
  */
 const AUDIO_GUIDE = `音频产出判定（对应 generate_audio 工具）：
-1. 先读用户原话，判断他最终想拿到的是「可编辑的 MIDI 编曲」还是「能直接听的音频成品」：
+1. 先判断他最终想拿到的是「可编辑的 MIDI 编曲」还是「能直接听的音频」：
    - 只是编曲、要轨道/片段/音符 → 用 MIDI 工具完成即可，不要调用 generate_audio。
-   - 明确提到「音频 / 成品 / 导出 / 渲染 / WAV / MP3 / 分轨 / stem」→ 调用 generate_audio。
-2. 模式选择（直接执行，不要反问用户）：
-   - 从零要一首成品音频、或工程里没有可用素材 → mode:"text_to_audio"。
-   - 工程里已有编曲/ MIDI，用户要「导出成音频 / 渲染出来听」→ mode:"midi_to_audio"。
-   - 用户要「分轨 / 分开乐器 / 每条乐器一条轨」→ mode:"audio_with_stems"（必要时同时给 stems）。
-   - 用户要「先编曲再出音频」→ 先用 MIDI 工具完成编曲，再 mode:"midi_to_audio"；也可以直接 mode:"midi_then_audio" 表达同一意图。
-3. caption 必须是由用户描述提炼的**英文**提示词，包含风格、主要乐器、情绪、速度；不要原样塞中文。
-4. bpm / durationSec / startBeat 省略时分别用工程 BPM / 30s / 播放头；分轨模式默认 guitar、bass、drums。
-5. 调用 generate_audio 后，用一两句话说明「选了哪种模式、为什么」即可；音频生成在界面中异步执行并自动落轨，你不需要轮询，也不要在文字里假装已经生成完成。
-6. 如果工具返回失败（例如工程为空），按提示先补 MIDI 或调整参数再重试；不要空口承诺生成了音频。`
+   - 明确提到「音频 / 成品 / 导出 / 渲染 / WAV / MP3 / 分轨 / stem / 换音色 / 重新配器」→ 调用 generate_audio。
+2. 模式选择（直接执行，不要反问用户）——「渲染」和「创作」是两件事：
+   - midi_to_audio：忠实渲染。用浏览器采样器把当前 MIDI 逐音变成音频，不启动 AI 模型，结果与 MIDI 一一对应。
+     适用于「导出 / 转 WAV / 听听现在这样 / 备份一份音频」。不接受 engine / quality，也不要说它用了 AI 引擎。
+   - ai_cover：AI 重编（cover）。先渲染当前工程作为参考，再交给 AI 引擎保结构换编制/换音色；会改细节、不保证逐音对齐。
+     适用于「用 AI 做成成品 / 用 AI 引擎渲染 / 换编制 / 重新配器 / 让 AI 发挥 / 比 MIDI 好听」。
+     必须给英文 caption 描述目标风格与编制；可用 coverStrength 0–1（默认 0.7，越大越贴近原结构）。
+     XL 4B 仅 Windows 现代运行时可用；macOS/Linux 只能 2b，传 xl 会被工具拒绝——如实告诉用户，不要承诺 XL。
+   - text_to_audio：从零用文本生成一首新歌，不读取工程音符；工程为空或用户只要新歌时用。
+   - audio_with_stems：先生成整曲再分离分轨。
+3. 关键区分：用户抱怨「只是把 MIDI 转成音频 / 没发挥 AI」时，不要再选 midi_to_audio；改用 ai_cover。
+4. caption 必须是由用户描述提炼的**英文**提示词，包含风格、主要乐器、情绪、速度；不要原样塞中文。
+5. bpm / durationSec / startBeat 省略时分别用工程 BPM / 30s / 播放头；分轨模式默认 guitar、bass、drums；ai_cover 固定从第 0 拍落轨。
+6. 调用 generate_audio 后，用一两句话说明「选了哪种模式、为什么」即可；音频生成在界面中异步执行并自动落轨，你不需要轮询，也不要在文字里假装已经生成完成。不要声称 AI 引擎参与了 midi_to_audio，也不要把 ai_cover 说成逐音渲染。
+7. 如果工具返回失败（例如工程为空、参数不适用），按提示先补 MIDI 或换模式/调整参数再重试；不要空口承诺生成了音频。`
 
 const RULES = `工作规则：
 1. 涉及工程改动时必须调用工具，绝不只在文字里描述参数；一次回复可以并行调用多个互不依赖的工具（例如同时新建鼓组与贝斯、同时量化多个片段），依赖前一步结果的工具等结果回来再调。复杂任务可以连续多轮推进、逐步完善，不要为了「一次做完」把步骤写乱，也不要把能并行的步骤拆成串行。
@@ -193,6 +204,6 @@ export function buildExternalAgentPrompt(
     .join('\n\n')
   const mcpGuide = `你可以通过名为 aiab 的 MCP server 调用 DAW 工具（get_project_summary、create_track、generate_smart_clip、arrange_from_melody、melody_from_chords、write_notes、copy_clip、repeat_section、quantize_clip、transpose_clip、generate_audio 等）。
 修改工程只能通过 MCP 工具完成；不要用 shell 或写文件的方式改工程。每次工具返回会带最新工程状态。
-生成音频/渲染/分轨用 generate_audio 工具，mode 取 text_to_audio / midi_to_audio / audio_with_stems / midi_then_audio；它会返回执行计划，界面会自动提交任务并落轨。`
+生成音频/渲染/分轨用 generate_audio 工具，mode 取 text_to_audio / midi_to_audio / ai_cover / audio_with_stems；midi_to_audio 是忠实渲染（不跑 AI），要 AI 重编现有编曲用 ai_cover。它会返回执行计划，界面会自动提交任务并落轨。`
   return [system, mcpGuide, history ? `对话历史：\n${history}` : '', '请完成用户最新的请求，最后用简体中文简短说明改动。'].filter(Boolean).join('\n\n')
 }

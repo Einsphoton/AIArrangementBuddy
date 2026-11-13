@@ -78,6 +78,7 @@
 | **智能片段（情绪）** | 每个乐器 4–6 种情绪（温暖 / 明亮 / 忧郁 / 激昂 / 张力 / 宏大…），映射到真实的音色与演奏法（断奏、闷音、震音、泛音、拨奏） |
 | **和弦进行补全（P7-C）** | 智能片段面板「补全进行」：给半截罗马数字进行（如 `I V vi`）+ 目标长度（4/8/16），按风格/最后和弦功能补全后半段，展示终止式与原因；一键写入工程和弦（跟随和弦的智能片段自动重算，⌘Z 一步撤销） |
 | **简谱导入（P7-D）** | 文件菜单「导入简谱…」：粘贴简谱（`1=C`、`4/4`、`♩=120`、1–7 音符、`'`/`,` 八度、`#`/`b`、`/` 八分、`.` 附点、`-` 延长、`~` 连音、`\|` 小节线）→ 生成单条旋律轨；可再接「AI 重编（cover）」渲染成完整歌 |
+| **Agent 音频路由：忠实导出 vs AI 重编（2026-11-13）** | AI 助手能听懂两种意图并走不同链路：「导出/渲染成品」→ 浏览器采样器逐音渲染（**不启动 AI 模型**，不接受引擎/精修参数）；「用 AI 做成成品/换编制/让 AI 发挥」→ 自动渲染参考音频并提交 **cover**（`ai_cover`，可调贴近度）。渲染回执不再假称「AI 引擎」，`midi_then_audio` 已并入 `ai_cover`。详见 [docs/AI_AUDIO_ROUTING_2026-11-13.md](docs/AI_AUDIO_ROUTING_2026-11-13.md) |
 | **生成中的 AI 音频轨（P14）** | 音频任务一开始就在 DAW 里建好占位轨并盖上动态生成特效（极光 / 扫描光带 / 镜像波形 / 实时进度 / 粒子），阻塞 / 失败时就地换色；完成后占位轨原地替换成真实音频轨（整曲 + 各分轨）并自动定位到新轨；收起任务卡不会中断生成。详见 [docs/AUDIO_GENERATION_TRACKS.md](docs/AUDIO_GENERATION_TRACKS.md) |
 | **一键整曲 + 分轨（P7-E）** | 生成面板「一键整曲 + 分轨 Stem」：选乐器（吉他/贝斯/鼓/弦乐/键盘/合成器/人声，默认 3 种）+ 质量模式 → 先出整曲音频轨，再以整曲为上下文逐条生成 Stem 落独立轨道；面板内显示每步进度，每步独立撤销 |
 | **本机引擎自动安装（P8）** | 首次启动检测平台（Windows x64 / macOS Apple Silicon / Linux x64），自动下载 ACE-Step 运行时（官方 GitHub release）与模型（公开 HF，sha256 校验、断点续传、按需 profile：基础≈3.4GB / +质量≈7.6GB / +分轨≈10.2GB）；自动附带自生成数据的 LoRA 适配器（jrpg_v1/jrpg_v2/jrock_v1，≈81MB，GitHub Releases 校验安装）；顶栏「安装本机引擎」或 `node scripts/provision.mjs`；macOS 用 Metal 后端。训练代码/自生成数据集/基座检查点按需下载（`training-code-v1` / `training-data-v1` / HF ACE-Step），顶栏「训练风格」一键准备环境并训练，完成后自动注册适配器；见 `training/` 与 [docs/P8_PROGRESS.md](docs/P8_PROGRESS.md)。详见 [docs/SETUP_MAC.md](docs/SETUP_MAC.md) |
@@ -96,7 +97,7 @@
 | **混音器** | 真实每轨电平、dB 标尺、峰值保持与重置、推子加速度拖拽、通道右键菜单、高度可拖拽 |
 | **AI 混音（推子 + 每轨链 + 母线/母带）** | 按「声部角色 × 风格 × 能量」自动给每轨音量/声像/混响与延迟发送 + 总线；可同时应用每轨三段 EQ + 压缩 + 补偿增益（合成器/音频片段/SoundFont 采样全覆盖；采样轨 >16 条时回退全局输出）以及**总线 / 母带处理**（总线 EQ + 母线压缩 + 限幅上限 -1dBFS）；先预览差异再一键应用，⌘Z 一步撤销，可分别清除每轨链/母带链 |
 | **音频轨道（P1/P2）** | 导入 WAV → 音频轨 + 波形片段，随走带播放（与 Tone.Transport 同步，复用轨道音量/声像/静音/发送）；支持选中、右键删除、双击定位；右键「局部重绘…」按区间重绘（整段替换为新 take，原版本保留、可「切换版本」回退）；`stretchRatio` 固定 1（暂不做变速） |
-| **AI 重编 / cover（P7-B）** | 生成面板「AI 重编（cover）」：把当前工程离线渲染成 WAV（含每轨链/母线链）→ 上传资产 → cover 任务（保结构换编制）→ 新音频轨；「贴近原结构」滑杆 0–1（默认 0.7），不改原 MIDI。适用场景：MIDI 编好骨架后让 AI 渲染成完整歌，再迭代加轨/重绘 |
+| **AI 重编 / cover（P7-B）** | 生成面板「AI 重编（cover）」，Agent 也可直接调用 `generate_audio(mode:"ai_cover")`：把当前工程离线渲染成 WAV（含每轨链/母线链）→ 上传资产 → cover 任务（保结构换编制）→ 新音频轨；「贴近原结构」滑杆 0–1（默认 0.7），不改原 MIDI。适用场景：MIDI 编好骨架后让 AI 渲染成完整歌，再迭代加轨/重绘 |
 | **生成分轨 Stem（P5）** | 音频片段右键「生成分轨 Stem…」：按乐器（吉他/贝斯/鼓组/弦乐/键盘/合成器/人声，可多选）各提交一个 lego 任务（base 基座），完成后自动新建独立音频轨并对齐源片段位置。**注意：stem 是按原曲上下文独立生成的，不是分离音轨，不保证与源音频逐样本对齐或相加还原** |
 | **AI 生成音频（P1/P2/P7）** | 顶栏「生成音频」→ 描述/BPM/时长/风格/LoRA 适配器 → 由本地 Companion 调 ACE-Step 生成，进度条 + 可取消，完成后自动上轨（一次撤销）。**质量模式**（P7-A）：勾选后走 `LM → sft 50 步`（更慢、高频/编曲更完整，与 LoRA 互斥，20s 音频约 15–25s）。适配器含自生成数据的 `jrpg_v1/v2`、`jrock_v1`，以及**真实数据内部研究版** `real_jrpg_v1` / `real_jrock_v1`（用户提供商业录音训练，仅本地研究、不得分发；A/B 对比页在 `music-gen/lora-data/ab/<tag>/listen.html`） |
 | **Companion 工作节点（P2/P4）** | GPU 机器上运行 `node scripts/companion.mjs --server <服务地址> --acestep --engine-idle 600`：常驻引擎跨任务复用（冷启动 15s → 热任务 2s）、按任务切换 turbo/sft、支持 LoRA、真取消（杀引擎后自动恢复）、repaint 执行器；P4 起上报真实模型能力并支持任务优先级（普通/高/紧急）与排队位置/ETA。**单机形态下界面可一键启动生成节点、提交任务时也会自动拉起**（`AIAB_COMPANION_AUTOSTART=0` 可关闭），无需手敲命令 |
@@ -417,7 +418,7 @@ pnpm soundfonts --list     # 查看其他可选音色库
 - **权威状态在客户端**：每次请求把工程快照发给后端，Agent 在快照上调用工具，返回新快照并实时推给前端。
   这样不需要复杂的双向同步，也天然支持「撤销 AI 的全部改动」。
 
-更多文档：[AI 音乐风格学习 · 总体规划](docs/AI_MUSIC_ROADMAP.md) · [架构说明](docs/ARCHITECTURE.md) · [Studio 形态能力矩阵（a–g）](docs/STUDIO_MODE.md) · [Companion 工作节点协议](docs/COMPANION.md) · [Agent 集成指南（Codex / DSH / MCP）](docs/AGENT.md) · [开发契约](docs/CONTRACTS.md) · [MIDI 语料与风格学习（可行性评估）](docs/MIDI_CORPUS_STYLE_LEARNING.md) · [三线融合路线（语料 × 检索 × 模型）](docs/FUSION_ROADMAP.md) · [LoRA 微调手册（JRPG / J-Rock）](docs/LORA_FINETUNING_PLAN.md) · [模型管理器：适配器生命周期](docs/MODEL_MANAGER.md) · [MIDI → 高质量音频可行性研究](docs/MIDI_RENDER_QUALITY_FEASIBILITY.md) · [渲染质量修复（P0）](docs/RENDER_QUALITY_FIX_2026-11-13.md)。
+更多文档：[AI 音乐风格学习 · 总体规划](docs/AI_MUSIC_ROADMAP.md) · [架构说明](docs/ARCHITECTURE.md) · [Studio 形态能力矩阵（a–g）](docs/STUDIO_MODE.md) · [Companion 工作节点协议](docs/COMPANION.md) · [Agent 集成指南（Codex / DSH / MCP）](docs/AGENT.md) · [开发契约](docs/CONTRACTS.md) · [MIDI 语料与风格学习（可行性评估）](docs/MIDI_CORPUS_STYLE_LEARNING.md) · [三线融合路线（语料 × 检索 × 模型）](docs/FUSION_ROADMAP.md) · [LoRA 微调手册（JRPG / J-Rock）](docs/LORA_FINETUNING_PLAN.md) · [模型管理器：适配器生命周期](docs/MODEL_MANAGER.md) · [MIDI → 高质量音频可行性研究](docs/MIDI_RENDER_QUALITY_FEASIBILITY.md) · [渲染质量修复（P0）](docs/RENDER_QUALITY_FIX_2026-11-13.md) · [Agent 音频路由](docs/AI_AUDIO_ROUTING_2026-11-13.md)。
 
 ---
 
