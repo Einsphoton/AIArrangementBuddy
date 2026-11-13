@@ -36,6 +36,8 @@ import { IS_WINDOWS, spawnBin } from './lib/spawn-bin.mjs'
 import {
   applyModelSelection,
   buildExtractRequest,
+  buildRepaintRequest,
+  buildCoverRequest,
   buildLegoRequest,
   buildQualityLmRequest,
   buildQualitySynthRequest,
@@ -1952,6 +1954,68 @@ function scenarioStemExtractRequest(signal) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 7.6b 所有 /synth 请求都必须显式带 task_type —— schema 漂移回归        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 引擎的 AceRequest schema 用 `task_type` 选择任务，缺省值是 `text2music`。
+ * 只要某个请求构造器漏发 `task_type`，该任务专属字段（掩码/覆盖率/轨道名）
+ * 就会被**静默忽略**，退化成"整段重新生成"——而且不报错，极难发现。
+ *
+ * 已实测踩过的三个坑（每个都是漏发 task_type）：
+ *   - generate_stem 曾发 `{lego: arm}` → 回落 text2music，分轨变成另一首歌
+ *   - repaint 曾无 task_type → 掩码失效（区域外相关 +1.0000 → +0.0059），
+ *     且 240s 源被裁成 30s
+ *   - cover 曾无 task_type → audio_cover_strength 失效（包络相关 +0.3363 → +0.0274），
+ *     240s 源同样被裁成 30s
+ *
+ * 这个场景把「每个请求构造器都必须声明 task_type，且值必须与引擎白名单一致」钉住。
+ */
+function scenarioSynthRequestTaskTypes(signal) {
+  void signal
+  /** 引擎 constants.py:TASK_TYPES 里的合法值 */
+  const ENGINE_TASK_TYPES = ['text2music', 'repaint', 'cover', 'cover-nofsq', 'extract', 'lego', 'complete']
+
+  const cases = [
+    ['repaint', buildRepaintRequest({ caption: 'jazz trio', startSec: 30, endSec: 45, seed: 7 })],
+    ['cover', buildCoverRequest({ caption: 'metal version', seed: 7, strength: 0.8 })],
+    ['extract(stem)', buildExtractRequest(validateStemParams({ sourceAssetId: 'asset', arm: 'guitar' }))],
+  ]
+
+  for (const [label, request] of cases) {
+    if (!request.task_type) {
+      throw new Error(`${label} 请求缺 task_type → 引擎会回落 text2music，任务专属字段将静默失效`)
+    }
+    if (!ENGINE_TASK_TYPES.includes(request.task_type)) {
+      throw new Error(`${label} 的 task_type=${request.task_type} 不在引擎白名单内`)
+    }
+    // generate_audio 是 text2music，显式不写 task_type 是允许的（引擎缺省值即它）
+  }
+
+  // repaint 必须同时带掩码区间，否则 task_type 对了也没用
+  const repaint = cases.find(([label]) => label === 'repaint')[1]
+  if (repaint.repainting_start !== 30 || repaint.repainting_end !== 45) {
+    throw new Error(`repaint 缺掩码区间：${JSON.stringify(repaint)}`)
+  }
+  if (repaint.task_type !== 'repaint') throw new Error(`repaint 的 task_type 应为 repaint，实际 ${repaint.task_type}`)
+
+  // cover 必须带覆盖率，否则注意不到它被忽略
+  const cover = cases.find(([label]) => label === 'cover')[1]
+  if (cover.audio_cover_strength !== 0.8) throw new Error(`cover 缺 audio_cover_strength：${JSON.stringify(cover)}`)
+  if (cover.task_type !== 'cover') throw new Error(`cover 的 task_type 应为 cover，实际 ${cover.task_type}`)
+
+  // applyModelSelection 不得冲掉任务类型（现代运行时会改写采样字段与模型名）
+  for (const [label, request] of cases) {
+    const merged = applyModelSelection(request, { variant: 'sft' })
+    if (merged.task_type !== request.task_type) {
+      throw new Error(`${label} 经 applyModelSelection 后 task_type 被改写：${request.task_type} → ${merged.task_type}`)
+    }
+  }
+
+  return `repaint/cover/extract 均带合法 task_type · applyModelSelection 不改写`
+}
+
+/* ------------------------------------------------------------------ */
 /* 7.6 生成参数（shift / keyscale）纯函数断言 —— 缺陷 #1 回归           */
 /* ------------------------------------------------------------------ */
 
@@ -2325,6 +2389,7 @@ async function main() {
       ['28. applyModelSelection 现代运行时：turbo shift 保持 3.0（缺陷 #1）', scenarioApplyModelSelectionModern],
       ['29. 人声意图端到端：instrumental 缺省不变 · 要人声 lyrics="" · 质量路径一致 · 分轨护栏（缺陷 #3）', scenarioVocalIntent],
       ['30. DC 偏置安全网：病态 DC 校正 · 健康音频位精确不变 · 非 WAV 不崩（缺陷 #3）', scenarioDcOffsetGuard],
+      ['31. /synth 请求必须显式带 task_type（repaint 掩码 / cover 覆盖率不再静默失效）', scenarioSynthRequestTaskTypes],
     ]
 
     for (const [name, fn] of scenarios) {

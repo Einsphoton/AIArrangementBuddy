@@ -1043,13 +1043,23 @@ export function validateRepaintParams(params = {}, { sourceDurationSec } = {}) {
   return normalized
 }
 
-/** repaint_audio：校验后的参数 → AI 音频生成引擎 /synth multipart 里的 request JSON。 */
+/**
+ * repaint_audio：校验后的参数 → AI 音频生成引擎 /synth multipart 里的 request JSON。
+ *
+ * **必须显式发 `task_type: 'repaint'`**：引擎的掩码只在 repaint 任务下生效；
+ * 缺这个字段会回落 `task_type=text2music`，`repainting_start/end` 被完全忽略，
+ * 结果变成「整段重新生成」（实测区域外相关从 +1.0000 掉到 +0.0059）。
+ * 这与 generate_stem 曾经漏发 task_type 是同一类缺陷。
+ *
+ * 时长无需下发：引擎在 repaint 任务下自动锁源音频时长（实测带/不带 duration 均为 240s）。
+ */
 export function buildRepaintRequest(params = {}) {
   return {
     caption: params.caption,
     lyrics: '[Instrumental]',
     seed: Number.isInteger(params.seed) ? params.seed : resolveSeed(params.seed),
     batch_size: 1,
+    task_type: 'repaint',
     repainting_start: params.startSec,
     repainting_end: params.endSec,
     inference_steps: 50,
@@ -2252,13 +2262,22 @@ export function validateCoverParams(params = {}) {
   }
 }
 
-/** cover_audio 的 /synth 请求（multipart 的 request 字段）：保结构换编制。 */
+/**
+ * cover_audio 的 /synth 请求（multipart 的 request 字段）：保结构换编制。
+ *
+ * **必须显式发 `task_type: 'cover'`**：缺这个字段会回落 `task_type=text2music`，
+ * `audio_cover_strength` 被忽略，源结构全丢、时长也被裁成默认值。
+ * 实测（240s 源，同 seed）：带 task_type → 240s / 包络相关 +0.3363；
+ * 不带 → 30s / 包络相关 +0.0274（= 退化为整段重新生成）。
+ * 与 repaint / generate_stem 曾漏发 task_type 是同一类缺陷。
+ */
 export function buildCoverRequest(validated) {
   return {
     caption: validated.caption,
     lyrics: '[Instrumental]',
     seed: validated.seed,
     batch_size: 1,
+    task_type: 'cover',
     audio_cover_strength: validated.strength,
     inference_steps: 8,
     guidance_scale: 1.0,
