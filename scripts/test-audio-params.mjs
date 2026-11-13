@@ -1000,11 +1000,41 @@ check('generate_audio：非 Windows 平台拒绝 XL（不再承诺跑不了的�
   return 'macOS/Linux 传 xl 被拒绝，回执指向 2b'
 })
 
-check('generate_audio：ai_cover 缺 strength 默认 0.7', async () => {
+check('generate_audio：ai_cover 缺 strength 默认 0.45（重新编配，不再默认保结构）', async () => {
   const result = await runGenerateAudio({ mode: 'ai_cover', caption: 'jazz trio re-orchestration' }, contentCtx())
   if (!result.ok) throw new Error(result.message)
-  expectEq('coverStrength', result.data?.audioPlan?.coverStrength, 0.7)
-  return '缺省 0.7（与生成面板一致）'
+  expectEq('coverStrength', result.data?.audioPlan?.coverStrength, 0.45)
+  return '缺省 0.45'
+})
+
+check('generate_audio：ai_cover 支持 trackIds（只把骨架/新编曲交给 AI）', async () => {
+  const ctx = toolContext({
+    tracks: [
+      { id: 't1', clips: [{ id: 'c1', notes: [], startBeat: 0, lengthBeats: 4 }], audioClips: [] },
+      { id: 't2', clips: [{ id: 'c2', notes: [], startBeat: 0, lengthBeats: 4 }], audioClips: [] },
+    ],
+  })
+  const result = await runGenerateAudio(
+    { mode: 'ai_cover', caption: 'new arrangement', trackIds: ['t1', 't2', 't1', 'missing'] },
+    ctx,
+  )
+  if (!result.ok) throw new Error(result.message)
+  expectEq('trackIds（去重 + 过滤不存在）', result.data?.audioPlan?.trackIds, ['t1', 't2'])
+  if (!/仅 2 条轨道/.test(result.message)) throw new Error(`回执应说明只渲染 2 条轨：${result.message}`)
+  return 'trackIds 去重/过滤后写进计划'
+})
+
+check('generate_audio：trackIds 全不存在 / 用在错误模式 → 明确拒绝', async () => {
+  const ctx = toolContext({
+    tracks: [{ id: 't1', clips: [{ id: 'c1', notes: [], startBeat: 0, lengthBeats: 4 }], audioClips: [] }],
+  })
+  const missing = await runGenerateAudio({ mode: 'ai_cover', caption: 'x', trackIds: ['nope'] }, ctx)
+  if (missing.ok) throw new Error('不存在的 trackIds 应失败')
+  if (!/没有一条/.test(missing.message)) throw new Error(missing.message)
+  const wrongMode = await runGenerateAudio({ mode: 'text_to_audio', caption: 'x', trackIds: ['t1'] }, ctx)
+  if (wrongMode.ok) throw new Error('text_to_audio 不该接受 trackIds')
+  if (!/只适用于/.test(wrongMode.message)) throw new Error(wrongMode.message)
+  return '非法 trackIds 被挡住'
 })
 
 check('generate_audio：ai_cover 缺 caption / 带 quality / 要人声 → 明确拒绝', async () => {
@@ -1037,6 +1067,18 @@ check('parseAudioPlan：ai_cover 保留 coverStrength 并 clamp 到 0–1', () =
   const okPlan = parseAudioPlan({ audioPlan: { mode: 'ai_cover', caption: 'x', coverStrength: 0.55 } })
   expectEq('正常值', okPlan?.coverStrength, 0.55)
   return 'clamp + 丢弃非法值'
+})
+
+check('parseAudioPlan：trackIds 去重/限长，非数组丢弃', () => {
+  const plan = parseAudioPlan({ audioPlan: { mode: 'ai_cover', caption: 'x', trackIds: ['a', 'a', 'b'] } })
+  expectEq('去重', plan?.trackIds, ['a', 'b'])
+  const garbage = parseAudioPlan({ audioPlan: { mode: 'ai_cover', caption: 'x', trackIds: 'a,b' } })
+  expectEq('非数组', garbage?.trackIds, undefined)
+  const many = parseAudioPlan({
+    audioPlan: { mode: 'ai_cover', caption: 'x', trackIds: Array.from({ length: 80 }, (_, i) => `t${i}`) },
+  })
+  expectEq('限长 64', many?.trackIds?.length, 64)
+  return '去重 / 丢弃非数组 / 上限 64'
 })
 
 check('buildHeuristicAudioPlan：AI 重编说法 → ai_cover，纯渲染 → midi_to_audio', () => {

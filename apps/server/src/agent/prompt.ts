@@ -18,7 +18,8 @@ const INTENT_INSTRUCTIONS: Record<string, string> = {
   audio:
     '用户想生成/渲染音频。先判断他要「忠实导出」还是「AI 成品」，再直接执行，不要反问：' +
     '只是把现有编曲导出/转 WAV/听现在这样 → generate_audio(mode:"midi_to_audio")（采样器忠实渲染，不跑 AI 模型，结果与 MIDI 一一对应，不要称它为 AI 生成）；' +
-    '要用 AI 把现有编曲做成成品/换编制/换音色/更好听 → generate_audio(mode:"ai_cover", caption:"...")（AI 重编，会改细节、不保证逐音对齐）；' +
+    '要用 AI 把现有编曲做成成品/换编制/换音色/更好听 → generate_audio(mode:"ai_cover", caption:"...")（AI 重编，会改细节、不保证逐音对齐；默认贴近度 0.45，想保结构就传 0.7+）；' +
+    '要「真正重新编曲」（换乐器/加声部/改节奏）→ 先用 MIDI 工具把新编曲写成新轨道，再把所有 MIDI 轨静音（trackIds 渲染会忽略静音），用 generate_audio(mode:"ai_cover", trackIds:[新轨], coverStrength:0.45, caption:"目标编制")；不要只拿整工程混音跑 cover；' +
     '从零要一首新歌、或工程里没有可用素材 → mode:"text_to_audio"；要分轨/分开乐器 → mode:"audio_with_stems"。' +
     '用户说「用 AI 引擎渲染 / 让 AI 发挥 / 别只是把 MIDI 转音频」时选 ai_cover。' +
     'caption 必须是英文提示词（风格/乐器/情绪/BPM），ai_cover 用它描述目标编制。' +
@@ -52,15 +53,22 @@ const AUDIO_GUIDE = `音频产出判定（对应 generate_audio 工具）：
 2. 模式选择（直接执行，不要反问用户）——「渲染」和「创作」是两件事：
    - midi_to_audio：忠实渲染。用浏览器采样器把当前 MIDI 逐音变成音频，不启动 AI 模型，结果与 MIDI 一一对应。
      适用于「导出 / 转 WAV / 听听现在这样 / 备份一份音频」。不接受 engine / quality，也不要说它用了 AI 引擎。
-   - ai_cover：AI 重编（cover）。先渲染当前工程作为参考，再交给 AI 引擎保结构换编制/换音色；会改细节、不保证逐音对齐。
+   - ai_cover：AI 重编（cover）。先渲染当前工程（或 trackIds 指定的骨架轨）作为参考，再交给 AI 引擎重新编配/换音色；会改细节、不保证逐音对齐。
      适用于「用 AI 做成成品 / 用 AI 引擎渲染 / 换编制 / 重新配器 / 让 AI 发挥 / 比 MIDI 好听」。
-     必须给英文 caption 描述目标风格与编制；可用 coverStrength 0–1（默认 0.7，越大越贴近原结构）。
+     caption 必须描述**改变后的目标编制**，不要复述现有配器；coverStrength 0.35–0.5=重新编配（默认 0.45），0.65–0.8=保结构换音色。
+     想真正换编制：用 trackIds 只传旋律/和弦骨架轨（整工程混音会把结果锁死在原编制）；或者先用 MIDI 工具把新编曲写成新轨道，再用 trackIds 只重编这些新轨。
      XL 4B 仅 Windows 现代运行时可用；macOS/Linux 只能 2b，传 xl 会被工具拒绝——如实告诉用户，不要承诺 XL。
    - text_to_audio：从零用文本生成一首新歌，不读取工程音符；工程为空或用户只要新歌时用。
    - audio_with_stems：先生成整曲再分离分轨。
-3. 关键区分：用户抱怨「只是把 MIDI 转成音频 / 没发挥 AI」时，不要再选 midi_to_audio；改用 ai_cover。
+3. 关键区分：
+   - 用户抱怨「只是把 MIDI 转成音频 / 没发挥 AI」→ 不要再用 midi_to_audio；要 AI 参与就用 ai_cover（0.35–0.5 的低贴近度）。
+   - 用户要「真正重新编曲 / 换乐器 / 加声部 / 改节奏」→ 先用 MIDI 工具新增或改写轨道，
+     再把**所有 MIDI 轨（含新编曲）静音**，只对 trackIds 指定的新编曲跑 ai_cover；
+     trackIds 渲染会忽略静音，所以参考音频不受影响，完成后只有 AI 音频轨可听，解静音即可 A/B。
+     不要只拿整工程混音跑 cover，那样只会得到「原编曲 + 混音」。
 4. caption 必须是由用户描述提炼的**英文**提示词，包含风格、主要乐器、情绪、速度；不要原样塞中文。
 5. bpm / durationSec / startBeat 省略时分别用工程 BPM / 30s / 播放头；分轨模式默认 guitar、bass、drums；ai_cover 固定从第 0 拍落轨。
+   trackIds 只用于 midi_to_audio / ai_cover：只渲染或只把这几条轨交给 AI（例如旋律+和弦骨架，或刚写好的新编曲）。
 6. 调用 generate_audio 后，用一两句话说明「选了哪种模式、为什么」即可；音频生成在界面中异步执行并自动落轨，你不需要轮询，也不要在文字里假装已经生成完成。不要声称 AI 引擎参与了 midi_to_audio，也不要把 ai_cover 说成逐音渲染。
 7. 如果工具返回失败（例如工程为空、参数不适用），按提示先补 MIDI 或换模式/调整参数再重试；不要空口承诺生成了音频。`
 

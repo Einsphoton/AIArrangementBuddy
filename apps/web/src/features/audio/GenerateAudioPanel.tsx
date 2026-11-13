@@ -106,7 +106,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
   /** P9：引擎量级（标准档 / 增强版），默认标准档；增强版不可用时自动退回标准档 */
   const [engine, setEngine] = useState<CompanionEngine>('2b')
   /** P7-B：AI 重编（cover）——把当前工程渲染成 WAV 后整体换编制 */
-  const [coverStrength, setCoverStrength] = useState(0.7)
+  const [coverStrength, setCoverStrength] = useState(0.5)
   const [coverRendering, setCoverRendering] = useState(false)
   const [coverProgress, setCoverProgress] = useState(0)
   const [coverError, setCoverError] = useState<string | null>(null)
@@ -745,7 +745,7 @@ export function GenerateAudioPanel({ onClose }: { onClose: () => void }) {
                   <span className="mono w-8 shrink-0 text-right">{coverStrength.toFixed(2)}</span>
                 </label>
                 <p className="mt-1 text-[10px] leading-relaxed text-ink-4">
-                  越高越保留你 MIDI 的旋律/节奏走向（0.7 推荐）；越低越自由。重编产物作为新音频轨加入，不改动原轨。
+                  越高越保留你 MIDI 的旋律/节奏走向：0.65–0.8 保结构换音色；0.4–0.5 重新编配（推荐）；0.3 以下更自由。重编产物作为新音频轨加入，不改动原轨。
                 </p>
                 {coverRendering && <p className="mt-1 text-[10.5px] text-ink-3">渲染进度 {Math.round(coverProgress * 100)}%…</p>}
                 {coverError && <p className="mt-1 text-[10.5px] leading-relaxed text-danger">{coverError}</p>}

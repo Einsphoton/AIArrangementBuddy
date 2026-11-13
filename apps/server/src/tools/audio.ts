@@ -133,8 +133,9 @@ export const AUDIO_TOOLS: ToolDef[] = [
       '把用户的「音频/成品/分轨」需求交给应用执行。先判断用户要的是「忠实导出」还是「AI 成品」，再调用：' +
       'text_to_audio=从零用文本生成整首（不读取工程 MIDI；没有可用编曲或用户只想要一首新歌时用）；' +
       'midi_to_audio=忠实渲染：用浏览器采样器把当前 MIDI 工程逐音渲染成音频（不启动 AI 模型，结果与 MIDI 一一对应）；' +
-      'ai_cover=AI 重编：先把当前工程渲染成参考音频，再交给 AI 引擎保结构换编制/换音色（会改细节、不保证逐音对齐；' +
-      '用户说「用 AI 渲染 / 用 AI 做成成品 / 换编制 / 重新配器 / 让它更好听」时用这个）；' +
+      'ai_cover=AI 重编：先把当前工程（或 trackIds 指定的骨架轨）渲染成参考音频，再交给 AI 引擎重新编配/换音色（会改细节、不保证逐音对齐；' +
+      '用户说「用 AI 渲染 / 用 AI 做成成品 / 换编制 / 重新配器 / 让它更好听」时用这个）。默认贴近度 0.45（0.35–0.5 重新编配，0.65–0.8 保结构换音色）；' +
+      '想真正改编制时用 trackIds 只把旋律/和弦骨架交给 AI，整工程混音会把它锁死在原编制上；' +
       'audio_with_stems=先生成整曲再分离分轨。' +
       '重要：midi_to_audio 不接受 engine/quality，也不要把它的结果说成「AI 引擎生成」；只有 text_to_audio / ai_cover / audio_with_stems 会启动 AI 模型。' +
       'caption 必须是由用户描述提炼的英文提示词（风格/乐器/情绪/BPM）；用户没提音频时不要调用本工具。' +
@@ -149,8 +150,13 @@ export const AUDIO_TOOLS: ToolDef[] = [
           '英文音频提示词：风格、主要乐器、情绪、BPM。例如 "warm cinematic piano with soft strings, slow, emotional, 72 bpm"。text_to_audio / audio_with_stems / ai_cover 必填（ai_cover 用它说明希望重编成什么风格/编制）；midi_to_audio 不需要',
         ),
         coverStrength: num(
-          'AI 重编的贴近度（仅 ai_cover，0–1）：越大越贴近原编曲结构（默认 0.7）；越小 AI 改动越自由',
+          'AI 重编的贴近度（仅 ai_cover，0–1）：0.65–0.8=保结构换音色；0.35–0.5=重新编配（默认 0.45，推荐用于「重新编曲/换编制」）；<0.3=更自由',
           { minimum: 0, maximum: 1 },
+        ),
+        trackIds: arr(
+          '只渲染 / 只作为 AI 重编参考的轨道 id（仅 midi_to_audio / ai_cover）；省略=整工程。' +
+            '想「只渲染新编曲」或「只把旋律+和弦交给 AI 补全新编制」时传它，避免整工程混音把结果锁死',
+          str('轨道 id（来自 get_project_summary）'),
         ),
         bpm: num('速度（20–320）；省略时用工程当前 BPM', { minimum: 20, maximum: 320 }),
         keyscale: str(
@@ -266,6 +272,23 @@ export const AUDIO_TOOLS: ToolDef[] = [
       }
       const renderMode = mode === 'midi_to_audio'
       const coverMode = mode === 'ai_cover'
+      // trackIds：只渲染 / 只作为 AI 参考的轨道。用于「只渲染新编曲」或「只把旋律+和弦骨架交给 AI」。
+      const rawTrackIds = Array.isArray(args.trackIds)
+        ? [...new Set(args.trackIds.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))]
+        : []
+      if (rawTrackIds.length && !renderMode && !coverMode) {
+        return {
+          ok: false,
+          message: 'trackIds 只适用于 midi_to_audio（只渲染这些轨）与 ai_cover（只把这些轨当 AI 参考）；其它模式请省略该参数。',
+        }
+      }
+      const trackIds = rawTrackIds.filter((id) => project.tracks.some((track) => track.id === id))
+      if (rawTrackIds.length && trackIds.length === 0) {
+        return {
+          ok: false,
+          message: `trackIds 里没有一条是当前工程的轨道 id；请先 get_project_summary 确认（收到：${rawTrackIds.slice(0, 6).join(', ')}）。`,
+        }
+      }
       if (renderMode || coverMode) {
         const hasContent = project.tracks.some((track) => track.clips.length > 0 || track.audioClips.length > 0)
         if (!hasContent) {
@@ -304,7 +327,7 @@ export const AUDIO_TOOLS: ToolDef[] = [
       const coverStrength = coverMode
         ? Number.isFinite(Number(args.coverStrength))
           ? clamp(Number(args.coverStrength), 0, 1)
-          : 0.7
+          : 0.45
         : undefined
       const audioPlan = {
         mode,
@@ -320,6 +343,7 @@ export const AUDIO_TOOLS: ToolDef[] = [
         // 演唱语言（可选）：只在要人声时有意义；规范化成小写 BCP-47，非法值丢弃由 Companion 兜底推断
         vocalLanguage: normalizeVocalLanguage(args.vocalLanguage),
         startBeat: renderMode || coverMode ? undefined : startBeat,
+        trackIds: renderMode || coverMode ? (trackIds.length ? trackIds : undefined) : undefined,
         trackName: typeof args.trackName === 'string' && args.trackName.trim() ? args.trackName.trim().slice(0, 60) : undefined,
         quality: args.quality === true || undefined,
         coverStrength,
@@ -332,6 +356,7 @@ export const AUDIO_TOOLS: ToolDef[] = [
         : ''
       const engineText = engine ? `，引擎：${ENGINE_LABEL[engine]}` : ''
       const keyscaleText = keyscale ? `，调性 ${keyscale}` : ''
+      const trackText = trackIds.length ? `，仅 ${trackIds.length} 条轨道` : ''
       const vocalText = wantsVocal ? '，含人声' : ''
       const skippedText = skippedVocalsStem
         ? '（注意：整曲是纯乐器、不含人声，已从分轨里去掉「人声」；要人声分轨请让整曲带人声后重试）'
@@ -354,11 +379,11 @@ export const AUDIO_TOOLS: ToolDef[] = [
       let summary: string
       if (renderMode) {
         summary =
-          `已安排忠实渲染：当前 MIDI 工程 → 音频（BPM ${bpm}${keyscaleText}；浏览器采样器逐音渲染，不启动 AI 模型，结果与 MIDI 一一对应；不适用引擎/精修参数）。` +
+          `已安排忠实渲染：当前 MIDI 工程 → 音频（BPM ${bpm}${keyscaleText}${trackText}；浏览器采样器逐音渲染，不启动 AI 模型，结果与 MIDI 一一对应；不适用引擎/精修参数）。` +
           '完成后自动加入音频轨。请如实告诉用户这是「忠实导出」，不要说用了 AI 引擎或精修模型。'
       } else if (coverMode) {
         summary =
-          `已安排 AI 重编（cover）：先渲染当前工程作为参考，再由 AI 引擎保结构换编制（BPM ${bpm}${keyscaleText}` +
+          `已安排 AI 重编（cover）：先渲染当前工程${trackText}作为参考，再由 AI 引擎重新编配（BPM ${bpm}${keyscaleText}` +
           `，贴近度 ${coverStrength?.toFixed(2)}${engineText}）。会改细节、不保证逐音对齐；原 MIDI 不变，完成后新增一条音频轨。` +
           '请告诉用户这是「AI 再创作」，不是逐音渲染。'
       } else {

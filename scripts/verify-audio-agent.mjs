@@ -210,6 +210,8 @@ async function main() {
       if (!tools.includes('generate_audio')) throw new Error('工具列表缺少 generate_audio')
       if (!/ai_cover/.test(system)) throw new Error('系统提示缺少 ai_cover 判定（AI 重编）')
       if (!/忠实渲染/.test(system)) throw new Error('系统提示没说明 midi_to_audio 是忠实渲染（不跑 AI）')
+      if (!/trackIds/.test(system)) throw new Error('系统提示没说明 trackIds（只渲染/只喂骨架）')
+      if (!/真正重新编曲/.test(system)) throw new Error('系统提示缺少「真正重新编曲」的 MIDI 先改、再 ai_cover 的路径')
       // 工具 schema 是模型路由的硬约束：必须暴露 ai_cover，且不再有含糊的 midi_then_audio
       const audioTool = (first.tools ?? []).find((tool) => tool.function?.name === 'generate_audio')
       const modes = audioTool?.function?.parameters?.properties?.mode?.enum ?? []
@@ -218,6 +220,8 @@ async function main() {
       if (!modes.includes('midi_to_audio') || !modes.includes('text_to_audio')) {
         throw new Error(`generate_audio.mode 缺少基础模式：${JSON.stringify(modes)}`)
       }
+      const props = audioTool?.function?.parameters?.properties ?? {}
+      if (!props.trackIds) throw new Error('generate_audio 缺少 trackIds 参数（只渲染/只喂骨架）')
       return `工具 ${tools.length} 个，system ${system.length} 字，mode ${modes.join('/')}`
     })
 

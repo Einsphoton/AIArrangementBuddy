@@ -67,7 +67,8 @@
 - `apps/server/src/tools/audio.ts`
   - `MODES` 改为 `text_to_audio / midi_to_audio / ai_cover / audio_with_stems`；
     `midi_then_audio` 返回迁移提示。
-  - 新增 `coverStrength`（0–1，缺省 0.7）。
+  - 新增 `coverStrength`（0–1，缺省 **0.45**：0.35–0.5 重新编配，0.65–0.8 保结构换音色）。
+  - 新增 `trackIds`：只渲染 / 只作为 AI 参考的轨道（新编曲、旋律+和弦骨架）。
   - 渲染模式拒绝 `engine/quality`；`ai_cover` 拒绝 `quality` 与 `instrumental:false`。
   - 回执按模式分写：
     - 渲染：「浏览器采样器逐音渲染，不启动 AI 模型……不要说用了 AI 引擎」；
@@ -106,7 +107,7 @@
 
 | 验证 | 结果 |
 |---|---|
-| `node scripts/test-audio-params.mjs` | 66/66。新增 15 条：渲染拒绝 engine/quality、回执不含「引擎：」、ai_cover 参数/缺省 strength/非法组合、`midi_then_audio` 迁移提示、parse clamp、启发式与意图判定 |
+| `node scripts/test-audio-params.mjs` | 69/69。新增 18 条：渲染拒绝 engine/quality、回执不含「引擎：」、ai_cover 参数/缺省 strength/非法组合、`midi_then_audio` 迁移提示、parse clamp、启发式与意图判定 |
 | `AUDIO_VERIFY_SKIP_BUILD=1 node scripts/verify-audio-intent.mjs` | 10/10。新增「ai_cover 无引擎时 blocked 且不偷偷渲染」「mock 节点下全链路：渲染参考 → `cover_audio`（strength/caption/sourceAssetId）→ 落 0 拍新轨」 |
 | `AUDIO_AGENT_SKIP_BUILD=1 node scripts/verify-audio-agent.mjs` | 4/4。新增断言：系统提示含 ai_cover + 忠实渲染说明；工具 schema 暴露 ai_cover、不再暴露 midi_then_audio |
 | `node scripts/verify-audio-stage.mjs` | 23/23。AI 重编场景（1440 / 1280）阶段轨、遥测、窄宽不溢出；顺带把 auto-resume 的「一键启动节点」也 mock 掉，避免验收进程真的 spawn companion |
@@ -147,6 +148,39 @@ cover_audio 完成：3.98MB（保结构换编制）
 ```
 
 `test-audio-params` 新增 5 条转换单测（24-bit/float32/32-bit/8-bit/非法编码），全量 66/66。
+
+---
+
+## 5.5 为什么「0.75 听起来还是原曲」+ 怎么真正重新编曲
+
+**实测**（同一份 21.78s 工程，同一 caption 族，2B turbo）：
+
+| coverStrength | 波形相关 | 包络相关 | 色度（和声/旋律）相关 | 起音相关 | 高频/空气感 | 频谱重心 |
+|---|---|---|---|---|---|---|
+| 0.75（旧默认） | **0.708** | 0.906 | 0.953 | 0.921 | 0.118 | 2482 Hz |
+| 0.45（新默认） | **0.223** | 0.650 | 0.899 | 0.757 | 0.236 | 3462 Hz |
+| 0.25 | 0.071 | 0.521 | 0.872 | 0.636 | — | — |
+
+0.75 时波形相关高达 0.71、起音相关 0.92 —— 模型基本在复刻原演奏，所以听起来就是
+「MIDI 渲染 + 混音」。0.45 时波形相关降到 0.22、高频/空气感翻倍，和声骨架仍在（0.90），
+才是「同一首歌的重新编配」。**旧默认值本身就是这次听感问题的直接原因。**
+
+同时，**整工程混音会把编制锁死**：源音频里已经有全部乐器，cover 没有空间再加新声部。
+因此新增 `trackIds`：
+
+- 只把**旋律 + 和弦骨架**交给 AI → 模型必须补全新编制；
+- 或让 Agent 先用 MIDI 工具把新编曲写成新轨（换乐器/加声部/改节奏），再只对这些新轨跑 cover。
+
+**Agent 工作流**（已用真实模型 dry-run 验证，工具序列）：
+1. `get_project_summary` 识别主旋律/和弦/段落；
+2. `update_track(mute)` 静音原轨；
+3. `create_track` + `generate_smart_clip` 新建电鼓/合成贝斯/电吉他/失真吉他/合成器琶音/主音加倍；
+4. `copy_clip` 把主旋律复制到新音色轨，`velocity_curve` 做力度层次；
+5. **把所有 MIDI 轨静音**（trackIds 渲染忽略静音），`generate_audio(mode:"ai_cover", trackIds:[7 条新轨], coverStrength:0.45, caption:"目标编制")`；
+6. 完成后只有 AI 音频轨可听，解静音原轨即可 A/B。
+
+这就是「AI 真正重新编曲」：编曲变化由 Agent 在 MIDI 层完成，AI 音频引擎负责音色/制作层；
+不是让 cover 从一整段成品混音里凭空发明新编曲。
 
 ---
 

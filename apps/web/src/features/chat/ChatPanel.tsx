@@ -151,6 +151,13 @@ const QUICK_ACTIONS: SamplePrompt[] = [
     intent: 'audio',
   },
   {
+    title: 'AI 重新编曲',
+    description: '',
+    prompt:
+      '保留主旋律与和弦走向，真正重新编配一版：新增目标编制的轨道（例如电吉他/合成器/鼓组/贝斯），改掉原来的配器与节奏层次，再把新编曲交给 AI 渲染成音频。不要只做音色替换，也不要覆盖原轨，原版留着 A/B。',
+    intent: 'audio',
+  },
+  {
     title: '生成分轨',
     description: '',
     prompt: '生成一首成品音频并分轨：流行乐队编制，先出整曲，再分别生成吉他、贝斯、鼓组分轨，各自成轨。',

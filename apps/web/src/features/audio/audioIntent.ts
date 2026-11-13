@@ -77,8 +77,10 @@ export interface AudioPlan {
    * 线索推断（Japanese/anime/J-ROCK → ja），不能推断时给 'en'。
    */
   vocalLanguage?: string
-  /** AI 重编贴近度（仅 ai_cover，0–1）：越大越贴近原结构，缺省 0.7 */
+  /** AI 重编贴近度（仅 ai_cover，0–1）：越大越贴近原结构，缺省 0.45 */
   coverStrength?: number
+  /** 只渲染 / 只作为 AI 参考的轨道 id（仅 midi_to_audio / ai_cover）；省略=整工程 */
+  trackIds?: string[]
   startBeat?: number
   trackName?: string
   quality?: boolean
@@ -323,10 +325,16 @@ export function parseAudioPlan(data: unknown): AudioPlan | null {
     startBeat: toNumber(value.startBeat),
     trackName: typeof value.trackName === 'string' ? value.trackName.slice(0, 60) : undefined,
     quality: value.quality === true,
-    // AI 重编贴近度：clamp 到 0–1，非法值当没给（执行阶段用 0.7 兜底）
+    // AI 重编贴近度：clamp 到 0–1，非法值当没给（执行阶段用 0.45 兜底）
     coverStrength: (() => {
       const parsed = toNumber(value.coverStrength)
       return parsed === undefined ? undefined : Math.min(1, Math.max(0, parsed))
+    })(),
+    // 只渲染 / 只作为 AI 参考的轨道：去重、限长；执行阶段再按工程过滤
+    trackIds: (() => {
+      if (!Array.isArray(value.trackIds)) return undefined
+      const ids = [...new Set(value.trackIds.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))]
+      return ids.length ? ids.slice(0, 64) : undefined
     })(),
     engine: value.engine === 'xl' ? 'xl' : value.engine === '2b' ? '2b' : undefined,
     priority: toPriority(value.priority),
@@ -667,6 +675,8 @@ async function runMidiRender(jobId: string, plan: AudioPlan) {
       sampleRate: 48000,
       bitDepth: 24,
       loudnessTargetLufs: -14,
+      // 只渲染指定轨（新编曲 / 单轨 bounce）；省略 = 整工程
+      trackIds: plan.trackIds,
       onProgress: (ratio) => {
         if (canceledJobs.has(jobId)) return
         useAudioJobStore.getState().updateStep(stepKey, { progress: clamp(ratio, 0, 0.9), status: 'running' })
@@ -773,6 +783,8 @@ async function runCoverFlow(jobId: string, plan: AudioPlan, bpm: number) {
       sampleRate: 48000,
       bitDepth: 24,
       loudnessTargetLufs: -14,
+      // 只把指定骨架轨交给 AI（旋律+和弦），整工程混音会把结果锁死在原编制上
+      trackIds: plan.trackIds,
       onProgress: (ratio) => {
         if (canceledJobs.has(jobId)) return
         useAudioJobStore.getState().updateStep(stepKey, { progress: clamp(ratio, 0, 1) * RENDER_SHARE, status: 'running' })
@@ -794,7 +806,7 @@ async function runCoverFlow(jobId: string, plan: AudioPlan, bpm: number) {
       {
         sourceAssetId: uploaded.asset.id,
         caption,
-        audioCoverStrength: plan.coverStrength ?? 0.7,
+        audioCoverStrength: plan.coverStrength ?? 0.45,
         engine: plan.engine,
       },
       project.id,
@@ -975,6 +987,14 @@ export async function runAudioPlan(plan: AudioPlan): Promise<void> {
   lastPlan = effectivePlan
   const mode: AudioMode = effectivePlan.mode
   const project = useStore.getState().project
+  // trackIds 必须真实存在：外部后端/旧计划可能带过期 id，过滤后为空就退回整工程
+  if (effectivePlan.trackIds?.length) {
+    const valid = effectivePlan.trackIds.filter((id) => project.tracks.some((track) => track.id === id))
+    if (valid.length !== effectivePlan.trackIds.length) {
+      effectivePlan = { ...effectivePlan, trackIds: valid.length ? valid : undefined }
+      lastPlan = effectivePlan
+    }
+  }
   const bpm = Number.isFinite(effectivePlan.bpm)
     ? Math.round(clamp(Number(effectivePlan.bpm), 20, 320))
     : Math.round(project.tempo)
