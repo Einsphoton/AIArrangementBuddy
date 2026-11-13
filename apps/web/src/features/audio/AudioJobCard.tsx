@@ -20,6 +20,7 @@ import {
   Copy,
   Download,
   LoaderCircle,
+  Play,
   RefreshCw,
   TriangleAlert,
   X,
@@ -54,6 +55,7 @@ import {
   stepMeta,
   type CheckItem,
 } from './AudioGenerationStage'
+import { useCompanionNode } from './useCompanionNode'
 
 /** 阻塞态自动检测 Companion 的轮询间隔（页面隐藏时跳过） */
 const DETECT_POLL_MS = 2500
@@ -224,6 +226,21 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
   const [companionFailed, setCompanionFailed] = useState(false)
   /** 同一阻塞任务只自动继续一次，避免节点状态抖动时重复拉起 */
   const autoResumedRef = useRef<string | null>(null)
+  /**
+   * P15：本机生成节点（Companion 进程）控制器。
+   *
+   * 这才是「等再久也不动」的解法：以前界面只给复制命令，而那个进程从来不会自己起来。
+   * 现在阻塞态直接给一个「启动生成节点」按钮，由服务端把本机节点拉起。
+   */
+  const nodeCtl = useCompanionNode({
+    onStarted: () => {
+      const current = useAudioJobStore.getState().job
+      if (current && current.status === 'blocked' && current.retryable) {
+        autoResumedRef.current = current.id
+        retryAudioJob(current.id)
+      }
+    },
+  })
 
   /* 运行 / 等待中每秒刷新计时（关闭卡片或组件卸载时自动清理） */
   useEffect(() => {
@@ -573,9 +590,31 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
             </div>
           )}
 
-          <div className="mt-2 flex items-center gap-1.5">
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {/* P15：主操作 = 由服务端把本机生成节点拉起来（原来只有「复制命令」，用户得自己开终端） */}
+            {job.blockReason === 'start-companion' && nodeCtl.available && (
+              <button
+                type="button"
+                data-audio-job-start-node
+                className="gen-btn gen-btn-accent"
+                disabled={nodeCtl.starting}
+                title={
+                  nodeCtl.starting
+                    ? '正在启动生成节点并等待注册…'
+                    : '在本机启动生成节点（Companion），成功后自动继续生成'
+                }
+                onClick={() => {
+                  void nodeCtl.start().then((online) => {
+                    if (online) pushToast('success', '生成节点已上线，继续生成音频…')
+                  })
+                }}
+              >
+                {nodeCtl.starting ? <LoaderCircle size={10} className="animate-spin" /> : <Play size={10} />}
+                {nodeCtl.starting ? '正在启动生成节点…' : '启动生成节点'}
+              </button>
+            )}
             {job.blockReason === 'start-companion' && job.hint && (
-              <button type="button" className="gen-btn gen-btn-accent" onClick={() => void copyHint()}>
+              <button type="button" className="gen-btn" onClick={() => void copyHint()}>
                 <Copy size={10} />
                 复制启动命令
               </button>
@@ -597,6 +636,16 @@ export function AudioJobCard({ compact = false }: { compact?: boolean }) {
               关闭
             </button>
           </div>
+
+          {/* 启动失败原因（服务端给的中文原因 / 日志尾部），不伪造成功 */}
+          {nodeCtl.error && (
+            <p
+              data-audio-job-node-error
+              className="mt-1.5 break-words rounded-lg border border-danger/25 bg-danger/8 px-2 py-1.5 text-[10.5px] leading-[15px] text-danger"
+            >
+              {nodeCtl.error}
+            </p>
+          )}
         </>
       )}
 

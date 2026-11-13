@@ -143,7 +143,18 @@ node scripts/companion.mjs --server http://127.0.0.1:8787 --name "本机 GPU" --
 
 ### 4.2 generate_audio（turbo）
 
-`task.params`：`{ caption, bpm?, keyscale?, durationSec?, seed? }`。
+`task.params`：`{ caption, bpm?, keyscale?, timesignature?, durationSec?, seed?, instrumental?, vocalLanguage? }`。
+
+`instrumental`（缺省 `true` = 纯乐器）决定歌词条件，是本轮「人声轨全是噪音」的修复点：
+
+| instrumental | 引擎 `lyrics` | `vocal_language` | 含义 |
+|---|---|---|---|
+| `true`（缺省/旧前端） | `"[Instrumental]"` | `"unknown"` | 与旧行为逐字节一致：明确告诉 DiT「不要人声」 |
+| `false`（要人声） | `""` | `ja` / `en` / 显式值 | `""` 的引擎语义是「让 LM 自己写歌词」 |
+
+旧实现无条件写 `[Instrumental]`，于是「caption 要日语男声」与「歌词条件禁止人声」自相矛盾 ——
+成品没有人声，再从这种源里 extract vocals 只能抽到噪声（实测 DC +0.6367 / 99.7% 能量）。
+语言按 caption 判（`japanese|j-rock|anime|日语…` → `ja`；其它 → `en`），`vocalLanguage` 显式值优先。
 
 1. 进进度 0.15「引擎启动中（turbo）」（引擎冷启动时）；
 2. `POST /synth?wav=1`（JSON，超时 900s）：
@@ -158,8 +169,13 @@ node scripts/companion.mjs --server http://127.0.0.1:8787 --name "本机 GPU" --
      "shift": 3.0, "use_cot_caption": false, "duration": 30
    }
    ```
+   要人声时同一请求体只变两处：`"lyrics": ""`、`"vocal_language": "ja"`。
    缺省值 `bpm=120`（夹到 30–300）、`keyscale="C major"`、`durationSec=30`（夹到 1–300）、`seed=0`（非负整数）。
-3. 校验返回字节是 `RIFF....WAVE`，`complete` 上传，文件名 `<taskId>.wav`。
+3. 校验返回字节是 `RIFF....WAVE`；**再跑一次 DC 安全网**：若该 16bit PCM WAV 的
+   `|每声道均值| > 0.05`（病态直流偏置），就地逐声道减去均值并打中文日志
+   「检测到异常直流偏置 (+0.63)，已就地校正」；正常音频（`|mean| < 0.01`）**逐字节不动**。
+   这是安全网不是根因修复 —— 根因是「不生成本来就没人声的源音频」。
+4. `complete` 上传，文件名 `<taskId>.wav`。
 
 ### 4.3 repaint_audio（sft）
 
@@ -184,7 +200,14 @@ node scripts/companion.mjs --server http://127.0.0.1:8787 --name "本机 GPU" --
 
 ### 4.4 generate_stem（lego 分轨，base）
 
-`task.params`：`{ sourceAssetId(必填), arm(必填), caption?, seed? }`；`arm` 合法值：`guitar` / `bass` / `drums` / `strings` / `keys` / `synth` / `vocals`。
+`task.params`：`{ sourceAssetId(必填), arm(必填), caption?, seed?, sourceInstrumental? }`；`arm` 合法值：`guitar` / `bass` / `drums` / `strings` / `keys` / `synth` / `vocals`。
+
+> **人声护栏（本轮）**：`extract` 是按源音频条件分离，源里没有的东西抽不出来。
+> 若 `arm=vocals` 且调用方明确告知源是纯乐器（`sourceInstrumental: true`，或 `sourceLyrics: "[Instrumental]"`），
+> Companion 直接以中文错误拒绝该任务：「这条整曲是按「纯乐器（无人声）」生成的…已跳过「人声」分轨」。
+> 前端在生成计划里就把该臂去掉（`resolveStemPlan`），整曲与其它分轨照常执行。
+> 来源未知（旧调用方不传）时不拦，保持兼容。
+> 另外 `vocals` 的 caption 用「a cappella 干声清唱」模板，不再沿用乐器隔离模板。
 
 1. **启动引擎前**校验 `sourceAssetId` 与 `arm`（非法 arm 立即 `complete(failed)`，中文原因列出合法值）；`base` 模型缺失也会在此阶段失败。
 2. 从 `{server}/api/assets/{sourceAssetId}/file` 下载源 WAV 到临时文件（复用 repaint 的下载逻辑），`finally` 删除。
@@ -229,6 +252,62 @@ node scripts/companion.mjs --server http://127.0.0.1:8787 --name "本机 GPU" --
 - **步数来源**：引擎只暴露任务级进度，不暴露采样步数；Companion 按请求里的 `inference_steps`（快速 8 / 精修 50 / 分轨 50）线性推算，并带 `estimated: true`。界面显示为 `≈第 N/M 步`，不冒充引擎精确值；若未来现代运行时的 job 状态返回 `progress`，会优先采用真实比例（`estimated: false`）。
 - **资源遥测**：每次 `progress`（约 2s）与心跳（5s）附带 `telemetry`：`cpuPct`（`ps` / Windows PowerShell 采样引擎进程）、`rssMb`、`gpuUtilPct`/`vramUsedMb`/`vramTotalMb`/`gpuTempC`（`nvidia-smi`，5s 缓存）、`sampledAt`。采样失败只返回空字段，绝不影响生成。
 - **服务端**：`GET /api/companion/tasks/:id` 同时返回 `phase/step/telemetry` 与执行节点快照 `worker.status.engine`，前端任务卡无需额外轮询 `/status`；`GET /api/companion/status` 的 workers 也带同一份引擎遥测。
+
+### 4.7 由服务端拉起生成节点（P15，单机形态）
+
+**为什么需要**：Companion 是独立进程（`scripts/companion.mjs`），注册之后服务端才会给它派单。在此之前产品里没有任何地方会启动它——界面只给「复制启动命令」，于是用户「让 AI 生成音频」时经常卡在「生成节点未连接」，等再久也不动，因为**那个进程从来就没被拉起来过**。单机形态（服务端与 GPU 同机）下，服务端可以自己把它启动起来。
+
+**自动拉起流程**（`apps/server/src/companion/supervisor.ts`）：提交生成任务（`POST /api/companion/tasks`）时若 worker 表里没有任何在线节点，服务端会：
+
+1. 拉起 `node scripts/companion.mjs --server <服务端地址> --engine --engine-idle 600`（`cwd` = 仓库根目录，子进程继承 `AIAB_DATA_DIR`，保证引擎目录 / 适配器 / 任务落盘与服务端一致）；
+2. 每 **200ms** 轮询一次 worker 表，最多等 **4s**（`DEFAULT_START_WAIT_MS=4000`；Companion 冷启动到 register 约 0.3s，留足余量）；
+3. 等待窗口内注册成功 → 任务正常入队，返回 `taskId` / `queuePosition` / `estimatedWaitSec`，前端照常轮询进度；
+4. 仍无在线节点 → 才返回 **503**，错误信息里带 `node.reason`（如「找不到生成节点脚本…」「自动启动已被禁用（AIAB_COMPANION_AUTOSTART=0）…」），前端据此显示「启动生成节点」按钮与日志尾部。
+
+并发提交复用同一次启动（不会拉起多个节点抢同一个任务）；已有在线节点时直接跳过，不碰进程。
+
+**接口**：
+
+| 方法 / 路径 | 说明 |
+|---|---|
+| `GET /api/companion/node` | 本机节点进程状态快照（字段见下表） |
+| `POST /api/companion/node/start` | body `{ waitMs?, force? }` → `{ ok, online, node }`；界面点「启动生成节点」时 `waitMs≈12000`（上限 30s，超出被夹到 0–30000） |
+| `POST /api/companion/node/stop` | → `{ ok, node }`；只停**服务端拉起的那个**进程，不影响用户手动启动的节点 |
+
+`GET /api/companion/node` 返回字段：
+
+| 字段 | 说明 |
+|---|---|
+| `available` | 本机是否有 `scripts/companion.mjs`（Docker / 只打包 server 时为 `false`） |
+| `autostart` | 是否允许自动启动（`AIAB_COMPANION_AUTOSTART`，默认 `true`） |
+| `controllable` | 是否允许「一键启动」= `available && autostart` |
+| `state` | `stopped` / `starting` / `running` / `failed` |
+| `pid` / `startedAt` | 服务端拉起的子进程 pid 与启动时刻（无进程时缺省） |
+| `reason` | 最近一次启动失败 / 进程退出的中文原因（界面直接展示） |
+| `exitCode` | 最近一次退出码（有则给，便于排查） |
+| `logPath` / `logTail` | 日志绝对路径 / 最近约 1.5KB 日志尾部（排障用） |
+| `command` | 节点启动命令（`available:false` 时给用户手动执行） |
+
+`GET /api/companion/status` 新增 `node` 字段（同一份对象）；当 worker 在线但子进程状态是 `stopped`（节点是用户手动启动的）时，`/api/companion/node` 会把 `state` 归一成 `running`。**「是否在线」永远以 worker 注册表为准，不看子进程是否存活。**
+
+**环境变量**：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AIAB_COMPANION_AUTOSTART` | 开 | 设为 `0`（也接受 `false` / `off` / `no`）→ 服务端不再自动拉起，只允许手动命令启动（脚本缺失时同理不可控） |
+| `AIAB_COMPANION_SERVER` | 按服务端 host/port 推导 | Companion 注册用的服务端地址；`host` 为 `0.0.0.0` / `::` 时用 `127.0.0.1`，反向代理 / 特殊网络下可显式覆盖 |
+
+**日志**：子进程的 stdout/stderr 追加写入 `<数据目录>/logs/companion-node.log`，每次启动前写入一行分隔标记（`===== <ISO 时间> 服务端拉起生成节点（<服务端地址>）=====`），不同次启动的日志不会混在一起；接口 `logTail` 返回最近约 1.5KB，从第一处换行后开始，避免展示被截断的半行。
+
+**退出回收**：服务端收到 `SIGINT` / `SIGTERM` 时调用 `shutdownCompanionNode()` 结束子进程树——Windows 用 `taskkill /pid <pid> /T /F`（`ace-server.exe` 是孙进程，只杀父进程会残留），其它平台 `SIGTERM` → 3s 后 `SIGKILL`。
+
+**边界**（不假装支持所有场景）：
+
+| 部署形态 | `available` | 处理 |
+|---|---|---|
+| 单机（服务端与 GPU 同机，仓库完整） | `true` | 界面可一键启动；提交任务时也会自动拉起 |
+| Docker 镜像 / 只打包 server（镜像内没有 `scripts/companion.mjs`） | `false` | 不能在本机拉起，界面回退到「复制启动命令」，必须到 GPU 机器上手动启动 |
+| 跨机（NAS 控制面 + 另一台 GPU 机器） | 取决于控制面是否有脚本 | 本机拉起没有意义（控制面没有 GPU），仍走手动命令 |
 
 ## 5. CLI 参考
 
@@ -363,6 +442,7 @@ node music-gen/tools/verify_companion.mjs
 | 心跳里没有 `engine` 字段 | mock 模式没有引擎；acestep 模式引擎未启动/已空闲退出/已崩溃时会省略 |
 | 服务端重启后 Companion 报会话失效 | 已自动重新注册（以心跳 401 为信号，claim 204 不代表失效）；若持续失败检查服务端 register 路由 |
 | 任务已入队但本机 Companion 空闲不认领 | 能力不匹配（models 不含 requiredVariant）或被更高优先级任务占位；看 §7.2/§7.4 与 `/api/companion/status` |
+| 界面点「启动生成节点」后仍离线 | 看接口返回的 `reason` / `logTail` 或 `<数据目录>/logs/companion-node.log`；常见原因是引擎运行时未安装、显存不足、`AIAB_COMPANION_AUTOSTART=0`，或部署在 Docker / 跨机形态（本机没有 `scripts/companion.mjs`，`available:false`，需到 GPU 机器手动启动） |
 | Windows 上 Ctrl+C 后仍有 `ace-server.exe` | 应不会发生（finally terminate→kill）；若有残留说明父进程被强杀，手动 `taskkill /IM ace-server.exe /F` 并反馈 |
 | 上传失败 / 413 | 反向代理 body 上限太小；调大 NAS 反代上限（音频可能几十 MB） |
 

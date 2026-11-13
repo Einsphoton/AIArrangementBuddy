@@ -11,6 +11,7 @@ import {
   Copy,
   HardDriveDownload,
   LoaderCircle,
+  Play,
   RefreshCw,
   Settings2,
   SlidersHorizontal,
@@ -20,6 +21,7 @@ import { useStore } from '../../store/store'
 import { cn } from '../../lib/format'
 import { resolveCompanionHint } from './CompanionBadge'
 import { TrainingButton } from './TrainingButton'
+import { useCompanionNode } from './useCompanionNode'
 
 const POLL_MS = 30_000
 
@@ -94,6 +96,8 @@ export function AudioEngineMenu({ onOpenAdvanced, onOpenTasks }: AudioEngineMenu
   const modelsReady = Boolean(provision?.runtime?.installed) && essential?.ready === true
   const missingBytes = provision?.missingBytes ?? 0
   const hint = resolveCompanionHint(companion?.hint)
+  /** P15：本机节点控制器（一键启动 Companion 进程，不用再手敲命令） */
+  const nodeCtl = useCompanionNode()
 
   const copyHint = async () => {
     try {
@@ -184,15 +188,43 @@ export function AudioEngineMenu({ onOpenAdvanced, onOpenTasks }: AudioEngineMenu
                   <p className="mt-1 text-[9.5px] leading-relaxed text-ink-4">
                     {modelsReady ? '模型已安装，只差启动 Companion（在跑 GPU 的机器上执行）。' : '首次使用需要先下载本机模型与运行时。'}
                   </p>
-                  <button
-                    type="button"
-                    className="mt-1.5 flex h-6 items-center gap-1 rounded-md border border-line bg-surface-2 px-1.5 text-[9.5px] text-ink-3 hover:text-ink"
-                    onClick={() => void copyHint()}
-                    title={hint}
-                  >
-                    <Copy size={9} />
-                    复制启动命令
-                  </button>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    {nodeCtl.available && (
+                      <button
+                        type="button"
+                        data-audio-node-start
+                        className="flex h-6 items-center gap-1 rounded-md border border-accent/45 bg-accent/15 px-1.5 text-[9.5px] font-medium text-accent-soft hover:bg-accent/22 disabled:opacity-50"
+                        disabled={nodeCtl.starting}
+                        title={
+                          nodeCtl.starting
+                            ? '正在启动生成节点并等待注册…'
+                            : '在本机启动生成节点（Companion），无需手动执行命令'
+                        }
+                        onClick={() => {
+                          void nodeCtl.start().then((started) => {
+                            if (!started) return
+                            pushToast('success', '生成节点已上线')
+                            void refresh()
+                          })
+                        }}
+                      >
+                        {nodeCtl.starting ? <LoaderCircle size={9} className="animate-spin" /> : <Play size={9} />}
+                        {nodeCtl.starting ? '正在启动…' : '启动生成节点'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="flex h-6 items-center gap-1 rounded-md border border-line bg-surface-2 px-1.5 text-[9.5px] text-ink-3 hover:text-ink"
+                      onClick={() => void copyHint()}
+                      title={hint}
+                    >
+                      <Copy size={9} />
+                      复制启动命令
+                    </button>
+                  </div>
+                  {nodeCtl.error && (
+                    <p className="mt-1 break-words text-[9.5px] leading-relaxed text-danger">{nodeCtl.error}</p>
+                  )}
                 </>
               )}
             </div>

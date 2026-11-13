@@ -27,6 +27,7 @@ import { registerImportRoutes } from './routes/import.js'
 import { registerMixRoutes } from './routes/mix.js'
 import { registerAssetRoutes } from './routes/assets.js'
 import { registerCompanionRoutes } from './routes/companion.js'
+import { shutdownCompanionNode } from './companion/supervisor.js'
 import { registerSyncRoutes } from './routes/sync.js'
 import { registerVst3Routes } from './routes/vst3.js'
 import { registerProvisionRoutes } from './routes/provision.js'
@@ -139,6 +140,12 @@ async function main(): Promise<void> {
     shuttingDown = true
     process.stdout.write(`\n收到 ${signal}，正在关闭服务…\n`)
     cancelActiveAiRun()
+    // P15：回收由服务端拉起的生成节点进程树（否则会残留 companion / ace-server.exe）
+    try {
+      shutdownCompanionNode()
+    } catch {
+      /* 回收失败不阻塞退出 */
+    }
     try {
       await app.close()
     } finally {

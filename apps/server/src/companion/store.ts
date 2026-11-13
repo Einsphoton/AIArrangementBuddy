@@ -263,25 +263,50 @@ function persist(): void {
   }
 }
 
+/**
+ * 把某个 worker 的在途任务放回队列（worker 被移除 / 离线时用）。
+ *
+ * 为什么必须做：任务只有被派单的 worker 才能 complete。worker 记录被删掉后，
+ * 该任务既没人完成、也没人认领，会一直挂在 `running` 直到 10 分钟租约超时——
+ * 界面看起来就是「卡住了」。这里立刻退回队列，让别的节点能接。
+ */
+function requeueWorkerTasks(workerId: string, message: string, now = Date.now()): void {
+  for (const task of tasks) {
+    if (task.workerId !== workerId) continue
+    if (task.status !== 'claimed' && task.status !== 'running') continue
+    task.status = 'queued'
+    task.workerId = undefined
+    task.progress = 0
+    task.message = message
+    task.updatedAt = now
+  }
+}
+
 /** 回收过期 worker 与超时租约（不抛异常） */
 function housekeeping(): void {
   const now = Date.now()
   for (const [id, worker] of workers) {
     if (now - worker.lastHeartbeatAt > WORKER_TTL_MS) {
       workers.delete(id)
-      for (const task of tasks) {
-        if (task.workerId === id && (task.status === 'claimed' || task.status === 'running')) {
-          task.status = 'queued'
-          task.workerId = undefined
-          task.progress = 0
-          task.message = '工作节点离线，任务已重新排队'
-          task.updatedAt = now
-        }
-      }
+      requeueWorkerTasks(id, '工作节点离线，任务已重新排队', now)
     }
   }
   for (const task of tasks) {
-    if ((task.status === 'claimed' || task.status === 'running') && now - task.updatedAt > TASK_LEASE_MS) {
+    if (task.status !== 'claimed' && task.status !== 'running') continue
+    /**
+     * 认领它的 worker 已经不在表里（服务端重启丢内存表 / 节点被清理 / 旧落盘数据）：
+     * 立刻退回队列，而不是等 10 分钟租约。否则任务会一直显示「运行中」但没有任何进程在做，
+     * 用户看到的就是「卡住不动」。
+     */
+    if (task.workerId && !workers.has(task.workerId)) {
+      task.status = 'queued'
+      task.workerId = undefined
+      task.progress = 0
+      task.message = '执行节点已离线，任务已重新排队'
+      task.updatedAt = now
+      continue
+    }
+    if (now - task.updatedAt > TASK_LEASE_MS) {
       task.status = 'queued'
       task.workerId = undefined
       task.progress = 0
@@ -546,6 +571,29 @@ export function listTasks(limit = 20): Array<CompanionTask & QueueInfo> {
 export function listWorkers(): Array<Omit<CompanionWorker, 'token'>> {
   housekeeping()
   return [...workers.values()].map(({ token: _token, ...rest }) => rest)
+}
+
+/**
+ * 立刻忘记 `sinceMs` 之后注册的 worker（P15：服务端停掉自己拉起的节点时调用）。
+ *
+ * 为什么要显式清：worker 记录靠心跳 TTL（60s）回收，进程被杀后记录还会「在线」一分钟。
+ * 这段时间里 `POST /api/companion/tasks` 会以为有节点可派而不再尝试拉起，任务就干等。
+ * 只清「我们刚停掉那一刻之后注册的」worker，用户手动启动的节点 / 其它机器的节点不受影响
+ * （它们即使被误清也会在下次心跳 401 时自动重新注册，见 docs/COMPANION.md §1）。
+ */
+export function forgetWorkersRegisteredSince(sinceMs: number): number {
+  let removed = 0
+  const now = Date.now()
+  for (const [id, worker] of workers) {
+    if (worker.registeredAt >= sinceMs) {
+      workers.delete(id)
+      // 在途任务立刻退回队列：否则它会挂在 running 直到 10 分钟租约超时（界面像卡死）
+      requeueWorkerTasks(id, '生成节点已停止，任务已重新排队', now)
+      removed++
+    }
+  }
+  if (removed > 0) persist()
+  return removed
 }
 
 /** 队列按优先级分组计数 */
