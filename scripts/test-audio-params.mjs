@@ -141,6 +141,8 @@ const {
   normalizeKeyscale,
   normalizeTimesignature,
   presetForVariant,
+  readWavInfo,
+  toEngineDecodableWav,
   QUALITY_GUIDANCE,
   QUALITY_PEAK_CLIP,
   QUALITY_SHIFT,
@@ -1057,6 +1059,97 @@ check('detectAudioIntent：AI 重编 / 换编制 也算音频意图', () => {
   }
   if (detectAudioIntent('把和弦改成 C-G-Am-F')) throw new Error('编曲请求不该被识别为音频')
   return '4 条 AI 重编说法命中，和声编辑不误判'
+})
+
+/* ================================================================== */
+/* G. 源音频 → 引擎：24-bit 必须转 16-bit（cover / repaint / stem 共用）   */
+/* ================================================================== */
+
+console.log(`\n${C.bold}G. 源音频解码：引擎只认 16-bit（修复 400 failed to decode audio）${C.reset}`)
+
+/** 构造最小 WAV（单声道，便于逐采样断言） */
+function makeWav({ format = 1, bits = 16, sampleRate = 8000, samples }) {
+  const bytesPer = bits / 8
+  const dataSize = samples.length * bytesPer
+  const buffer = Buffer.alloc(44 + dataSize)
+  buffer.write('RIFF', 0, 'ascii')
+  buffer.writeUInt32LE(36 + dataSize, 4)
+  buffer.write('WAVE', 8, 'ascii')
+  buffer.write('fmt ', 12, 'ascii')
+  buffer.writeUInt32LE(16, 16)
+  buffer.writeUInt16LE(format, 20)
+  buffer.writeUInt16LE(1, 22)
+  buffer.writeUInt32LE(sampleRate, 24)
+  buffer.writeUInt32LE(sampleRate * bytesPer, 28)
+  buffer.writeUInt16LE(bytesPer, 32)
+  buffer.writeUInt16LE(bits, 34)
+  buffer.write('data', 36, 'ascii')
+  buffer.writeUInt32LE(dataSize, 40)
+  samples.forEach((value, index) => {
+    const at = 44 + index * bytesPer
+    if (format === 3) {
+      if (bits === 32) buffer.writeFloatLE(value, at)
+      else buffer.writeDoubleLE(value, at)
+    } else if (bits === 8) buffer.writeUInt8(value, at)
+    else if (bits === 16) buffer.writeInt16LE(value, at)
+    else if (bits === 24) buffer.writeIntLE(value, at, 3)
+    else buffer.writeInt32LE(value, at)
+  })
+  return buffer
+}
+
+check('toEngineDecodableWav：24-bit PCM → 16-bit，采样率/声道/时长不变', () => {
+  const src = makeWav({ bits: 24, samples: [0x400000, -0x400000, 0x7fffff] })
+  const out = toEngineDecodableWav(src)
+  const info = readWavInfo(out)
+  expectEq('format', info.audioFormat, 1)
+  expectEq('bits', info.bitsPerSample, 16)
+  expectEq('channels', info.channels, 1)
+  expectEq('sampleRate', info.sampleRate, 8000)
+  expectEq('duration', Number(info.durationSec.toFixed(6)), 3 / 8000)
+  expectEq('+0.5', out.readInt16LE(44), 16384)
+  expectEq('-0.5', out.readInt16LE(46), -16384)
+  expectEq('full scale', out.readInt16LE(48), 32767)
+  return '24-bit 0x400000 → 16384，时长保持'
+})
+
+check('toEngineDecodableWav：canonical 16-bit 原样返回（逐字节不变）', () => {
+  const src = makeWav({ bits: 16, samples: [1234, -4321] })
+  if (toEngineDecodableWav(src) !== src) throw new Error('16-bit 不该被重编码')
+  return '返回同一 Buffer'
+})
+
+check('toEngineDecodableWav：float32 → 16-bit', () => {
+  const src = makeWav({ format: 3, bits: 32, samples: [0.25, -0.5] })
+  const out = toEngineDecodableWav(src)
+  expectEq('bits', readWavInfo(out).bitsPerSample, 16)
+  expectEq('+0.25', out.readInt16LE(44), 8192)
+  expectEq('-0.5', out.readInt16LE(46), -16384)
+  return 'float 归一化到 int16'
+})
+
+check('toEngineDecodableWav：32-bit PCM / 8-bit PCM 也能转', () => {
+  const pcm32 = toEngineDecodableWav(makeWav({ bits: 32, samples: [0x40000000, -0x40000000] }))
+  expectEq('32-bit +0.5', pcm32.readInt16LE(44), 16384)
+  expectEq('32-bit -0.5', pcm32.readInt16LE(46), -16384)
+  const pcm8 = toEngineDecodableWav(makeWav({ bits: 8, samples: [192, 64] }))
+  expectEq('8-bit +0.5', pcm8.readInt16LE(44), 16384)
+  expectEq('8-bit -0.5', pcm8.readInt16LE(46), -16384)
+  return '32-bit / 8-bit 均落到 16-bit'
+})
+
+check('toEngineDecodableWav：不支持的编码给出明确中文错误', () => {
+  // 用 ADPCM（format=2）伪装一个 16-bit WAV：位深合法但编码不支持
+  const bad = makeWav({ bits: 16, samples: [0, 0] })
+  bad.writeUInt16LE(2, 20)
+  let message = ''
+  try {
+    toEngineDecodableWav(bad)
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error)
+  }
+  if (!/不支持的 WAV 编码/.test(message)) throw new Error(`应报「不支持的 WAV 编码」，实际：${message}`)
+  return message
 })
 
 /* ------------------------------------------------------------------ */

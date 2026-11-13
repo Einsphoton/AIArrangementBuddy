@@ -858,6 +858,102 @@ function findWavDataOffset(buffer) {
   return -1
 }
 
+/** 在 WAV 里定位指定 chunk 的数据起点（纯函数，找不到返回 -1）。 */
+function findWavChunkBody(buffer, chunkId) {
+  let offset = 12
+  while (offset + 8 <= buffer.length) {
+    const id = buffer.toString('latin1', offset, offset + 4)
+    const chunkSize = buffer.readUInt32LE(offset + 4)
+    const body = offset + 8
+    if (id === chunkId) return body
+    offset = body + chunkSize + (chunkSize % 2)
+  }
+  return -1
+}
+
+/**
+ * 把源 WAV 转成引擎可解码的 **16-bit PCM**（纯函数）。
+ *
+ * 为什么必须转：引擎的 WAV loader 只认 16-bit，24-bit 会直接
+ * `[WAV] Unsupported: format=1 bits=24`，/synth 返回
+ * `400 {"error":"failed to decode audio"}`。浏览器离线渲染为了导出质量默认
+ * 24-bit，于是 cover / repaint / stem 的源音频一进引擎就失败。
+ *
+ * 覆盖：PCM 8/16/24/32-bit、IEEE float 32/64、WAVE_FORMAT_EXTENSIBLE
+ * （按 subFormat GUID 取 PCM/float）。已经是 canonical 16-bit PCM 时原样返回；
+ * 其它情况输出标准 44 字节头 + 16-bit 采样（同采样率/声道/时长）。
+ * 非 WAV 或无法识别的编码抛中文错误，调用方按「源资产不可用」处理。
+ */
+export function toEngineDecodableWav(buffer) {
+  const info = readWavInfo(buffer)
+  const dataOffset = findWavDataOffset(buffer)
+  if (dataOffset < 0) throw new Error('不是有效 WAV（找不到 data 块）')
+  const isCanonical16 =
+    info.audioFormat === 1 &&
+    info.bitsPerSample === 16 &&
+    dataOffset === 44 &&
+    buffer.length >= 44 + info.dataSize
+  if (isCanonical16) return buffer
+
+  let format = info.audioFormat
+  if (format === 0xfffe) {
+    const fmtBody = findWavChunkBody(buffer, 'fmt ')
+    if (fmtBody < 0 || buffer.readUInt32LE(fmtBody - 4) < 40) {
+      throw new Error('不是有效 WAV（WAVE_FORMAT_EXTENSIBLE 的 fmt 块不完整）')
+    }
+    format = buffer.readUInt16LE(fmtBody + 24)
+  }
+  const bits = info.bitsPerSample
+  const containerBytes = Math.max(1, Math.round(bits / 8))
+  const channels = info.channels
+  const sampleRate = info.sampleRate
+  if (!channels || !sampleRate) throw new Error('不是有效 WAV（声道/采样率非法）')
+  const blockAlign = channels * containerBytes
+  const frames = Math.floor(info.dataSize / blockAlign)
+  if (frames <= 0) throw new Error('源 WAV 没有可解码的音频帧')
+
+  const isPcm = format === 1 && [8, 16, 24, 32].includes(bits)
+  const isFloat = format === 3 && [32, 64].includes(bits)
+  if (!isPcm && !isFloat) {
+    throw new Error(`不支持的 WAV 编码（format=${format}, ${bits}bit）`)
+  }
+
+  const outDataSize = frames * channels * 2
+  const out = Buffer.alloc(44 + outDataSize)
+  out.write('RIFF', 0, 'ascii')
+  out.writeUInt32LE(36 + outDataSize, 4)
+  out.write('WAVE', 8, 'ascii')
+  out.write('fmt ', 12, 'ascii')
+  out.writeUInt32LE(16, 16)
+  out.writeUInt16LE(1, 20) // PCM
+  out.writeUInt16LE(channels, 22)
+  out.writeUInt32LE(sampleRate, 24)
+  out.writeUInt32LE(sampleRate * channels * 2, 28)
+  out.writeUInt16LE(channels * 2, 32)
+  out.writeUInt16LE(16, 34)
+  out.write('data', 36, 'ascii')
+  out.writeUInt32LE(outDataSize, 40)
+
+  const readSample = (base) => {
+    if (isFloat) {
+      return bits === 32 ? buffer.readFloatLE(base) : buffer.readDoubleLE(base)
+    }
+    if (bits === 8) return (buffer.readUInt8(base) - 128) / 128
+    if (bits === 16) return buffer.readInt16LE(base) / 32768
+    if (bits === 24) return buffer.readIntLE(base, 3) / 8388608
+    return buffer.readInt32LE(base) / 2147483648
+  }
+  for (let frame = 0; frame < frames; frame += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      const src = dataOffset + (frame * channels + channel) * containerBytes
+      // 用 32768 定标再夹到 int16：-0.5 才能精确落到 -16384（乘 32767 会差 1 LSB）
+      const scaled = Math.round(Math.max(-1, Math.min(1, readSample(src))) * 32768)
+      out.writeInt16LE(Math.max(-32768, Math.min(32767, scaled)), 44 + (frame * channels + channel) * 2)
+    }
+  }
+  return out
+}
+
 /**
  * 是否该做 DC 校正（纯函数）：
  * - 不是 16bit PCM WAV → false（不动它）；读不出数据 → false；
@@ -2689,18 +2785,26 @@ async function downloadSourceToTemp({ serverUrl, sourceAssetId, ctx }) {
     const text = await response.text().catch(() => '')
     throw new Error(`下载源音频失败（HTTP ${response.status}）：${truncate(text, 300)}`)
   }
-  const bytes = Buffer.from(await response.arrayBuffer())
+  const raw = Buffer.from(await response.arrayBuffer())
   try {
-    readWavInfo(bytes)
+    readWavInfo(raw)
   } catch (error) {
     throw new Error(`源资产不是有效 WAV（${readableError(error)}）`)
+  }
+  // 引擎只认 16-bit PCM：24-bit 浏览器渲染 / 导入音频必须先转，否则
+  // /synth 直接 400 failed to decode audio（实测日志 [WAV] Unsupported: bits=24）。
+  let bytes
+  try {
+    bytes = toEngineDecodableWav(raw)
+  } catch (error) {
+    throw new Error(`源资产无法转成引擎可解码的 WAV（${readableError(error)}）`)
   }
   const tempFile = path.join(
     os.tmpdir(),
     `aiab-companion-src-${sanitizeFileName(sourceAssetId)}-${process.pid}-${Date.now()}.wav`,
   )
   writeFileSync(tempFile, bytes)
-  return { tempFile, bytes }
+  return { tempFile, bytes, converted: bytes !== raw }
 }
 
 /**
@@ -2844,7 +2948,7 @@ async function runRepaint(task, ctx, { engineManager, serverUrl }) {
     const info = readWavInfo(source.bytes)
     // 2) 拿到源时长后再校验 endSec 不越界（这一步仍在启动引擎之前）
     const validated = validateRepaintParams(params, { sourceDurationSec: info.durationSec })
-    ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
+    ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch${source.converted ? ' · 已转 16-bit 供引擎解码' : ''}`)
     const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath: validated.adapterPath })
     try {
       const regionSec = (validated.endSec - validated.startSec).toFixed(1)
@@ -2907,7 +3011,7 @@ async function runCover(task, ctx, { engineManager, serverUrl }) {
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: validated.sourceAssetId, ctx })
   try {
     const info = readWavInfo(source.bytes)
-    ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
+    ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch${source.converted ? ' · 已转 16-bit 供引擎解码' : ''}`)
     const engine = await acquireEngine({ ctx, engineManager, variant })
     try {
       await ctx.progress(0.15, engine.warm ? `复用常驻引擎（${variant}）` : `开始重编（cover，${variant}）`, {
@@ -2979,7 +3083,7 @@ async function runStem(task, ctx, { engineManager, serverUrl }) {
   const source = await downloadSourceToTemp({ serverUrl, sourceAssetId: validated.sourceAssetId, ctx })
   try {
     const info = readWavInfo(source.bytes)
-    ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch`)
+    ctx.log(`源音频 ${info.durationSec.toFixed(2)}s / ${info.sampleRate}Hz / ${info.channels}ch${source.converted ? ' · 已转 16-bit 供引擎解码' : ''}`)
     const engine = await acquireEngine({ ctx, engineManager, variant, adapterPath, lm: lmTier })
     try {
       await ctx.progress(0.3, `开始拆分 ${validated.arm}（${engineLabel(variant, adapterPath)}）`, {

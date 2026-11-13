@@ -106,7 +106,7 @@
 
 | 验证 | 结果 |
 |---|---|
-| `node scripts/test-audio-params.mjs` | 61/61。新增 10 条：渲染拒绝 engine/quality、回执不含「引擎：」、ai_cover 参数/缺省 strength/非法组合、`midi_then_audio` 迁移提示、parse clamp、启发式与意图判定 |
+| `node scripts/test-audio-params.mjs` | 66/66。新增 15 条：渲染拒绝 engine/quality、回执不含「引擎：」、ai_cover 参数/缺省 strength/非法组合、`midi_then_audio` 迁移提示、parse clamp、启发式与意图判定 |
 | `AUDIO_VERIFY_SKIP_BUILD=1 node scripts/verify-audio-intent.mjs` | 10/10。新增「ai_cover 无引擎时 blocked 且不偷偷渲染」「mock 节点下全链路：渲染参考 → `cover_audio`（strength/caption/sourceAssetId）→ 落 0 拍新轨」 |
 | `AUDIO_AGENT_SKIP_BUILD=1 node scripts/verify-audio-agent.mjs` | 4/4。新增断言：系统提示含 ai_cover + 忠实渲染说明；工具 schema 暴露 ai_cover、不再暴露 midi_then_audio |
 | `node scripts/verify-audio-stage.mjs` | 23/23。AI 重编场景（1440 / 1280）阶段轨、遥测、窄宽不溢出；顺带把 auto-resume 的「一键启动节点」也 mock 掉，避免验收进程真的 spawn companion |
@@ -116,7 +116,41 @@
 
 ---
 
-## 5. 边界与后续
+## 5. 追补：引擎只认 16-bit PCM（2026-11-13 晚）
+
+**现象**：AI 重编任务 5 秒内失败，`AI 音频生成引擎 /synth 失败（HTTP 400）：{"error":"failed to decode audio"}`。
+
+**定位**：引擎日志明确写着
+
+```
+[WAV] Unsupported: format=1 bits=24
+```
+
+浏览器离线渲染为了导出质量默认输出 **24-bit** WAV（`renderToWav({ bitDepth: 24 })`），
+而引擎的 WAV loader 只接受 16-bit。于是 cover / repaint / stem 的源音频一进 `/synth`
+就解码失败——不是模型问题，也不是采样参数问题。
+
+**修复**：`scripts/companion.mjs` 的 `downloadSourceToTemp()`（cover / repaint / stem
+共用的唯一源音频入口）新增 `toEngineDecodableWav()`：
+
+- PCM 8/16/24/32-bit、IEEE float 32/64、`WAVE_FORMAT_EXTENSIBLE`（按 subFormat 识别）统一转 16-bit PCM；
+- 采样率 / 声道 / 时长保持不变，canonical 16-bit 原样返回（不重编码）；
+- 无法识别的编码抛出中文错误，任务在「下载源音频」阶段就失败，不再把坏文件送进引擎；
+- 日志会写「已转 16-bit 供引擎解码」，便于排查。
+
+**真机验证**：用失败过的同一份 24-bit 源（21.78s / 48k / 2ch）重新提交 cover：
+
+```
+源音频 21.78s / 48000Hz / 2ch · 已转 16-bit 供引擎解码
+cover_audio 完成：3.98MB（保结构换编制）
+任务完成，assetId=asset_a33cdae34d02d4c8
+```
+
+`test-audio-params` 新增 5 条转换单测（24-bit/float32/32-bit/8-bit/非法编码），全量 66/66。
+
+---
+
+## 6. 边界与后续
 
 - **ACE-Step 不吃 MIDI**：`ai_cover` 的「参考」只能是渲染出来的 WAV，因此是「保结构再创作」
   （实测与源波形相关 ≈0.406），不是逐音还原。UI/文案必须继续分开承诺。
